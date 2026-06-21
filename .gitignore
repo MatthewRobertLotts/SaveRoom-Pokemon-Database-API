@@ -1,0 +1,47 @@
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*secret*
+*key*
+*.pem
+*.token
+rapidapi_key.txt
+
+# Python/runtime
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Logs/temp
+*.log
+*.tmp
+*.bak
+.DS_Store
+
+# Large/generated Pokémon DB assets
+full_tcgdex/
+!full_tcgdex/.gitkeep
+image_cache/
+recovered_images/
+ptcg_db_repo/
+prototype/
+raw_snapshots/
+
+# SQLite databases and WAL files anywhere
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+
+# Generated reports/exports if a reports folder is ever explicitly unignored
+full_tcgdex/reports/*.csv
+full_tcgdex/reports/*.json
+full_tcgdex/reports/*.log
+
+# Browser/tool caches
+.agent-browser/
+.cache/
+node_modules/
