@@ -625,14 +625,14 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
             params.append(bucket)
         params.append(limit)
         cur.execute(f'''
-            SELECT id, price_gbp, sold_date, condition, listing_url, source, imported_at,
-                   language_code, raw_title, bucket, confidence_score, match_notes,
+            SELECT id, card_id, language_code, condition, price_gbp, sold_date, listing_url,
+                   source, imported_at, raw_title, bucket, confidence_score, match_notes,
                    query, source_site, is_recommended_input, cache_key, fetched_at
             FROM uk_price_history WHERE {where} ORDER BY id DESC LIMIT ?
         ''', params)
         listings = [dict(zip(
-            ['id', 'price_gbp', 'sold_date', 'condition', 'listing_url', 'source', 'imported_at',
-             'language_code', 'raw_title', 'bucket', 'confidence_score', 'match_notes',
+            ['id', 'card_id', 'language_code', 'condition', 'price_gbp', 'sold_date', 'listing_url',
+             'source', 'imported_at', 'raw_title', 'bucket', 'confidence_score', 'match_notes',
              'query', 'source_site', 'is_recommended_input', 'cache_key', 'fetched_at'], r
         )) for r in cur.fetchall()]
         return {'card_id': card_id, 'language_code': language_code, 'count': len(listings), 'listings': listings}
