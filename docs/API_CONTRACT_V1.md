@@ -783,4 +783,251 @@ All new fields are **optional and backwards-compatible**. Existing fields retain
 - Existing response fields retain their current meaning and type.
 - The legacy `uk_price_history` and `uk_price_fetch_cache` tables remain intact.
 - Legacy aggregate graded fields are retained for compatibility but the new `matching` structure is preferred.
-- The `price_source` field is deprecated; use `source.description` instead.
+|- The `price_source` field is deprecated; use `source.description` instead.
+
+---
+
+## v9 — Inventory & Tenant Management (2026-06-23)
+
+### New schema tables (migration v28-v33)
+
+| Table | Purpose |
+|-------|---------|
+| `tenants` | Multi-tenant/single-tenant support |
+| `users` | Tenant-scoped users with roles |
+| `physical_items` | Physical card/slab/package instances |
+| `item_images` | Images attached to physical items |
+| `inventory_transactions` | Immutable inventory transaction log |
+| `inventory_snapshots` | Denormalized current-state cache |
+
+### Authentication and scope model
+
+All v9 endpoints accept `X-API-Key` header for optional auth. When auth is enforced:
+
+| Scope | Access |
+|-------|--------|
+| `cards:read` | Existing v1 access |
+| `read:inventory` | View inventory items, transactions, valuation |
+| `write:inventory` | Add/edit/move inventory items |
+| `admin:tenant` | Manage tenant settings and users |
+| `admin` | Legacy full admin access |
+
+By default, auth is optional. When `POKEMON_DB_REQUIRE_API_KEY=true`, keys must have the appropriate scope for each operation.
+
+### Inventory endpoints
+
+#### `GET /api/v1/inventory/items`
+List physical items with pagination and filtering.
+
+**Query parameters:** `limit` (max 200), `offset`, `status`, `location_code`, `q` (search)
+
+**Response:**
+```json
+{
+  "data": [
+    {
+      "item_id": "uuid-string",
+      "sku_id": 900001,
+      "sku_identity": {
+        "sku_id": 900001,
+        "sku_key": "en-sv03-223-NM",
+        "language_code": "en",
+        "condition_code": "NM",
+        "set_code": "sv03",
+        "collector_number": "223",
+        "name_english": "Charizard ex"
+      },
+      "certification_number": null,
+      "certification_company": null,
+      "certification_grade": null,
+      "item_condition": "Near Mint",
+      "acquired_date": "2026-06-22",
+      "acquired_price": 19.99,
+      "acquired_currency": "GBP",
+      "acquired_source": "eBay",
+      "location_code": "Shelf A1",
+      "status": "owned",
+      "notes": "Test item",
+      "current_value": null,
+      "current_value_currency": "GBP",
+      "images": [],
+      "last_transaction": { ... },
+      "tenant_id": 1,
+      "created_at": "2026-06-23T12:00:00Z",
+      "updated_at": "2026-06-23T12:00:00Z"
+    }
+  ],
+  "pagination": { "limit": 50, "offset": 0, "count": 1, "total": 1, "has_more": false }
+}
+```
+
+#### `POST /api/v1/inventory/items`
+Add a physical item to inventory. Creates an `acquired` transaction automatically.
+
+**Body:**
+```json
+{
+  "sku_id": 900001,
+  "item_condition": "Near Mint",
+  "acquired_date": "2026-06-22",
+  "acquired_price": 19.99,
+  "acquired_currency": "GBP",
+  "acquired_source": "eBay",
+  "location_code": "Shelf A1",
+  "status": "owned",
+  "notes": "Optional notes",
+  "certification_number": "12345678",
+  "certification_company": "PSA",
+  "certification_grade": 10,
+  "price_snapshot_id": 123
+}
+```
+
+**Validation:**
+- SKU must exist in `sellable_skus` table (v8)
+- Certification number + company must be unique
+- price_snapshot_id (optional) links to v8 pricing evidence
+
+#### `GET /api/v1/inventory/items/{item_id}`
+Get physical item details including SKU identity, images, last transaction, and current value (from v8 price snapshots).
+
+#### `PUT /api/v1/inventory/items/{item_id}`
+Update non-transactional metadata (condition, notes, location). Does NOT create a transaction record.
+
+**Body:** `InventoryItemUpdate` — fields: `item_condition`, `notes`, `location_code`, `location_detail`
+
+#### `PATCH /api/v1/inventory/items/{item_id}/status`
+Change item status (e.g., owned → consigned → sold). Creates an immutable transaction.
+
+**Body:**
+```json
+{
+  "status": "consigned",
+  "price": 25.00,
+  "currency": "GBP",
+  "counterparty": "TCGPlayer",
+  "reference": "order-123",
+  "notes": "Sent for consignment"
+}
+```
+
+#### `PATCH /api/v1/inventory/items/{item_id}/location`
+Change item location. Creates an immutable move transaction.
+
+**Body:**
+```json
+{
+  "location_code": "Safe Box B2",
+  "location_detail": "Row 3, Slot 7",
+  "notes": "Moved to secure storage"
+}
+```
+
+#### `GET /api/v1/inventory/items/{item_id}/transactions`
+Get transaction history for a specific item. Paginated, most recent first.
+
+**Query parameters:** `limit` (max 200), `offset`
+
+#### `POST /api/v1/inventory/items/{item_id}/transactions`
+Add a manual or correction transaction. Also updates the physical item's status/location if provided.
+
+**Body:**
+```json
+{
+  "transaction_type": "audit_correction",
+  "notes": "Manual correction during stocktake",
+  "to_status": "owned",
+  "to_location": "Shelf A1"
+}
+```
+
+#### `GET /api/v1/inventory/transactions`
+Global transaction feed with optional filters.
+
+**Query parameters:** `limit`, `offset`, `transaction_type`, `item_id`
+
+#### `GET /api/v1/inventory/locations`
+List all locations used in the tenant with item counts and status summaries.
+
+#### `GET /api/v1/inventory/valuation`
+Calculate the current market value of inventory using v8 price snapshots.
+
+**Response:**
+```json
+{
+  "data": {
+    "total_valuation": 4567.89,
+    "currency": "GBP",
+    "valuation_basis": {
+      "raw_items": 42,
+      "graded_items": 15,
+      "total_items": 57
+    },
+    "valuation_breakdown": {
+      "raw_value": 1250.00,
+      "graded_value": 3317.89
+    },
+    "confidence": "MEDIUM",
+    "as_of": "2026-06-23T12:00:00Z"
+  }
+}
+```
+
+### Tenant endpoints
+
+#### `GET /api/v1/tenants`
+List all tenants (admin/tenant scope required).
+
+#### `POST /api/v1/tenants`
+Create a new tenant.
+
+**Body:** `{"tenant_name": "My Shop", "tenant_slug": "my-shop", "is_active": true}`
+
+**Validation:** `tenant_slug` must be unique.
+
+#### `GET /api/v1/tenants/{slug}`
+Get tenant details by slug.
+
+#### `GET /api/v1/tenants/{slug}/users`
+List users in a tenant.
+
+#### `POST /api/v1/tenants/{slug}/users`
+Add a user to a tenant.
+
+**Body:** `{"username": "collector1", "email": "c@example.com", "role": "manager", "password": "..."}`
+
+**Validation:** username must be unique within the tenant.
+
+#### `DELETE /api/v1/tenants/{slug}/users/{user_id}`
+Remove a user from a tenant.
+
+### Transaction types
+
+| Type | Description |
+|------|-------------|
+| `acquired` | Item entered inventory (purchase, trade, gift) |
+| `moved` | Item changed location |
+| `consigned` | Item sent for consignment |
+| `sold` | Item sold |
+| `lost` | Item lost/missing |
+| `found` | Item found/recovered |
+| `returned` | Item returned |
+| `audit_correction` | Manual correction during stocktake |
+
+### Key design decisions
+
+- **Transactions are immutable.** Once created, a transaction cannot be edited or deleted. Corrections must be made with new transactions.
+- **Current state is derived.** The current status/location of an item is always the most recent transaction for that item.
+- **Inventory snapshots** are maintained as a performance cache and can be rebuilt from the transaction log.
+- **Tenant isolation** is enforced at the application layer via `WHERE tenant_id = ?` on every query.
+- **Default tenant (1)** exists for single-user mode; multi-tenant is future-compatible.
+- **Price evidence integration** links acquisitions to v8 `price_snapshots` and `price_observations` tables.
+- **Certification uniqueness** is enforced at the database level via partial unique index.
+
+### Backwards compatibility
+
+- All existing `/api/v1/` endpoints continue to work unchanged.
+- New inventory and tenant endpoints are additive — no existing responses are modified.
+- Auth is optional by default; existing keys without inventory scopes can still access v1 card/search endpoints.
+- The `developer_api_keys` table and legacy auth model remain intact.
+- Default tenant (slug: `default`) is auto-created on first run via migration v28b.

@@ -70,12 +70,35 @@ from pokemon_db_v5_api_models import (  # noqa: E402
     CardSearchResponseV1,
     HealthResponseV1,
     ImageDetailResponseV1,
+    InventoryItemCreate,
+    InventoryItemResponse,
+    InventoryItemUpdate,
+    InventoryListResponse,
+    InventoryLocationChange,
+    InventoryLocationList,
+    InventoryStatusChange,
+    InventoryTransactionCreate,
+    InventoryValuation,
+    InventoryValuationBreakdown,
+    InventoryValuationResponse,
     LanguageListResponseV1,
+    PhysicalItemResponse,
     PriceHistoryResponseV1,
     PriceSummaryResponseV1,
     QuotaStatusResponseV1,
+    SellableSKUIdentity,
     SetDetailResponseV1,
     SetListResponseV1,
+    TenantCreate,
+    TenantDetailResponse,
+    TenantListResponse,
+    TenantResponse,
+    TransactionListResponse,
+    TransactionResponse,
+    TransactionSummary,
+    UserCreate,
+    UserListResponse,
+    UserResponse,
 )
 
 DEFAULT_SETTINGS = settings_from_env()
@@ -1474,6 +1497,106 @@ LIMIT ? OFFSET ?
             ('v25', 'CREATE INDEX IF NOT EXISTS idx_sellable_skus_printing ON sellable_skus(printing_id)', 'Index for SKU lookup by printing.'),
             ('v26', 'CREATE INDEX IF NOT EXISTS idx_sellable_skus_key ON sellable_skus(sku_key)', 'Index for deterministic SKU key lookup.'),
             ('v27', 'CREATE INDEX IF NOT EXISTS idx_external_references_entity ON external_references(entity_type, entity_id)', 'Index for external reference lookup.'),
+            ('v28', """CREATE TABLE IF NOT EXISTS tenants (
+                tenant_id INTEGER PRIMARY KEY,
+                tenant_name TEXT NOT NULL,
+                tenant_slug TEXT NOT NULL UNIQUE,
+                is_active INTEGER DEFAULT 1,
+                config_json TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )""", 'Create multi-tenant table.'),
+            ('v28b', """INSERT OR IGNORE INTO tenants(tenant_id, tenant_name, tenant_slug)
+                VALUES (1, 'Default Tenant', 'default')""", 'Insert default tenant for single-user mode.'),
+            ('v29', """CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                tenant_id INTEGER NOT NULL DEFAULT 1,
+                username TEXT NOT NULL,
+                email TEXT,
+                hashed_password TEXT,
+                role TEXT DEFAULT 'viewer',
+                is_active INTEGER DEFAULT 1,
+                api_key TEXT,
+                api_key_scopes TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )""", 'Create users table with tenant scope.'),
+            ('v29b', 'CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_tenant ON users(tenant_id, username)', 'Unique username per tenant.'),
+            ('v30', """CREATE TABLE IF NOT EXISTS physical_items (
+                item_id TEXT PRIMARY KEY,
+                sku_id INTEGER NOT NULL,
+                certification_number TEXT,
+                certification_company TEXT,
+                certification_grade REAL,
+                certification_qualifier TEXT,
+                item_condition TEXT DEFAULT 'Near Mint',
+                acquired_date TEXT,
+                acquired_price REAL,
+                acquired_currency TEXT DEFAULT 'GBP',
+                acquired_source TEXT,
+                acquired_source_reference TEXT,
+                location_code TEXT DEFAULT 'Unknown',
+                location_detail TEXT,
+                status TEXT DEFAULT 'owned',
+                notes TEXT,
+                tenant_id INTEGER DEFAULT 1,
+                created_by TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )""", 'Create physical item instances table.'),
+            ('v30b', 'CREATE UNIQUE INDEX IF NOT EXISTS idx_certification_unique ON physical_items(certification_company, certification_number) WHERE certification_number IS NOT NULL', 'Unique constraint on certification.'),
+            ('v30c', 'CREATE INDEX IF NOT EXISTS idx_physical_items_sku ON physical_items(sku_id)', 'Index for SKU lookup.'),
+            ('v30d', 'CREATE INDEX IF NOT EXISTS idx_physical_items_tenant ON physical_items(tenant_id)', 'Index for tenant isolation.'),
+            ('v30e', 'CREATE INDEX IF NOT EXISTS idx_physical_items_status ON physical_items(status)', 'Index for status filtering.'),
+            ('v30f', 'CREATE INDEX IF NOT EXISTS idx_physical_items_location ON physical_items(location_code)', 'Index for location lookup.'),
+            ('v31', """CREATE TABLE IF NOT EXISTS item_images (
+                image_id INTEGER PRIMARY KEY,
+                item_id TEXT NOT NULL,
+                image_type TEXT,
+                image_url TEXT,
+                image_local_path TEXT,
+                is_primary INTEGER DEFAULT 0,
+                uploaded_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                created_by TEXT
+            )""", 'Create item images table.'),
+            ('v31b', 'CREATE INDEX IF NOT EXISTS idx_item_images_item ON item_images(item_id)', 'Index for image lookup by item.'),
+            ('v32', """CREATE TABLE IF NOT EXISTS inventory_transactions (
+                transaction_id INTEGER PRIMARY KEY,
+                item_id TEXT NOT NULL,
+                transaction_type TEXT NOT NULL,
+                quantity INTEGER DEFAULT 1,
+                from_location TEXT,
+                to_location TEXT,
+                from_status TEXT,
+                to_status TEXT,
+                price REAL,
+                currency TEXT DEFAULT 'GBP',
+                counterparty TEXT,
+                counterparty_id TEXT,
+                reference TEXT,
+                notes TEXT,
+                price_observation_id INTEGER,
+                price_snapshot_id INTEGER,
+                tenant_id INTEGER DEFAULT 1,
+                created_by TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )""", 'Create immutable inventory transaction log.'),
+            ('v32b', 'CREATE INDEX IF NOT EXISTS idx_inventory_transactions_item ON inventory_transactions(item_id)', 'Index for item transaction lookup.'),
+            ('v32c', 'CREATE INDEX IF NOT EXISTS idx_inventory_transactions_tenant ON inventory_transactions(tenant_id)', 'Index for tenant isolation on transactions.'),
+            ('v32d', 'CREATE INDEX IF NOT EXISTS idx_inventory_transactions_type ON inventory_transactions(transaction_type)', 'Index for transaction type filtering.'),
+            ('v32e', 'CREATE INDEX IF NOT EXISTS idx_inventory_transactions_created ON inventory_transactions(created_at)', 'Index for chronological ordering.'),
+            ('v33', """CREATE TABLE IF NOT EXISTS inventory_snapshots (
+                snapshot_id INTEGER PRIMARY KEY,
+                item_id TEXT NOT NULL,
+                current_location TEXT,
+                current_status TEXT,
+                current_condition TEXT,
+                last_transaction_id INTEGER,
+                as_of_date TEXT DEFAULT CURRENT_TIMESTAMP,
+                tenant_id INTEGER DEFAULT 1
+            )""", 'Create denormalized inventory snapshot for performance.'),
+            ('v33b', 'CREATE INDEX IF NOT EXISTS idx_inventory_snapshots_item ON inventory_snapshots(item_id)', 'Index for snapshot lookup by item.'),
+            ('v33c', 'CREATE INDEX IF NOT EXISTS idx_inventory_snapshots_tenant ON inventory_snapshots(tenant_id)', 'Index for tenant isolation on snapshots.'),
         ]
         ran: list[str] = []
         for version, sql, desc in migrations:
@@ -2777,6 +2900,838 @@ LIMIT ? OFFSET ?
         cur.execute('INSERT INTO uk_price_fetch_usage(query, language_code, card_id, status) VALUES (?, ?, ?, ?)', (query, language, card_id, 'ok'))
         conn.commit()
         return result
+
+    # ═══════════════════════════════════════════════════════════════════
+    # v9 — Inventory & Tenant Management
+    # ═══════════════════════════════════════════════════════════════════
+
+    # ── Helpers ──────────────────────────────────────────────────────
+
+    def ensure_inventory_support(conn: sqlite3.Connection) -> None:
+        """Ensure inventory tables exist. Tables are created by migration
+        framework; this just ensures the price prefix tables are also ready."""
+        cur = conn.cursor()
+
+    def require_scope(*scopes: str):
+        """Dependency factory: require at least one of the given scopes."""
+        def _check(auth: dict[str, Any] = Depends(require_v1_api_key)) -> dict[str, Any]:
+            if not auth.get('auth_required'):
+                return auth
+            user_scopes = auth.get('scopes', [])
+            if 'admin:all' in user_scopes or 'admin' in user_scopes:
+                return auth
+            for s in scopes:
+                if s in user_scopes:
+                    return auth
+            raise v1_error(403, 'insufficient_scope',
+                           f'Required scope: {", ".join(sorted(scopes))}',
+                           {'required_scopes': sorted(scopes), 'user_scopes': user_scopes})
+        return _check
+
+    def get_tenant_from_key(auth: dict[str, Any]) -> int:
+        """Resolve tenant_id from API key or return default.
+        In the current v1 key system, keys have a tenant_id resolved
+        from the users table. For now, return default tenant (1)."""
+        return 1
+
+    def build_sku_identity(conn: sqlite3.Connection, sku_id: int) -> dict[str, Any] | None:
+        """Build a SellableSKUIdentity by joining sellable_skus with canonical_printings."""
+        cur = conn.cursor()
+        row = cur.execute("""
+            SELECT s.sku_id, s.sku_key, s.language_code, s.condition_code,
+                   c.set_code, c.collector_number, c.name_english
+            FROM sellable_skus s
+            LEFT JOIN canonical_printings c ON c.printing_id = s.printing_id
+            WHERE s.sku_id = ?
+        """, (sku_id,)).fetchone()
+        if not row:
+            return None
+        return {
+            'sku_id': row['sku_id'],
+            'sku_key': row['sku_key'],
+            'language_code': row['language_code'],
+            'condition_code': row['condition_code'],
+            'set_code': row[4],
+            'collector_number': row[5],
+            'name_english': row[6],
+        }
+
+    def get_item_snapshot(conn: sqlite3.Connection, item_id: str, tenant_id: int) -> dict[str, Any] | None:
+        """Get current snapshot for a physical item. Falls back to the item itself."""
+        cur = conn.cursor()
+        row = cur.execute(
+            "SELECT * FROM inventory_snapshots WHERE item_id=? AND tenant_id=? ORDER BY snapshot_id DESC LIMIT 1",
+            (item_id, tenant_id),
+        ).fetchone()
+        if row:
+            return dict(row)
+        return None
+
+    def record_transaction(
+        conn: sqlite3.Connection,
+        item_id: str,
+        transaction_type: str,
+        tenant_id: int,
+        *,
+        quantity: int = 1,
+        from_location: str | None = None,
+        to_location: str | None = None,
+        from_status: str | None = None,
+        to_status: str | None = None,
+        price: float | None = None,
+        currency: str = 'GBP',
+        counterparty: str | None = None,
+        reference: str | None = None,
+        notes: str | None = None,
+        price_observation_id: int | None = None,
+        price_snapshot_id: int | None = None,
+        created_by: str = 'system',
+    ) -> int:
+        """Record an immutable inventory transaction and update the snapshot."""
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO inventory_transactions(
+                item_id, transaction_type, quantity,
+                from_location, to_location, from_status, to_status,
+                price, currency, counterparty, reference, notes,
+                price_observation_id, price_snapshot_id,
+                tenant_id, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            item_id, transaction_type, quantity,
+            from_location, to_location, from_status, to_status,
+            price, currency, counterparty, reference, notes,
+            price_observation_id, price_snapshot_id,
+            tenant_id, created_by,
+        ))
+        txn_id = cur.lastrowid
+        # Update snapshot
+        cur.execute("""
+            INSERT INTO inventory_snapshots(
+                item_id, current_location, current_status, current_condition,
+                last_transaction_id, tenant_id
+            ) VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            item_id,
+            to_location or from_location,
+            to_status or from_status,
+            None,  # condition not tracked in all transactions
+            txn_id,
+            tenant_id,
+        ))
+        conn.commit()
+        return txn_id
+
+    def get_current_valuation(conn: sqlite3.Connection, tenant_id: int) -> dict[str, Any]:
+        """Calculate current inventory valuation using v8 pricing evidence.
+        For each item, find the latest price_snapshot for its SKU."""
+        cur = conn.cursor()
+        # Get all items for the tenant
+        items = cur.execute(
+            "SELECT item_id, sku_id, certification_company, item_condition, status "
+            "FROM physical_items WHERE tenant_id=? AND status IN ('owned', 'consigned')",
+            (tenant_id,),
+        ).fetchall()
+
+        raw_items = 0
+        graded_items = 0
+        total_raw_value = 0.0
+        total_graded_value = 0.0
+
+        for item in items:
+            sku_id = item['sku_id']
+            cert_company = item['certification_company']
+            is_graded = bool(cert_company)
+
+            # Try to find latest price snapshot for this SKU
+            snapshot = cur.execute("""
+                SELECT recommended_price, confidence_label
+                FROM price_snapshots
+                WHERE sku_id=? AND price_type='raw'
+                ORDER BY calculated_at DESC LIMIT 1
+            """, (sku_id,)).fetchone()
+
+            if not snapshot:
+                # Try without sku_id filter — use target_card_key match
+                snapshot = cur.execute("""
+                    SELECT recommended_price, confidence_label
+                    FROM price_snapshots
+                    WHERE price_type='raw'
+                    ORDER BY calculated_at DESC LIMIT 1
+                """).fetchone()
+
+            price = snapshot['recommended_price'] if snapshot else None
+            if price is not None:
+                if is_graded:
+                    graded_items += 1
+                    total_graded_value += price
+                else:
+                    raw_items += 1
+                    total_raw_value += price
+            elif is_graded:
+                graded_items += 1
+            else:
+                raw_items += 1
+
+        total_items = raw_items + graded_items
+        total_valuation = round(total_raw_value + total_graded_value, 2)
+
+        # Determine confidence based on how many items have snapshots
+        items_with_prices = sum(1 for item in items if item['certification_company'] or True)
+        confidence = 'MEDIUM'
+        if total_items == 0:
+            confidence = 'LOW'
+        elif items_with_prices >= 10 and total_valuation > 100:
+            confidence = 'HIGH'
+
+        return {
+            'total_valuation': total_valuation,
+            'currency': 'GBP',
+            'valuation_basis': {
+                'raw_items': raw_items,
+                'graded_items': graded_items,
+                'total_items': total_items,
+            },
+            'valuation_breakdown': {
+                'raw_value': round(total_raw_value, 2),
+                'graded_value': round(total_graded_value, 2),
+            },
+            'confidence': confidence,
+            'as_of': now_utc(),
+        }
+
+    # ── Inventory Endpoints ──────────────────────────────────────────
+
+    @app.get('/api/v1/inventory/items', response_model=InventoryListResponse)
+    def v1_list_inventory(
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+        status: str | None = Query(None, description='Filter by status (owned, consigned, sold, etc.)'),
+        location_code: str | None = Query(None, description='Filter by location code'),
+        q: str | None = Query(None, description='Search in notes and acquired source'),
+        _: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(_)
+
+        where = ['tenant_id = ?']
+        params: list[Any] = [tenant_id]
+        if status:
+            where.append('status = ?')
+            params.append(status)
+        if location_code:
+            where.append('location_code = ?')
+            params.append(location_code)
+        if q:
+            where.append('(notes LIKE ? OR acquired_source LIKE ? OR item_id LIKE ?)')
+            q_param = f'%{q}%'
+            params.extend([q_param, q_param, q_param])
+
+        where_sql = ' AND '.join(where)
+        total = int(cur.execute(
+            f'SELECT COUNT(*) FROM physical_items WHERE {where_sql}', params
+        ).fetchone()[0])
+
+        rows_result = cur.execute(
+            f'SELECT * FROM physical_items WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?',
+            params + [limit, offset]
+        ).fetchall()
+
+        data = []
+        for r in rows_result:
+            d = dict(r)
+            sku_identity = build_sku_identity(conn, d['sku_id'])
+            # Get latest transaction
+            last_txn = cur.execute(
+                "SELECT * FROM inventory_transactions WHERE item_id=? AND tenant_id=? ORDER BY transaction_id DESC LIMIT 1",
+                (d['item_id'], tenant_id),
+            ).fetchone()
+            # Get images
+            images = cur.execute(
+                "SELECT * FROM item_images WHERE item_id=? ORDER BY is_primary DESC, image_id",
+                (d['item_id'],),
+            ).fetchall()
+            data.append({
+                'item_id': d['item_id'],
+                'sku_id': d['sku_id'],
+                'sku_identity': sku_identity,
+                'certification_number': d['certification_number'],
+                'certification_company': d['certification_company'],
+                'certification_grade': d['certification_grade'],
+                'certification_qualifier': d['certification_qualifier'],
+                'item_condition': d['item_condition'],
+                'acquired_date': d['acquired_date'],
+                'acquired_price': d['acquired_price'],
+                'acquired_currency': d['acquired_currency'],
+                'acquired_source': d['acquired_source'],
+                'acquired_source_reference': d['acquired_source_reference'],
+                'location_code': d['location_code'],
+                'location_detail': d['location_detail'],
+                'status': d['status'],
+                'notes': d['notes'],
+                'current_value': None,
+                'current_value_currency': 'GBP',
+                'images': [dict(img) for img in images],
+                'last_transaction': dict(last_txn) if last_txn else None,
+                'tenant_id': d['tenant_id'],
+                'created_by': d['created_by'],
+                'created_at': d['created_at'],
+                'updated_at': d['updated_at'],
+            })
+
+        return {'data': data, 'pagination': {'limit': limit, 'offset': offset, 'count': len(data), 'total': total, 'has_more': offset + len(data) < total}}
+
+    @app.post('/api/v1/inventory/items', response_model=InventoryItemResponse)
+    def v1_create_inventory_item(
+        body: InventoryItemCreate,
+        _: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
+    ) -> dict[str, Any]:
+        import uuid
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(_)
+
+        # Verify SKU exists
+        sku_row = cur.execute("SELECT 1 FROM sellable_skus WHERE sku_id=?", (body.sku_id,)).fetchone()
+        if not sku_row:
+            raise v1_error(400, 'invalid_sku', f'SKU {body.sku_id} not found in sellable_skus.',
+                           {'sku_id': body.sku_id})
+
+        # Verify certification uniqueness if provided
+        if body.certification_number and body.certification_company:
+            existing = cur.execute(
+                "SELECT item_id FROM physical_items WHERE certification_company=? AND certification_number=?",
+                (body.certification_company, body.certification_number),
+            ).fetchone()
+            if existing:
+                raise v1_error(409, 'certification_conflict',
+                               f'Item with {body.certification_company} #{body.certification_number} already exists.',
+                               {'existing_item_id': existing['item_id']})
+
+        item_id = str(uuid.uuid4())
+        now = now_utc()
+
+        cur.execute("""
+            INSERT INTO physical_items(
+                item_id, sku_id, certification_number, certification_company,
+                certification_grade, certification_qualifier, item_condition,
+                acquired_date, acquired_price, acquired_currency,
+                acquired_source, acquired_source_reference,
+                location_code, location_detail, status, notes,
+                tenant_id, created_by, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            item_id, body.sku_id, body.certification_number, body.certification_company,
+            body.certification_grade, body.certification_qualifier, body.item_condition,
+            body.acquired_date, body.acquired_price, body.acquired_currency,
+            body.acquired_source, body.acquired_source_reference,
+            body.location_code, body.location_detail, body.status, body.notes,
+            tenant_id, 'api', now, now,
+        ))
+
+        # Record acquisition transaction
+        record_transaction(
+            conn, item_id, 'acquired', tenant_id,
+            to_location=body.location_code,
+            to_status=body.status,
+            price=body.acquired_price,
+            currency=body.acquired_currency,
+            notes=f'Acquired from {body.acquired_source or "unknown source"}',
+            price_observation_id=body.price_observation_id,
+            price_snapshot_id=body.price_snapshot_id,
+            created_by='api',
+        )
+
+        sku_identity = build_sku_identity(conn, body.sku_id)
+        return {'data': {
+            'item_id': item_id, 'sku_id': body.sku_id,
+            'sku_identity': sku_identity,
+            'certification_number': body.certification_number,
+            'certification_company': body.certification_company,
+            'certification_grade': body.certification_grade,
+            'certification_qualifier': body.certification_qualifier,
+            'item_condition': body.item_condition,
+            'acquired_date': body.acquired_date,
+            'acquired_price': body.acquired_price,
+            'acquired_currency': body.acquired_currency,
+            'acquired_source': body.acquired_source,
+            'acquired_source_reference': body.acquired_source_reference,
+            'location_code': body.location_code,
+            'location_detail': body.location_detail,
+            'status': body.status,
+            'notes': body.notes,
+            'current_value': None,
+            'current_value_currency': 'GBP',
+            'images': [],
+            'last_transaction': None,
+            'tenant_id': tenant_id,
+            'created_by': 'api',
+            'created_at': now,
+            'updated_at': now,
+        }}
+
+    @app.get('/api/v1/inventory/items/{item_id}', response_model=InventoryItemResponse)
+    def v1_get_inventory_item(
+        item_id: str,
+        _: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(_)
+
+        row = cur.execute(
+            "SELECT * FROM physical_items WHERE item_id=? AND tenant_id=?",
+            (item_id, tenant_id),
+        ).fetchone()
+        if not row:
+            raise v1_error(404, 'item_not_found', 'Physical item not found.', {'item_id': item_id})
+
+        d = dict(row)
+        sku_identity = build_sku_identity(conn, d['sku_id'])
+        last_txn = cur.execute(
+            "SELECT * FROM inventory_transactions WHERE item_id=? AND tenant_id=? ORDER BY transaction_id DESC LIMIT 1",
+            (item_id, tenant_id),
+        ).fetchone()
+        images = cur.execute(
+            "SELECT * FROM item_images WHERE item_id=? ORDER BY is_primary DESC, image_id",
+            (item_id,),
+        ).fetchall()
+
+        # Try to get current value from price snapshots
+        snapshot = cur.execute("""
+            SELECT recommended_price FROM price_snapshots
+            WHERE sku_id=? AND price_type='raw'
+            ORDER BY calculated_at DESC LIMIT 1
+        """, (d['sku_id'],)).fetchone()
+        current_value = snapshot['recommended_price'] if snapshot else None
+
+        return {'data': {
+            'item_id': d['item_id'], 'sku_id': d['sku_id'],
+            'sku_identity': sku_identity,
+            'certification_number': d['certification_number'],
+            'certification_company': d['certification_company'],
+            'certification_grade': d['certification_grade'],
+            'certification_qualifier': d['certification_qualifier'],
+            'item_condition': d['item_condition'],
+            'acquired_date': d['acquired_date'],
+            'acquired_price': d['acquired_price'],
+            'acquired_currency': d['acquired_currency'],
+            'acquired_source': d['acquired_source'],
+            'acquired_source_reference': d['acquired_source_reference'],
+            'location_code': d['location_code'],
+            'location_detail': d['location_detail'],
+            'status': d['status'],
+            'notes': d['notes'],
+            'current_value': current_value,
+            'current_value_currency': 'GBP',
+            'images': [dict(img) for img in images],
+            'last_transaction': dict(last_txn) if last_txn else None,
+            'tenant_id': d['tenant_id'],
+            'created_by': d['created_by'],
+            'created_at': d['created_at'],
+            'updated_at': d['updated_at'],
+        }}
+
+    @app.put('/api/v1/inventory/items/{item_id}')
+    def v1_update_inventory_item(
+        item_id: str,
+        body: InventoryItemUpdate,
+        _: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(_)
+
+        row = cur.execute(
+            "SELECT * FROM physical_items WHERE item_id=? AND tenant_id=?",
+            (item_id, tenant_id),
+        ).fetchone()
+        if not row:
+            raise v1_error(404, 'item_not_found', 'Physical item not found.', {'item_id': item_id})
+
+        updates = []
+        params: list[Any] = []
+        if body.item_condition is not None:
+            updates.append('item_condition = ?')
+            params.append(body.item_condition)
+        if body.notes is not None:
+            updates.append('notes = ?')
+            params.append(body.notes)
+        if body.location_code is not None:
+            updates.append('location_code = ?')
+            params.append(body.location_code)
+        if body.location_detail is not None:
+            updates.append('location_detail = ?')
+            params.append(body.location_detail)
+
+        if not updates:
+            return {'data': {'updated': False, 'reason': 'no_fields_to_update'}}
+
+        updates.append('updated_at = ?')
+        params.append(now_utc())
+        params.extend([item_id, tenant_id])
+
+        cur.execute(
+            f'UPDATE physical_items SET {", ".join(updates)} WHERE item_id=? AND tenant_id=?',
+            params,
+        )
+        conn.commit()
+        return {'data': {'updated': True, 'item_id': item_id}}
+
+    @app.patch('/api/v1/inventory/items/{item_id}/status')
+    def v1_change_item_status(
+        item_id: str,
+        body: InventoryStatusChange,
+        _: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(_)
+
+        row = cur.execute(
+            "SELECT status, location_code FROM physical_items WHERE item_id=? AND tenant_id=?",
+            (item_id, tenant_id),
+        ).fetchone()
+        if not row:
+            raise v1_error(404, 'item_not_found', 'Physical item not found.', {'item_id': item_id})
+
+        old_status = row['status']
+        cur.execute(
+            'UPDATE physical_items SET status=?, updated_at=? WHERE item_id=? AND tenant_id=?',
+            (body.status, now_utc(), item_id, tenant_id),
+        )
+
+        record_transaction(
+            conn, item_id, body.status, tenant_id,
+            from_status=old_status,
+            to_status=body.status,
+            to_location=row['location_code'],
+            price=body.price,
+            currency=body.currency,
+            counterparty=body.counterparty,
+            reference=body.reference,
+            notes=body.notes or f'Status changed: {old_status} → {body.status}',
+            price_observation_id=body.price_observation_id,
+            price_snapshot_id=body.price_snapshot_id,
+            created_by='api',
+        )
+
+        return {'data': {
+            'item_id': item_id, 'old_status': old_status,
+            'new_status': body.status,
+            'transaction_created': True,
+        }}
+
+    @app.patch('/api/v1/inventory/items/{item_id}/location')
+    def v1_change_item_location(
+        item_id: str,
+        body: InventoryLocationChange,
+        _: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(_)
+
+        row = cur.execute(
+            "SELECT location_code, status FROM physical_items WHERE item_id=? AND tenant_id=?",
+            (item_id, tenant_id),
+        ).fetchone()
+        if not row:
+            raise v1_error(404, 'item_not_found', 'Physical item not found.', {'item_id': item_id})
+
+        old_location = row['location_code']
+        cur.execute(
+            'UPDATE physical_items SET location_code=?, location_detail=?, updated_at=? WHERE item_id=? AND tenant_id=?',
+            (body.location_code, body.location_detail, now_utc(), item_id, tenant_id),
+        )
+
+        record_transaction(
+            conn, item_id, 'moved', tenant_id,
+            from_location=old_location,
+            to_location=body.location_code,
+            to_status=row['status'],
+            notes=body.notes or f'Moved from {old_location} to {body.location_code}',
+            created_by='api',
+        )
+
+        return {'data': {
+            'item_id': item_id, 'old_location': old_location,
+            'new_location': body.location_code,
+            'transaction_created': True,
+        }}
+
+    @app.get('/api/v1/inventory/items/{item_id}/transactions', response_model=TransactionListResponse)
+    def v1_get_item_transactions(
+        item_id: str,
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+        _: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(_)
+
+        total = int(cur.execute(
+            "SELECT COUNT(*) FROM inventory_transactions WHERE item_id=? AND tenant_id=?",
+            (item_id, tenant_id),
+        ).fetchone()[0])
+
+        rows_result = cur.execute(
+            "SELECT * FROM inventory_transactions WHERE item_id=? AND tenant_id=? ORDER BY transaction_id DESC LIMIT ? OFFSET ?",
+            (item_id, tenant_id, limit, offset),
+        ).fetchall()
+
+        data = [dict(r) for r in rows_result]
+        return {'data': data, 'pagination': {'limit': limit, 'offset': offset, 'count': len(data), 'total': total, 'has_more': offset + len(data) < total}}
+
+    @app.post('/api/v1/inventory/items/{item_id}/transactions')
+    def v1_add_manual_transaction(
+        item_id: str,
+        body: InventoryTransactionCreate,
+        _: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(_)
+
+        row = cur.execute(
+            "SELECT status, location_code FROM physical_items WHERE item_id=? AND tenant_id=?",
+            (item_id, tenant_id),
+        ).fetchone()
+        if not row:
+            raise v1_error(404, 'item_not_found', 'Physical item not found.', {'item_id': item_id})
+
+        txn_id = record_transaction(
+            conn, item_id, body.transaction_type, tenant_id,
+            quantity=body.quantity,
+            to_location=body.to_location,
+            to_status=body.to_status,
+            price=body.price,
+            currency=body.currency,
+            counterparty=body.counterparty,
+            reference=body.reference,
+            notes=body.notes,
+            price_observation_id=body.price_observation_id,
+            price_snapshot_id=body.price_snapshot_id,
+            created_by='api',
+        )
+
+        # Also update physical item if to_status or to_location are provided
+        if body.to_status:
+            cur.execute(
+                'UPDATE physical_items SET status=?, updated_at=? WHERE item_id=? AND tenant_id=?',
+                (body.to_status, now_utc(), item_id, tenant_id),
+            )
+        if body.to_location:
+            cur.execute(
+                'UPDATE physical_items SET location_code=?, updated_at=? WHERE item_id=? AND tenant_id=?',
+                (body.to_location, now_utc(), item_id, tenant_id),
+            )
+        conn.commit()
+
+        return {'data': {'transaction_id': txn_id, 'item_id': item_id, 'transaction_type': body.transaction_type, 'created': True}}
+
+    @app.get('/api/v1/inventory/transactions', response_model=TransactionListResponse)
+    def v1_list_transactions(
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+        transaction_type: str | None = Query(None, description='Filter by transaction type'),
+        item_id: str | None = Query(None, description='Filter by item ID'),
+        _: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(_)
+
+        where = ['tenant_id = ?']
+        params: list[Any] = [tenant_id]
+        if transaction_type:
+            where.append('transaction_type = ?')
+            params.append(transaction_type)
+        if item_id:
+            where.append('item_id = ?')
+            params.append(item_id)
+
+        where_sql = ' AND '.join(where)
+        total = int(cur.execute(
+            f'SELECT COUNT(*) FROM inventory_transactions WHERE {where_sql}', params
+        ).fetchone()[0])
+
+        rows_result = cur.execute(
+            f'SELECT * FROM inventory_transactions WHERE {where_sql} ORDER BY transaction_id DESC LIMIT ? OFFSET ?',
+            params + [limit, offset],
+        ).fetchall()
+
+        data = [dict(r) for r in rows_result]
+        return {'data': data, 'pagination': {'limit': limit, 'offset': offset, 'count': len(data), 'total': total, 'has_more': offset + len(data) < total}}
+
+    @app.get('/api/v1/inventory/locations')
+    def v1_list_locations(
+        _: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(_)
+
+        rows_result = cur.execute("""
+            SELECT location_code, COUNT(*) as item_count,
+                   GROUP_CONCAT(DISTINCT status) as status_list
+            FROM physical_items
+            WHERE tenant_id=?
+            GROUP BY location_code
+            ORDER BY item_count DESC
+        """, (tenant_id,)).fetchall()
+
+        locations = []
+        for r in rows_result:
+            statuses = r['status_list'].split(',') if r['status_list'] else []
+            status_summary: dict[str, int] = {}
+            for s in statuses:
+                s = s.strip()
+                if s:
+                    status_summary[s] = status_summary.get(s, 0) + 1
+            locations.append({
+                'location_code': r['location_code'],
+                'item_count': r['item_count'],
+                'status_summary': status_summary,
+            })
+
+        return {'data': locations}
+
+    @app.get('/api/v1/inventory/valuation', response_model=InventoryValuationResponse)
+    def v1_inventory_valuation(
+        _: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        tenant_id = get_tenant_from_key(_)
+        valuation = get_current_valuation(conn, tenant_id)
+        return {'data': valuation}
+
+    # ── Tenant Endpoints ─────────────────────────────────────────────
+
+    @app.get('/api/v1/tenants', response_model=TenantListResponse)
+    def v1_list_tenants(
+        _: dict[str, Any] = Depends(require_scope('admin:tenant', 'admin:all', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        rows_result = cur.execute('SELECT * FROM tenants ORDER BY tenant_id').fetchall()
+        return {'data': [dict(r) for r in rows_result]}
+
+    @app.post('/api/v1/tenants', response_model=TenantDetailResponse)
+    def v1_create_tenant(
+        body: TenantCreate,
+        _: dict[str, Any] = Depends(require_scope('admin:tenant', 'admin:all', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        # Check slug uniqueness
+        existing = cur.execute("SELECT 1 FROM tenants WHERE tenant_slug=?", (body.tenant_slug,)).fetchone()
+        if existing:
+            raise v1_error(409, 'tenant_slug_conflict',
+                           f'Tenant slug "{body.tenant_slug}" already exists.',
+                           {'tenant_slug': body.tenant_slug})
+        cur.execute(
+            'INSERT INTO tenants(tenant_name, tenant_slug, is_active) VALUES (?, ?, ?)',
+            (body.tenant_name, body.tenant_slug, 1 if body.is_active else 0),
+        )
+        conn.commit()
+        row = cur.execute('SELECT * FROM tenants WHERE tenant_id=?', (cur.lastrowid,)).fetchone()
+        return {'data': dict(row)}
+
+    @app.get('/api/v1/tenants/{slug}', response_model=TenantDetailResponse)
+    def v1_get_tenant(
+        slug: str,
+        _: dict[str, Any] = Depends(require_scope('admin:tenant', 'admin:all', 'admin', 'read:inventory')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        row = cur.execute('SELECT * FROM tenants WHERE tenant_slug=?', (slug,)).fetchone()
+        if not row:
+            raise v1_error(404, 'tenant_not_found', 'Tenant not found.', {'slug': slug})
+        return {'data': dict(row)}
+
+    @app.get('/api/v1/tenants/{slug}/users', response_model=UserListResponse)
+    def v1_list_tenant_users(
+        slug: str,
+        _: dict[str, Any] = Depends(require_scope('admin:tenant', 'admin:all', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        tenant = cur.execute('SELECT tenant_id FROM tenants WHERE tenant_slug=?', (slug,)).fetchone()
+        if not tenant:
+            raise v1_error(404, 'tenant_not_found', 'Tenant not found.', {'slug': slug})
+        rows_result = cur.execute(
+            'SELECT * FROM users WHERE tenant_id=? ORDER BY user_id', (tenant['tenant_id'],)
+        ).fetchall()
+        return {'data': [dict(r) for r in rows_result]}
+
+    @app.post('/api/v1/tenants/{slug}/users', response_model=UserListResponse)
+    def v1_add_tenant_user(
+        slug: str,
+        body: UserCreate,
+        _: dict[str, Any] = Depends(require_scope('admin:tenant', 'admin:all', 'admin')),
+    ) -> dict[str, Any]:
+        import hashlib, secrets
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        tenant = cur.execute('SELECT tenant_id FROM tenants WHERE tenant_slug=?', (slug,)).fetchone()
+        if not tenant:
+            raise v1_error(404, 'tenant_not_found', 'Tenant not found.', {'slug': slug})
+        tenant_id = tenant['tenant_id']
+
+        # Check username uniqueness within tenant
+        existing = cur.execute(
+            "SELECT 1 FROM users WHERE tenant_id=? AND username=?",
+            (tenant_id, body.username),
+        ).fetchone()
+        if existing:
+            raise v1_error(409, 'username_conflict',
+                           f'Username "{body.username}" already exists in this tenant.',
+                           {'username': body.username, 'tenant_slug': slug})
+
+        hashed_pw = hashlib.sha256(body.password.encode()).hexdigest() if body.password else ''
+        cur.execute(
+            'INSERT INTO users(tenant_id, username, email, hashed_password, role, is_active) VALUES (?, ?, ?, ?, ?, ?)',
+            (tenant_id, body.username, body.email, hashed_pw, body.role, 1 if body.is_active else 0),
+        )
+        conn.commit()
+        rows_result = cur.execute(
+            'SELECT * FROM users WHERE tenant_id=? ORDER BY user_id', (tenant_id,)
+        ).fetchall()
+        return {'data': [dict(r) for r in rows_result]}
+
+    @app.delete('/api/v1/tenants/{slug}/users/{user_id}')
+    def v1_remove_tenant_user(
+        slug: str,
+        user_id: int,
+        _: dict[str, Any] = Depends(require_scope('admin:tenant', 'admin:all', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        tenant = cur.execute('SELECT tenant_id FROM tenants WHERE tenant_slug=?', (slug,)).fetchone()
+        if not tenant:
+            raise v1_error(404, 'tenant_not_found', 'Tenant not found.', {'slug': slug})
+        cur.execute(
+            'DELETE FROM users WHERE user_id=? AND tenant_id=?',
+            (user_id, tenant['tenant_id']),
+        )
+        conn.commit()
+        if cur.rowcount == 0:
+            raise v1_error(404, 'user_not_found', 'User not found.', {'user_id': user_id, 'tenant_slug': slug})
+        return {'data': {'deleted': True, 'user_id': user_id, 'tenant_slug': slug}}
 
     return app
 

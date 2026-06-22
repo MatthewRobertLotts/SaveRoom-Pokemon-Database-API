@@ -319,6 +319,247 @@ class PriceSnapshotV1(BaseModel):
     algorithm_version: str | None = None
 
 
+# ── v9 Inventory Models ─────────────────────────────────────────────
+
+class ItemImageResponse(BaseModel):
+    image_id: int
+    item_id: str
+    image_type: str | None = None
+    image_url: str | None = None
+    image_local_path: str | None = None
+    is_primary: bool = False
+    uploaded_at: str | None = None
+    created_by: str | None = None
+
+
+class SellableSKUIdentity(BaseModel):
+    sku_id: int
+    sku_key: str | None = None
+    language_code: str | None = None
+    condition_code: str | None = None
+    set_code: str | None = None
+    collector_number: str | None = None
+    name_english: str | None = None
+
+
+class TransactionSummary(BaseModel):
+    transaction_id: int
+    transaction_type: str
+    from_location: str | None = None
+    to_location: str | None = None
+    from_status: str | None = None
+    to_status: str | None = None
+    price: float | None = None
+    currency: str | None = None
+    reference: str | None = None
+    notes: str | None = None
+    created_by: str | None = None
+    created_at: str
+
+
+class PhysicalItemResponse(BaseModel):
+    item_id: str
+    sku_id: int
+    sku_identity: SellableSKUIdentity | None = None
+    certification_number: str | None = None
+    certification_company: str | None = None
+    certification_grade: float | None = None
+    certification_qualifier: str | None = None
+    item_condition: str | None = None
+    acquired_date: str | None = None
+    acquired_price: float | None = None
+    acquired_currency: str | None = None
+    acquired_source: str | None = None
+    acquired_source_reference: str | None = None
+    location_code: str | None = None
+    location_detail: str | None = None
+    status: str | None = None
+    notes: str | None = None
+    current_value: float | None = None
+    current_value_currency: str = "GBP"
+    images: list[ItemImageResponse] = []
+    last_transaction: TransactionSummary | None = None
+    tenant_id: int = 1
+    created_by: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class TransactionResponse(BaseModel):
+    transaction_id: int
+    item_id: str
+    transaction_type: str
+    quantity: int = 1
+    from_location: str | None = None
+    to_location: str | None = None
+    from_status: str | None = None
+    to_status: str | None = None
+    price: float | None = None
+    currency: str | None = None
+    counterparty: str | None = None
+    counterparty_id: str | None = None
+    reference: str | None = None
+    notes: str | None = None
+    price_observation_id: int | None = None
+    price_snapshot_id: int | None = None
+    tenant_id: int = 1
+    created_by: str | None = None
+    created_at: str | None = None
+
+
+class InventoryItemCreate(BaseModel):
+    sku_id: int = Field(..., description="Required: FK to sellable_skus")
+    certification_number: str | None = None
+    certification_company: str | None = None
+    certification_grade: float | None = None
+    certification_qualifier: str | None = None
+    item_condition: str = "Near Mint"
+    acquired_date: str | None = None
+    acquired_price: float | None = None
+    acquired_currency: str = "GBP"
+    acquired_source: str | None = None
+    acquired_source_reference: str | None = None
+    location_code: str = "Unknown"
+    location_detail: str | None = None
+    status: str = "owned"
+    notes: str | None = None
+    price_observation_id: int | None = None
+    price_snapshot_id: int | None = None
+
+
+class InventoryItemUpdate(BaseModel):
+    item_condition: str | None = None
+    notes: str | None = None
+    location_code: str | None = None
+    location_detail: str | None = None
+
+
+class InventoryStatusChange(BaseModel):
+    status: str = Field(..., description="New status: owned, consigned, sold, lost, returned, etc.")
+    price: float | None = None
+    currency: str = "GBP"
+    counterparty: str | None = None
+    reference: str | None = None
+    notes: str | None = None
+    price_observation_id: int | None = None
+    price_snapshot_id: int | None = None
+
+
+class InventoryLocationChange(BaseModel):
+    location_code: str
+    location_detail: str | None = None
+    notes: str | None = None
+
+
+class InventoryTransactionCreate(BaseModel):
+    transaction_type: str
+    quantity: int = 1
+    to_location: str | None = None
+    to_status: str | None = None
+    price: float | None = None
+    currency: str = "GBP"
+    counterparty: str | None = None
+    reference: str | None = None
+    notes: str | None = None
+    price_observation_id: int | None = None
+    price_snapshot_id: int | None = None
+
+
+class InventoryLocationList(BaseModel):
+    location_code: str
+    item_count: int
+    status_summary: dict[str, int]
+
+
+class InventoryValuationBreakdown(BaseModel):
+    raw_items: int = 0
+    graded_items: int = 0
+    total_items: int = 0
+
+
+class InventoryValuation(BaseModel):
+    total_valuation: float = 0.0
+    currency: str = "GBP"
+    valuation_basis: InventoryValuationBreakdown
+    valuation_breakdown: dict[str, float] = {}
+    confidence: str = "MEDIUM"
+    as_of: str | None = None
+
+
+class TenantResponse(BaseModel):
+    tenant_id: int
+    tenant_name: str
+    tenant_slug: str
+    is_active: bool = True
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class TenantCreate(BaseModel):
+    tenant_name: str
+    tenant_slug: str
+    is_active: bool = True
+
+
+class UserResponse(BaseModel):
+    user_id: int
+    tenant_id: int
+    username: str
+    email: str | None = None
+    role: str = "viewer"
+    is_active: bool = True
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+class UserCreate(BaseModel):
+    username: str
+    email: str | None = None
+    password: str = ""
+    role: str = "viewer"
+    is_active: bool = True
+
+
+class InventoryListResponse(BaseModel):
+    data: list[PhysicalItemResponse]
+    pagination: dict[str, Any]
+
+
+class InventoryItemResponse(BaseModel):
+    data: PhysicalItemResponse
+
+
+class TransactionListResponse(BaseModel):
+    data: list[TransactionResponse]
+    pagination: dict[str, Any]
+
+
+class TenantListResponse(BaseModel):
+    data: list[TenantResponse]
+
+
+class TenantDetailResponse(BaseModel):
+    data: TenantResponse
+
+
+class UserListResponse(BaseModel):
+    data: list[UserResponse]
+
+
+class InventoryValuationResponse(BaseModel):
+    data: InventoryValuation
+
+
+class PriceSnapshotRefV1(BaseModel):
+    """Minimal price snapshot reference for linking to v8 pricing evidence."""
+    snapshot_id: int | None = None
+    observation_id: int | None = None
+    price: float | None = None
+    currency: str = "GBP"
+    confidence_label: str | None = None
+    algorithm_version: str | None = None
+
+
 class PriceFetchResponseV1(BaseModel):
     success: bool
     query: str
