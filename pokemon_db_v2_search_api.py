@@ -224,6 +224,7 @@ CREATE VIRTUAL TABLE {FTS_TABLE} USING fts5(
   core_set_id,
   local_id,
   card_name,
+  name_english,
   language_name,
   resolved_set_name,
   core_set_name,
@@ -241,7 +242,7 @@ CREATE VIRTUAL TABLE {FTS_TABLE} USING fts5(
     cur.execute(f'''
 INSERT INTO {FTS_TABLE}(
   doc_key, language_code, card_id, raw_set_id, resolved_set_id, core_set_id,
-  local_id, card_name, language_name, resolved_set_name, core_set_name,
+  local_id, card_name, name_english, language_name, resolved_set_name, core_set_name,
   resolved_series_name, category, types, rarity, stage, illustrator,
   regulation_mark, search_blob
 )
@@ -254,6 +255,7 @@ SELECT
   COALESCE(core_set_id,''),
   COALESCE(local_id,''),
   COALESCE(card_name,''),
+  COALESCE((SELECT en_name FROM card_name_translations t WHERE t.card_id=s.card_id AND t.language_code=s.language_code AND t.source!='untranslated' LIMIT 1), ''),
   COALESCE(language_name,''),
   COALESCE(resolved_set_name,''),
   COALESCE(core_set_name,''),
@@ -265,7 +267,9 @@ SELECT
   COALESCE(illustrator,''),
   COALESCE(regulation_mark,''),
   lower(
-    COALESCE(card_name,'') || ' ' || COALESCE(language_name,'') || ' ' ||
+    COALESCE(card_name,'') || ' ' ||
+    COALESCE((SELECT en_name FROM card_name_translations t WHERE t.card_id=s.card_id AND t.language_code=s.language_code AND t.source!='untranslated' LIMIT 1), '') || ' ' ||
+    COALESCE(language_name,'') || ' ' ||
     COALESCE(language_code,'') || ' ' || COALESCE(card_id,'') || ' ' ||
     COALESCE(raw_set_id,'') || ' ' || COALESCE(resolved_set_id,'') || ' ' ||
     COALESCE(core_set_id,'') || ' ' || COALESCE(local_id,'') || ' ' ||
@@ -275,7 +279,7 @@ SELECT
     COALESCE(stage,'') || ' ' || COALESCE(illustrator,'') || ' ' ||
     COALESCE(regulation_mark,'')
   )
-FROM v2_card_search;
+FROM v2_card_search s;
 ''')
     cur.executescript(f'''
 CREATE VIEW v2_card_search_fts_api AS
@@ -285,6 +289,7 @@ SELECT
   f.language_code,
   f.card_id,
   f.card_name,
+  f.name_english,
   f.local_id,
   f.raw_set_id,
   f.resolved_set_id,
@@ -301,11 +306,251 @@ def escape_fts_token(token: str) -> str:
 
 
 def build_match_query(query: str) -> str:
+    """Build FTS5 match query that searches both local name and English name.
+
+    For each token, searches across card_name AND name_english columns.
+    This allows cross-language search: typing "Charizard" finds Japanese
+    リザードン cards because their name_english is "Charizard".
+    """
     tokens = re.findall(r"[\w\-]+|[^\s]", query.strip(), flags=re.UNICODE)
     tokens = [t for t in tokens if t.strip()]
     if not tokens:
         return ''
-    return ' AND '.join(escape_fts_token(t) for t in tokens)
+    # Each token must match in at least one column (card_name OR name_english)
+    # Use FTS5 column filter syntax: {card_name name_english} : token
+    return ' AND '.join(
+        '{card_name name_english} : ' + escape_fts_token(t) for t in tokens
+    )
+
+
+def build_match_query(query: str) -> str:
+    """Build FTS5 match query that searches both local name and English name.
+
+    For each token, searches across card_name AND name_english columns.
+    This allows cross-language search: typing "Charizard" finds Japanese
+    リザードン cards because their name_english is "Charizard".
+
+    Also handles multi-token queries with AND logic.
+    """
+    # Extract alphanumeric tokens (including Unicode letters and hyphens)
+    tokens = re.findall(r"[\w\-]+", query.strip(), flags=re.UNICODE)
+    tokens = [t for t in tokens if t.strip()]
+    if not tokens:
+        return ''
+    # Each token must match in at least one column (card_name OR name_english)
+    # Use FTS5 column filter syntax: {card_name name_english} : token
+    return ' AND '.join(
+        '{card_name name_english} : ' + escape_fts_token(t) for t in tokens
+    )
+
+
+def build_match_query_with_synonyms(query: str, conn: sqlite3.Connection) -> str:
+    """Build FTS5 match query with synonym expansion.
+
+    Searches across card_name, name_english, set names, and other text fields.
+    For each token, looks up synonyms and creates OR alternatives.
+    """
+    if not query.strip():
+        return ''
+
+    tokens = re.findall(r"[\w\-]+", query.strip(), flags=re.UNICODE)
+    tokens = [t for t in tokens if t.strip()]
+    if not tokens:
+        return ''
+
+    cur = conn.cursor()
+    parts = []
+
+    for token in tokens:
+        token_lower = token.lower()
+        # Look up synonyms
+        cur.execute(
+            'SELECT canonical, entity_type FROM search_synonyms WHERE synonym=?',
+            (token_lower,)
+        )
+        results = cur.fetchall()
+
+        if results:
+            # Group synonyms by entity type to target the right columns
+            by_type: dict[str, list[str]] = {}
+            for canon, etype in results:
+                by_type.setdefault(etype, []).append(canon)
+
+            type_parts = []
+            for etype, canonicals in by_type.items():
+                all_forms = [token] + canonicals
+                seen = set()
+                unique_forms = []
+                for form in all_forms:
+                    fl = form.lower()
+                    if fl not in seen:
+                        seen.add(fl)
+                        unique_forms.append(form)
+                or_group = '(' + ' OR '.join(escape_fts_token(f) for f in unique_forms) + ')'
+
+                if etype == 'set':
+                    # Set names are in resolved_set_name, core_set_name, resolved_series_name
+                    cols = '{resolved_set_name core_set_name resolved_series_name}'
+                elif etype == 'pokemon':
+                    cols = '{card_name name_english}'
+                else:
+                    # ebay_term and others: search all text columns
+                    cols = '{card_name name_english resolved_set_name core_set_name}'
+                type_parts.append(f'{cols} : {or_group}')
+
+            if len(type_parts) == 1:
+                parts.append(type_parts[0])
+            else:
+                parts.append('(' + ' OR '.join(type_parts) + ')')
+        else:
+            # No synonyms: search all text columns
+            cols = '{card_name name_english resolved_set_name core_set_name}'
+            parts.append(f'{cols} : {escape_fts_token(token)}')
+
+    return ' AND '.join(parts)
+
+
+def expand_synonyms(query: str, conn: sqlite3.Connection) -> str:
+    """Deprecated: use build_match_query_with_synonyms instead.
+
+    Kept for backward compatibility. Returns a simple OR-expanded string.
+    """
+    return build_match_query_with_synonyms(query, conn)
+
+
+def fuzzy_search_names(query: str, conn: sqlite3.Connection, limit: int = 10) -> list[dict[str, Any]]:
+    """Fuzzy search using trigram similarity.
+
+    For a given query, find cards whose names have high trigram overlap.
+    This catches misspellings like "charzard" → "Charizard".
+
+    Returns list of {card_id, language_code, name, name_english, score}.
+    """
+    if not query.strip() or len(query.strip()) < 3:
+        return []
+
+    cur = conn.cursor()
+    query_lower = query.lower()
+
+    # Generate trigrams for the query
+    query_trigrams = []
+    for i in range(len(query_lower) - 2):
+        tri = query_lower[i:i+3]
+        if tri.isalnum():
+            query_trigrams.append(tri)
+
+    if not query_trigrams:
+        return []
+
+    # Find cards with matching trigrams
+    placeholders = ','.join('?' * len(query_trigrams))
+    cur.execute(f'''
+        SELECT
+            t.card_id,
+            t.language_code,
+            COUNT(DISTINCT t.trigram) as match_count,
+            s.card_name,
+            COALESCE(te.en_name, '') as name_english
+        FROM search_trigrams t
+        JOIN v2_card_search s ON s.card_id=t.card_id AND s.language_code=t.language_code
+        LEFT JOIN card_name_translations te
+            ON te.card_id=t.card_id AND te.language_code=t.language_code
+            AND te.source != 'untranslated'
+        WHERE t.trigram IN ({placeholders})
+        GROUP BY t.card_id, t.language_code
+        HAVING match_count >= 2
+        ORDER BY match_count DESC
+        LIMIT ?
+    ''', query_trigrams + [limit])
+
+    results = []
+    for row in cur.fetchall():
+        card_id, lang, match_count, name, en_name = row
+        # Calculate similarity score (Jaccard-like)
+        name_trigrams = max(len(name.lower()) - 2, 1) if name else 1
+        en_trigrams = max(len(en_name.lower()) - 2, 1) if en_name else 1
+        max_trigrams = max(name_trigrams, en_trigrams)
+        score = match_count / max_trigrams if max_trigrams > 0 else 0
+        results.append({
+            'card_id': card_id,
+            'language_code': lang,
+            'name': name,
+            'name_english': en_name,
+            'score': round(score, 3),
+        })
+
+    return results
+
+
+def autocomplete_suggestions(query: str, conn: sqlite3.Connection, limit: int = 10) -> list[dict[str, str]]:
+    """Provide autocomplete suggestions based on partial input.
+
+    Searches across:
+    1. Pokémon names (local and English) via FTS prefix matching
+    2. Synonyms/nicknames
+    3. Set names
+
+    Returns list of {type, name, card_key}.
+    """
+    if not query.strip() or len(query.strip()) < 2:
+        return []
+
+    cur = conn.cursor()
+    query_lower = query.strip().lower()
+    suggestions = []
+
+    # 1. FTS prefix search on card_name and name_english
+    try:
+        cur.execute(f'''
+            SELECT DISTINCT
+                f.card_name,
+                f.name_english,
+                f.language_code,
+                f.card_id
+            FROM {FTS_TABLE} f
+            WHERE f.card_name MATCH ? OR f.name_english MATCH ?
+            ORDER BY bm25({FTS_TABLE})
+            LIMIT ?
+        ''', (f'{query_lower}*', f'{query_lower}*', limit))
+        for row in cur.fetchall():
+            name, en_name, lang, card_id = row
+            display = en_name or name
+            if display:
+                suggestions.append({
+                    'type': 'card',
+                    'name': display,
+                    'card_key': f'{lang}:{card_id}',
+                    'language': lang,
+                })
+    except Exception:
+        pass
+
+    # 2. Synonym lookup
+    cur.execute('''
+        SELECT synonym, canonical, entity_type
+        FROM search_synonyms
+        WHERE synonym LIKE ?
+        LIMIT ?
+    ''', (f'{query_lower}%', 5))
+    for row in cur.fetchall():
+        syn, canon, etype = row
+        suggestions.append({
+            'type': etype,
+            'name': f'{syn} → {canon}',
+            'synonym': syn,
+            'canonical': canon,
+        })
+
+    # Deduplicate by name
+    seen = set()
+    unique = []
+    for s in suggestions:
+        key = s.get('name', '')
+        if key not in seen:
+            seen.add(key)
+            unique.append(s)
+
+    return unique[:limit]
 
 
 def search_cards(
