@@ -1031,3 +1031,117 @@ Remove a user from a tenant.
 - Auth is optional by default; existing keys without inventory scopes can still access v1 card/search endpoints.
 - The `developer_api_keys` table and legacy auth model remain intact.
 - Default tenant (slug: `default`) is auto-created on first run via migration v28b.
+
+---
+
+### v9.1 Appendix — Controlled Image Delivery Gateway
+
+#### Image Delivery Endpoints
+
+All image delivery is controlled by the image gateway. The legacy `/images` static mount has been removed.
+
+| Route | Description | Auth Scope |
+|-------|-------------|------------|
+| `GET /api/v1/images/assets/{image_id}/content` | Deliver a card image (policy-gated, with size selection) | `images:read` or signed URL |
+| `POST /api/v1/images/assets/signed-url` | Generate a time-limited signed URL for browser/mobile | `images:read` |
+
+**Supported sizes:** `thumbnail` (150×210), `small` (245×342), `medium` (350×489), `large` (510×712). Images are never enlarged beyond their original dimensions.
+
+#### Policy Evaluation
+
+Delivery policies are evaluated at every request. Most-specific scope wins:
+
+```
+image → card → set → language → source → global
+```
+
+- **Global policy**: Emergency switch. Requires `admin:all` scope to change.
+- **Source policy**: Controls per-source-type (e.g., `asia_official`, `tcgdex`). A known source without an explicit policy falls through to global.
+- **Unknown sources**: Images with `null` or empty source type are **blocked by default** and do not fall through to global.
+
+Signed URLs are also subject to policy evaluation at delivery time.
+
+#### Admin Endpoints
+
+| Route | Description | Auth Scope |
+|-------|-------------|------------|
+| `GET /api/v1/admin/images/policies` | List all delivery policies | `images:admin` |
+| `POST /api/v1/admin/images/policies` | Create a policy | `images:admin` |
+| `PUT /api/v1/admin/images/policies/global` | Set global emergency switch | `admin:all` |
+| `GET /api/v1/admin/images/takedown/cases` | List takedown cases | `images:admin` |
+| `POST /api/v1/admin/images/takedown/cases` | Open a takedown case | `images:admin` |
+| `PUT /api/v1/admin/images/takedown/cases/{id}/resolve` | Resolve (restore or remove) | `images:admin` |
+
+Takedown operations are atomic: event + policy update + audit log in a single transaction.
+
+#### Rate Limits
+
+| Limit | Scope | Value |
+|-------|-------|-------|
+| Burst | Per API key | 200 requests/minute |
+| Burst | Per identity (key or signed URL) | 120 requests/minute |
+
+Image delivery is subject to rate limits. Policy blocks are recorded but not counted against delivery quotas. Rate-limit violations return `429 Too Many Requests`.
+
+#### Delivery Logging
+
+All image delivery attempts are logged to `image_delivery_policy_records`:
+- `image_id`, `card_key`, `tenant_id`, `api_key_id`
+- `requested_size`, `policy_decision`, `response_status`
+- `request_id`, `created_at`
+
+**Retention:** Raw log entries are retained for 30 days, then deleted. Daily aggregation and permanent retention are not yet implemented.
+
+#### Image Authentication Methods
+
+1. **API key with `images:read` scope** — for server-to-server clients
+2. **Signed URL** — HMAC-SHA256 tokens with expiration (300-86400s) for browser/mobile clients
+
+Signed URLs specify the image ID, permitted size, expiry timestamp, and are cryptographically signed. They remain subject to policy evaluation at delivery time.
+
+#### Security Protections
+
+- Canonical path resolution within approved image root only
+- Symlink escape prevention (`Path.relative_to` validation)
+- MIME-type allow-list (image/webp, image/jpeg)
+- No filesystem paths accepted from clients
+- No localhost/private-IP trust bypass — all requests authenticate
+- Image decoding validation via Pillow (preventing malformed files)
+- Maximum pixel dimensions per size (never enlarged)
+- Metadata stripping on derivative generation
+- Safe error handling (no server paths in error messages)
+
+#### Non-Affiliation Notice
+
+> **SaveRoom Pokémon Card Database is not affiliated with, endorsed by, or sponsored by Nintendo, Creatures Inc., GAME FREAK Inc., or The Pokémon Company. Pokémon and Pokémon character names are trademarks of Nintendo.**
+>
+> Card images are sourced from publicly available reference archives for catalogue and inventory management purposes. This service does not create, sell, or distribute unlicensed copies of Pokémon cards. Image sources are disclosed in card metadata (`display_image_source_type`).
+>
+> API users must not:
+> - Bulk harvest card images
+> - Mirror the catalogue collection
+> - Republish the complete image set
+> - Resell or sublicense image access
+> - Use the API as a general-purpose CDN
+> - Create competing image datasets
+> - Remove required attribution from images
+> - Attempt to bypass quotas or delivery policies
+
+#### Derivative Caching
+
+Generated derivatives (resized images) use deterministic cache keys:
+
+```
+{sha256_hash_of_original}_{size}_v{cache_version}
+```
+
+Derivatives are stored outside the public web root. They are regenerated when the source changes (hash mismatch). The original file is never overwritten or modified.
+
+#### Physical-Item Photos (Schema Only)
+
+The `physical_item_photos` table provides a tenant-isolated foundation for user-uploaded photos of physical inventory items. Upload endpoints are not yet implemented. Key properties:
+
+- Each photo belongs to exactly one tenant (`tenant_id` FK)
+- Photos are linked to a `physical_items` record
+- Photos are never automatically promoted to the global catalogue
+- Published/unpublished flag controls visibility

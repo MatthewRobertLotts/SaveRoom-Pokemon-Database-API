@@ -647,6 +647,40 @@ def test_rate_limiter_basic():
     assert remaining >= 0
 
 
+def test_image_delivery_quota_table():
+    """The image_delivery_quotas table exists (v52 migration)."""
+    conn = sqlite3.connect(str(client.app.state.db))
+    row = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='image_delivery_quotas'"
+    ).fetchone()
+    conn.close()
+    assert row[0] == 1
+
+
+def test_image_delivery_quota_enforcement():
+    """Persistent quota check and increment works."""
+    from pokemon_db_v2_fastapi import _check_and_increment_quota, _QUOTA_HOURLY_LIMIT, _QUOTA_DAILY_LIMIT
+    conn = sqlite3.connect(str(client.app.state.db))
+    cur = conn.cursor()
+    # Clean up any previous test quota rows
+    cur.execute("DELETE FROM image_delivery_quotas WHERE access_identity = 'test:quota:identity'")
+    conn.commit()
+    # First check should pass
+    result = _check_and_increment_quota(conn, 'test:quota:identity', 'api_key')
+    assert result['allowed'] is True
+    assert result['hourly_count'] >= 1
+    # Verify row was created
+    row = cur.execute(
+        "SELECT hourly_count, daily_count FROM image_delivery_quotas WHERE access_identity='test:quota:identity'"
+    ).fetchone()
+    assert row is not None
+    assert row[0] >= 1
+    # Clean up
+    cur.execute("DELETE FROM image_delivery_quotas WHERE access_identity = 'test:quota:identity'")
+    conn.commit()
+    conn.close()
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  14. Path Traversal Prevention
 # ══════════════════════════════════════════════════════════════════════

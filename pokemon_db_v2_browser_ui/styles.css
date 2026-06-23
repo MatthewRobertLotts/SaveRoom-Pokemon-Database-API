@@ -253,3 +253,6 @@ pre {
 .price-actions { border: 1px solid var(--line); background: rgba(255,255,255,0.04); border-radius: 14px; padding: 0.8rem; margin-bottom: 0.8rem; }
 .listing-list { padding-left: 1.1rem; color: var(--text); }
 .listing-list li { margin-bottom: 0.45rem; }
+
+.legal-footer { border-top: 1px solid var(--line); padding: 1.5rem 2rem; margin-top: 2rem; font-size: 0.7rem; color: var(--muted); text-align: center; }
+.legal-footer a { color: var(--accent-2); text-decoration: underline; }
