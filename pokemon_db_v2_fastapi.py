@@ -28,7 +28,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -109,6 +109,11 @@ from pokemon_db_v5_api_models import (  # noqa: E402
     TakedownCaseResolve,
     SignedUrlResponse,
     SignedUrlResponseArticle,
+    PhysicalPhotoUploadResponse,
+    PhysicalPhotoListResponse,
+    PhysicalPhotoUploadResponseArticle,
+    PhysicalPhotoDetailResponse,
+    PhysicalPhotoItem,
 )
 
 DEFAULT_SETTINGS = settings_from_env()
@@ -1108,15 +1113,95 @@ def _get_derivative_cache_key(source_path: Path, size: str) -> str:
     return f'{source_hash}_{size}_v{CACHE_VERSION}'
 
 
-def _delivery_log_cleanup(conn: sqlite3.Connection, *, retention_days: int = 30) -> int:
-    """Remove raw delivery log entries older than retention_days.
-    Returns number of deleted rows.
+def _aggregate_delivery_log(conn: sqlite3.Connection, *, target_date: str | None = None) -> dict[str, Any]:
+    """Aggregate yesterday's delivery log entries into daily summary rows.
+
+    Aggregates by tenant_id, api_key_id, card_key, policy_decision.
+    Deletes raw aggregated rows only after successful insert.
+    Returns dict with rows_aggregated, rows_deleted.
     """
     cur = conn.cursor()
-    cutoff = (dt.datetime.now(dt.UTC) - dt.timedelta(days=retention_days)).isoformat()
-    cur.execute("DELETE FROM image_delivery_policy_records WHERE created_at < ?", (cutoff,))
+    if target_date is None:
+        target_date = (dt.datetime.now(dt.UTC) - dt.timedelta(days=1)).strftime('%Y-%m-%d')
+
+    # Count raw rows for target date
+    cur.execute(
+        "SELECT COUNT(*) FROM image_delivery_policy_records WHERE date(created_at) = ?",
+        (target_date,)
+    )
+    rows_found = cur.fetchone()[0]
+    if rows_found == 0:
+        return {'rows_aggregated': 0, 'rows_deleted': 0, 'target_date': target_date}
+
+    # Aggregate by tenant_id, api_key_id, card_key, policy_decision
+    cur.execute("""
+        INSERT OR IGNORE INTO image_delivery_daily_aggregation
+            (agg_date, tenant_id, api_key_id, card_key, policy_decision, count)
+        SELECT
+            date(created_at) AS agg_date,
+            COALESCE(tenant_id, 0) AS tenant_id,
+            api_key_id,
+            COALESCE(card_key, '') AS card_key,
+            policy_decision,
+            COUNT(*) AS count
+        FROM image_delivery_policy_records
+        WHERE date(created_at) = ?
+        GROUP BY date(created_at), tenant_id, api_key_id, card_key, policy_decision
+    """, (target_date,))
+    rows_aggregated = cur.rowcount
     conn.commit()
-    return cur.rowcount
+
+    # Update existing rows with accumulated count
+    cur.execute("""
+        UPDATE image_delivery_daily_aggregation
+        SET count = (
+            SELECT COUNT(*) FROM image_delivery_policy_records
+            WHERE date(created_at) = ?
+              AND (tenant_id IS NULL OR tenant_id = image_delivery_daily_aggregation.tenant_id)
+              AND api_key_id = image_delivery_daily_aggregation.api_key_id
+              AND (card_key IS NULL OR card_key = image_delivery_daily_aggregation.card_key)
+              AND policy_decision = image_delivery_daily_aggregation.policy_decision
+        )
+        WHERE agg_date = ?
+    """, (target_date, target_date))
+    conn.commit()
+
+    # Delete raw rows only after successful aggregation
+    cur.execute(
+        "DELETE FROM image_delivery_policy_records WHERE date(created_at) = ?",
+        (target_date,)
+    )
+    rows_deleted = cur.rowcount
+    conn.commit()
+
+    return {'rows_aggregated': rows_aggregated, 'rows_deleted': rows_deleted, 'target_date': target_date}
+
+
+def _delivery_log_cleanup(conn: sqlite3.Connection, *, retention_days: int = 30) -> dict[str, Any]:
+    """Aggregate and clean up expired delivery log entries.
+
+    1. Aggregates raw entries older than retention_days into daily summary.
+    2. Deletes raw entries only after successful aggregation.
+    Returns dict with aggregate and cleanup stats.
+    """
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=retention_days)
+    target_dates = set()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT DISTINCT date(created_at) FROM image_delivery_policy_records WHERE date(created_at) < ?",
+        (cutoff.strftime('%Y-%m-%d'),)
+    )
+    for row in cur.fetchall():
+        target_dates.add(row[0])
+
+    total_agg = 0
+    total_del = 0
+    for d in sorted(target_dates):
+        result = _aggregate_delivery_log(conn, target_date=d)
+        total_agg += result['rows_aggregated']
+        total_del += result['rows_deleted']
+
+    return {'rows_aggregated': total_agg, 'rows_deleted': total_del, 'retention_days': retention_days}
 
 
 # ── Rate limiting helpers ───────────────────────────────────────────
@@ -2177,6 +2262,9 @@ LIMIT ? OFFSET ?
              'Create per-identity image delivery quota table.'),
             ('v52b', "CREATE INDEX IF NOT EXISTS idx_image_delivery_quotas_identity ON image_delivery_quotas(access_identity)", 'Index for quota lookup by identity.'),
             ('v52c', "CREATE INDEX IF NOT EXISTS idx_image_delivery_quotas_window ON image_delivery_quotas(window_start, window_end)", 'Index for quota cleanup by time window.'),
+            ('v53', "CREATE TABLE IF NOT EXISTS image_delivery_daily_aggregation (agg_id INTEGER PRIMARY KEY AUTOINCREMENT, agg_date TEXT NOT NULL, tenant_id INTEGER, api_key_id INTEGER, card_key TEXT, policy_decision TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), UNIQUE(agg_date, tenant_id, api_key_id, card_key, policy_decision))",
+             'Create daily delivery log aggregation table.'),
+            ('v53b', "CREATE INDEX IF NOT EXISTS idx_delivery_agg_date ON image_delivery_daily_aggregation(agg_date)", 'Index for date-based aggregation queries.'),
         ]
         ran: list[str] = []
         for version, sql, desc in migrations:
@@ -5095,6 +5183,154 @@ LIMIT ? OFFSET ?
             'delivery_logs_24h': log_count_24h,
             'allowed_sizes': list(ALLOWED_IMAGE_SIZES),
         }
+
+    # ── Physical item photo upload/list/retrieve/delete ──────────────
+
+    @app.post('/api/v1/inventory/items/{item_id}/photos', response_model=PhysicalPhotoUploadResponseArticle)
+    def v1_upload_item_photo(
+        item_id: str,
+        file: UploadFile = File(..., description='Image file (JPEG, PNG, WebP)'),
+        publish: bool = Query(False, description='Mark photo as published'),
+        _auth: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(_auth)
+
+        # Verify item exists and belongs to this tenant
+        item = cur.execute(
+            "SELECT 1 FROM physical_items WHERE item_id=? AND tenant_id=?",
+            (item_id, tenant_id)
+        ).fetchone()
+        if not item:
+            raise v1_error(404, 'item_not_found', 'Item not found in this tenant.', {})
+
+        # Validate file type
+        allowed_mime = {'image/jpeg', 'image/png', 'image/webp'}
+        if file.content_type not in allowed_mime:
+            raise v1_error(400, 'invalid_file_type',
+                           f'Invalid file type: {file.content_type}. Allowed: {", ".join(sorted(allowed_mime))}.', {})
+
+        # Read and validate file
+        contents = file.file.read()
+        file_size = len(contents)
+        if file_size > 10 * 1024 * 1024:  # 10MB limit
+            raise v1_error(400, 'file_too_large', 'File exceeds 10MB limit.', {'file_bytes': file_size})
+
+        # Validate image decoding
+        from PIL import Image
+        import io
+        try:
+            img = Image.open(io.BytesIO(contents))
+            img.verify()
+        except Exception:
+            raise v1_error(400, 'invalid_image', 'Uploaded file is not a valid image or is corrupted.', {})
+
+        # Store to physical photos directory
+        import uuid
+        ext = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp'}.get(file.content_type, '.bin')
+        stored_name = f'{uuid.uuid4()}{ext}'
+        photo_dir = _ensure_physical_photos_dir()
+        tenant_dir = photo_dir / str(tenant_id)
+        tenant_dir.mkdir(parents=True, exist_ok=True)
+        storage_path = tenant_dir / stored_name
+        with open(storage_path, 'wb') as f:
+            f.write(contents)
+
+        now_val = now_utc()
+        cur.execute(
+            "INSERT INTO physical_item_photos(item_id, tenant_id, uploaded_by, original_filename, storage_path, mime_type, file_bytes, is_published, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (item_id, tenant_id, _auth.get('api_key_id'),
+             file.filename or stored_name, str(storage_path),
+             file.content_type, file_size, 1 if publish else 0, now_val)
+        )
+        conn.commit()
+        photo_id = cur.lastrowid
+        return {
+            'data': {
+                'photo_id': photo_id,
+                'item_id': item_id,
+                'tenant_id': tenant_id,
+                'original_filename': file.filename or stored_name,
+                'mime_type': file.content_type,
+                'file_bytes': file_size,
+                'created_at': now_val,
+            }
+        }
+
+    @app.get('/api/v1/inventory/items/{item_id}/photos', response_model=PhysicalPhotoListResponse)
+    def v1_list_item_photos(
+        item_id: str,
+        _auth: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(_auth)
+        rows_result = cur.execute(
+            "SELECT * FROM physical_item_photos WHERE item_id=? AND tenant_id=? ORDER BY created_at DESC",
+            (item_id, tenant_id)
+        ).fetchall()
+        return {'data': [dict(r) for r in rows_result]}
+
+    @app.get('/api/v1/inventory/items/{item_id}/photos/{photo_id}')
+    def v1_get_item_photo(
+        item_id: str,
+        photo_id: int,
+        _auth: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
+    ) -> Response:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(_auth)
+        row = cur.execute(
+            "SELECT * FROM physical_item_photos WHERE photo_id=? AND item_id=? AND tenant_id=?",
+            (photo_id, item_id, tenant_id)
+        ).fetchone()
+        if not row:
+            raise v1_error(404, 'photo_not_found', 'Photo not found.', {})
+        storage_path = row['storage_path']
+        if not os.path.exists(storage_path):
+            raise v1_error(404, 'photo_file_missing', 'Photo file not found on disk.', {})
+        mime = row['mime_type']
+        with open(storage_path, 'rb') as f:
+            content = f.read()
+        return Response(content=content, media_type=mime, headers={
+            'Content-Type': mime,
+            'Content-Disposition': 'inline',
+            'X-Content-Type-Options': 'nosniff',
+        })
+
+    @app.delete('/api/v1/inventory/items/{item_id}/photos/{photo_id}')
+    def v1_delete_item_photo(
+        item_id: str,
+        photo_id: int,
+        _auth: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(_auth)
+        row = cur.execute(
+            "SELECT storage_path FROM physical_item_photos WHERE photo_id=? AND item_id=? AND tenant_id=?",
+            (photo_id, item_id, tenant_id)
+        ).fetchone()
+        if not row:
+            raise v1_error(404, 'photo_not_found', 'Photo not found.', {})
+        storage_path = row['storage_path']
+        # Archive the photo (soft delete — keep record)
+        now_val = now_utc()
+        cur.execute(
+            "UPDATE physical_item_photos SET is_published=0 WHERE photo_id=?",
+            (photo_id,)
+        )
+        conn.commit()
+        # Delete file from disk
+        if os.path.exists(storage_path):
+            try:
+                os.remove(storage_path)
+            except OSError:
+                pass  # File deletion failure is non-fatal
+        return {'data': {'deleted': True, 'photo_id': photo_id, 'item_id': item_id}}
 
     return app
 

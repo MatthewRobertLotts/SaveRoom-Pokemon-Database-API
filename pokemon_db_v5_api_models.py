@@ -689,3 +689,36 @@ class SignedUrlResponse(BaseModel):
 class SignedUrlResponseArticle(BaseModel):
     data: SignedUrlResponse
 
+
+class PhysicalPhotoUploadResponse(BaseModel):
+    photo_id: int
+    item_id: str
+    tenant_id: int
+    original_filename: str | None = None
+    mime_type: str
+    file_bytes: int
+    created_at: str
+
+
+class PhysicalPhotoItem(BaseModel):
+    photo_id: int
+    item_id: str
+    tenant_id: int
+    original_filename: str | None = None
+    mime_type: str
+    file_bytes: int
+    is_published: bool
+    created_at: str
+
+
+class PhysicalPhotoListResponse(BaseModel):
+    data: list[PhysicalPhotoItem]
+
+
+class PhysicalPhotoUploadResponseArticle(BaseModel):
+    data: PhysicalPhotoUploadResponse
+
+
+class PhysicalPhotoDetailResponse(BaseModel):
+    data: PhysicalPhotoItem
+
