@@ -864,9 +864,20 @@ def _eval_image_policy(conn: sqlite3.Connection, card_key: str, set_id: str | No
         ).fetchone()
         if row:
             return {'allowed': bool(row[0]), 'reason': row[1], 'attribution': row[2], 'matched_scope': 'source', 'scope_value': source_type}
-        # Known source with no explicit policy — falls through to global
+        # No explicit policy for this source — check if it's a known/registered source
+        known = cur.execute(
+            "SELECT 1 FROM v2_card_detail_api_cache WHERE display_image_source_type=? LIMIT 1",
+            (source_type,)
+        ).fetchone()
+        if known:
+            # Known source with no explicit policy — falls through to global
+            pass
+        else:
+            # Unregistered/nonexistent source — blocked
+            return {'allowed': False, 'reason': f'Unregistered image source: "{source_type}" — no delivery policy',
+                    'attribution': None, 'matched_scope': None, 'scope_value': None}
     else:
-        # Unknown/null source — blocked. Must have a known source or an explicit policy.
+        # Unknown/null source — blocked.
         return {'allowed': False, 'reason': 'Unknown image source — no delivery policy',
                 'attribution': None, 'matched_scope': None, 'scope_value': None}
 
@@ -1034,6 +1045,10 @@ def _takedown_atomic(conn: sqlite3.Connection, *, case_id: int, action_type: str
     """
     cur = conn.cursor()
     try:
+        # Verify case exists before proceeding
+        case_row = cur.execute('SELECT 1 FROM takedown_cases WHERE case_id=?', (case_id,)).fetchone()
+        if not case_row:
+            return {'success': False, 'error': f'Takedown case {case_id} not found'}
         # Append event
         cur.execute(
             'INSERT INTO takedown_events(case_id, action_type, scope_type, scope_value, '

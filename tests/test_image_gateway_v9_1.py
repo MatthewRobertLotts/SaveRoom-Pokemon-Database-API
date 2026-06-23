@@ -283,7 +283,12 @@ def test_unknown_source_blocked_even_with_global_enabled():
     assert result2['allowed'] is False, f'Expected blocked for empty source, got {result2}'
 
     # Evaluate with a known source and no explicit policy — should fall through to global
-    result3 = _eval_image_policy(conn, 'en:sv1-999', None, 'en', 'asia_official')
+    # Use a source type that actually exists in the DB's cache
+    known_sources = conn.execute(
+        "SELECT DISTINCT display_image_source_type FROM v2_card_detail_api_cache WHERE display_image_source_type IS NOT NULL LIMIT 1"
+    ).fetchone()
+    known_source = known_sources[0] if known_sources else 'exact_existing_image'
+    result3 = _eval_image_policy(conn, 'en:sv1-999', None, 'en', known_source)
     assert result3['allowed'] is True, f'Known source should fall through to global=enabled, got {result3}'
 
     conn.close()
