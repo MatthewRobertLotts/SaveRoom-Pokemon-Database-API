@@ -918,62 +918,106 @@ def test_physical_photo_cross_tenant_rejection():
 
 def test_takedown_atomic_rollback_after_event_write():
     """If a failure occurs AFTER the takedown event write but BEFORE audit commit,
-    the entire operation rolls back — no orphaned event."""
+    the entire operation rolls back — no orphaned event.
+
+    Uses _takedown_atomic with an invalid actor_membership_id to trigger a failure
+    AFTER the event write but BEFORE the audit commit.
+    """
     from pokemon_db_v2_fastapi import _takedown_atomic
-    conn = sqlite3.connect(str(client.app.state.db))
+    conn = sqlite3.connect(str(client.app.state.db), timeout=30)
+    conn.execute("PRAGMA foreign_keys = ON")
     cur = conn.cursor()
 
-    # Create a genuine case first
-    now_val = '2026-06-23T12:00:00Z'
+    # Create a genuine case
     cur.execute(
         "INSERT INTO takedown_cases(requester_identity, requester_contact, rights_description, status, opened_at) VALUES (?, ?, ?, ?, ?)",
-        ('rollback-test', 'test@test.com', 'Test rights', 'open', now_val)
+        ('rollback-test', 'test@test.com', 'Test rights', 'open', '2026-06-23T12:00:00Z')
     )
     case_id = cur.lastrowid
     conn.commit()
 
-    before_count = cur.execute("SELECT COUNT(*) FROM takedown_events WHERE case_id=?", (case_id,)).fetchone()[0]
-    before_policy = cur.execute("SELECT 1 FROM image_delivery_policies WHERE scope_type='source' AND scope_value='test_fake_source'").fetchone()
+    before_events = cur.execute("SELECT COUNT(*) FROM takedown_events WHERE case_id=?", (case_id,)).fetchone()[0]
+    before_policies = cur.execute("SELECT COUNT(*) FROM image_delivery_policies WHERE scope_type='source' AND scope_value='test_fake_source_2'").fetchone()[0]
 
-    try:
-        # Use explicit BEGIN to prevent autocommit from releasing savepoints
-        conn.execute("BEGIN")
-        cur.execute("SAVEPOINT rollback_test")
-        # Write event
-        cur.execute(
-            "INSERT INTO takedown_events(case_id, action_type, scope_type, scope_value, reason) VALUES (?, ?, ?, ?, ?)",
-            (case_id, 'disabled', 'source', 'test_fake_source', 'Test event for rollback')
-        )
-        # Update policy
-        cur.execute(
-            "INSERT OR IGNORE INTO image_delivery_policies(scope_type, scope_value, external_display_enabled, reason) VALUES ('source', 'test_fake_source', 0, 'Test policy for rollback')"
-        )
-        # Simulate failure — ROLLBACK instead of COMMIT
-        cur.execute("ROLLBACK TO SAVEPOINT rollback_test")
-        cur.execute("RELEASE SAVEPOINT rollback_test")
-        conn.commit()
+    # Call _takedown_atomic with a nonexistent actor_membership_id
+    # The event write succeeds (FK is ON DELETE RESTRICT, not ON INSERT CHECK for NULL)
+    # but the audit write will fail because actor_membership_id references tenant_memberships
+    result = _takedown_atomic(
+        conn, case_id=case_id, action_type='disabled',
+        scope_type='source', scope_value='test_fake_source_2',
+        actor_membership_id=99999, reason='Test atomic rollback',
+        policy_enabled=False,
+        policy_scope_type='source', policy_scope_value='test_fake_source_2'
+    )
 
-        # Verify no orphaned event
-        after_count = cur.execute("SELECT COUNT(*) FROM takedown_events WHERE case_id=?", (case_id,)).fetchone()[0]
-        assert after_count == before_count, f'Orphaned event found! Before={before_count}, After={after_count}'
+    # _takedown_atomic should fail because actor_membership_id=99999 doesn't exist
+    # The function catches the exception and returns {'success': False}
+    assert not result['success'], f"Expected failure, got success: {result}"
+    assert 'error' in result
 
-        # Verify no orphaned policy
-        policy_row = cur.execute("SELECT 1 FROM image_delivery_policies WHERE scope_type='source' AND scope_value='test_fake_source'").fetchone()
-        assert policy_row is None, 'Orphaned policy found after rollback!'
+    # Verify no orphaned event was created (the transaction rolled back)
+    after_events = cur.execute("SELECT COUNT(*) FROM takedown_events WHERE case_id=?", (case_id,)).fetchone()[0]
+    assert after_events == before_events, f"Orphaned event! Before={before_events}, After={after_events}"
 
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        cur.execute("DELETE FROM image_delivery_policies WHERE scope_type='source' AND scope_value='test_fake_source'")
-        cur.execute("DELETE FROM takedown_cases WHERE case_id=?", (case_id,))
-        conn.commit()
-        conn.close()
+    # Verify no orphaned policy
+    policy_row = cur.execute("SELECT 1 FROM image_delivery_policies WHERE scope_type='source' AND scope_value='test_fake_source_2'").fetchone()
+    assert policy_row is None, "Orphaned policy after failed atomic operation!"
+
+    # Cleanup the case
+    cur.execute("DELETE FROM takedown_cases WHERE case_id=?", (case_id,))
+    conn.commit()
+    conn.close()
+
+
+def test_takedown_atomic_rollback_via_savepoint():
+    """Direct SAVEPOINT-based rollback test using raw SQL.
+    Opens a transaction, writes event + policy, then ROLLS BACK.
+    Verifies no orphaned records.
+    """
+    conn = sqlite3.connect(str(client.app.state.db), timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    cur = conn.cursor()
+
+    # Create a case
+    cur.execute(
+        "INSERT INTO takedown_cases(requester_identity, requester_contact, status, opened_at) VALUES (?, ?, ?, ?)",
+        ('sp-test', 'sp@test.com', 'open', '2026-06-23T12:00:00Z')
+    )
+    case_id = cur.lastrowid
+    conn.commit()
+
+    before_events = cur.execute("SELECT COUNT(*) FROM takedown_events WHERE case_id=?", (case_id,)).fetchone()[0]
+
+    # Use SAVEPOINT for atomic rollback test
+    cur.execute("BEGIN IMMEDIATE")
+    cur.execute("SAVEpoint sp_rollback")
+    cur.execute(
+        "INSERT INTO takedown_events(case_id, action_type, scope_type, scope_value, reason) VALUES (?, ?, ?, ?, ?)",
+        (case_id, 'disabled', 'card', 'en:test-999', 'Savepoint rollback test')
+    )
+    cur.execute(
+        "INSERT OR IGNORE INTO image_delivery_policies(scope_type, scope_value, external_display_enabled, reason) VALUES ('card', 'en:test-999', 0, 'Savepoint rollback test')"
+    )
+    # Simulate failure: rollback to savepoint
+    cur.execute("ROLLBACK TO SAVEPOINT sp_rollback")
+    cur.execute("RELEASE SAVEPOINT sp_rollback")
+    conn.commit()
+
+    after_events = cur.execute("SELECT COUNT(*) FROM takedown_events WHERE case_id=?", (case_id,)).fetchone()[0]
+    assert after_events == before_events, f"Orphaned event! Before={before_events}, After={after_events}"
+
+    policy_row = cur.execute("SELECT 1 FROM image_delivery_policies WHERE scope_type='card' AND scope_value='en:test-999'").fetchone()
+    assert policy_row is None, "Orphaned policy after rollback!"
+
+    # Cleanup
+    cur.execute("DELETE FROM takedown_cases WHERE case_id=?", (case_id,))
+    conn.commit()
+    conn.close()
 
 
 def test_global_policy_change_atomic_rollback():
     """If a global policy update fails before audit, the policy change reverts."""
-    conn = sqlite3.connect(str(client.app.state.db))
+    conn = sqlite3.connect(str(client.app.state.db), timeout=30)
     cur = conn.cursor()
 
     before = cur.execute(
@@ -982,7 +1026,7 @@ def test_global_policy_change_atomic_rollback():
     before_val = before[0]
 
     try:
-        conn.execute("BEGIN")
+        cur.execute("BEGIN IMMEDIATE")
         cur.execute("SAVEPOINT global_rollback")
         cur.execute(
             "UPDATE image_delivery_policies SET external_display_enabled=0, updated_at=datetime('now') WHERE scope_type='global' AND scope_value='global'"
@@ -991,7 +1035,7 @@ def test_global_policy_change_atomic_rollback():
         cur.execute("ROLLBACK TO SAVEPOINT global_rollback")
         cur.execute("RELEASE SAVEPOINT global_rollback")
         conn.commit()
-        # Verify reverted
+
         after = cur.execute(
             "SELECT external_display_enabled FROM image_delivery_policies WHERE scope_type='global' AND scope_value='global'"
         ).fetchone()
@@ -1000,14 +1044,13 @@ def test_global_policy_change_atomic_rollback():
         conn.rollback()
         raise
     finally:
-        if before_val == 1:
-            try:
-                conn.execute("UPDATE image_delivery_policies SET external_display_enabled=1 WHERE scope_type='global' AND scope_value='global'")
-                conn.commit()
-            except Exception:
-                pass
+        # Ensure restored
+        try:
+            conn.execute("UPDATE image_delivery_policies SET external_display_enabled=1 WHERE scope_type='global' AND scope_value='global'")
+            conn.commit()
+        except Exception:
+            pass
         conn.close()
-
 
 # ══════════════════════════════════════════════════════════════════════
 #  Final cleanup — remove test keys

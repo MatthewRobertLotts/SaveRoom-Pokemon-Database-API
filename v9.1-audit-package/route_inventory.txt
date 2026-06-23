@@ -1,0 +1,31 @@
+=== ROUTE INVENTORY ===
+Server: 127.0.0.1:8765
+Generated from: pokemon_db_v2_fastapi.create_app()
+
+IMAGE GATEWAY ROUTES:
+  GET      /api/v1/images/cards/{card_key:path}                         v1_card_images (existing v1 metadata)
+  GET      /api/v1/images/assets/{image_id}/content                     v1_image_content (controlled gateway)
+  POST     /api/v1/images/assets/signed-url                             v1_image_signed_url (signed URL generation)
+  GET      /api/v1/images/health                                        v1_image_gateway_health
+
+IMAGE ADMIN ROUTES:
+  GET      /api/v1/admin/images/policies                                v1_admin_list_image_policies
+  POST     /api/v1/admin/images/policies                                v1_admin_create_image_policy
+  PUT      /api/v1/admin/images/policies/global                         v1_admin_set_global_policy
+  GET      /api/v1/admin/images/takedown/cases                          v1_admin_list_takedown_cases
+  POST     /api/v1/admin/images/takedown/cases                          v1_admin_create_takedown_case
+  PUT      /api/v1/admin/images/takedown/cases/{case_id}/resolve        v1_admin_resolve_takedown_case
+
+PHYSICAL ITEM PHOTO ROUTES:
+  POST     /api/v1/inventory/items/{item_id}/photos                     v1_upload_item_photo
+  GET      /api/v1/inventory/items/{item_id}/photos                     v1_list_item_photos
+  GET      /api/v1/inventory/items/{item_id}/photos/{photo_id}          v1_get_item_photo
+  DELETE   /api/v1/inventory/items/{item_id}/photos/{photo_id}          v1_delete_item_photo
+
+STATIC MOUNTS:
+           /ui                                                          ui (browser UI only)
+  MISSING: /images                                                       (raw static mount REMOVED)
+
+CONFIRMATION: No route matches /images/* — the old StaticFiles mount is absent.
+The only image delivery route is /api/v1/images/assets/{image_id}/content which
+requires authentication and enforces delivery policies.

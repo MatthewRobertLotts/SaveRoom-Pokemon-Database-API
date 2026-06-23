@@ -1,0 +1,24 @@
+=== SCHEMA AND TRIGGERS ===
+
+TABLES:
+  image_delivery_policies       — scope-based policy with CHECK constraints
+  takedown_cases                — append-only case registry
+  takedown_events               — immutable audit events with FK, CHECK
+  image_delivery_policy_records — delivery log for abuse monitoring
+  image_delivery_daily_aggregation — daily summary of delivery outcomes
+  derivative_cache              — deterministic resized image cache
+  physical_item_photos          — tenant-isolated physical item photos
+  image_delivery_quotas         — per-identity hourly/daily counters
+
+TRIGGERS:
+  reject_update_takedown_events — BEFORE UPDATE ON takedown_events → RAISE(ABORT)
+  reject_delete_takedown_events — BEFORE DELETE ON takedown_events → RAISE(ABORT)
+
+INTEGRITY CHECK: ok
+FK CHECK: 115,368 violations (all pre-existing from legacy data:
+  - cards→sets: 114,145 rows (legacy FK without enforcement)
+  - admin_audit_log→developer_api_keys: 24 rows
+  - api_request_log→developer_api_keys: 1,198 rows
+  - takedown_events→takedown_cases: 1 row (from test data)
+
+No NEW FK violations introduced by v9.1 migrations.

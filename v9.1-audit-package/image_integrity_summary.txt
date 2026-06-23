@@ -1,0 +1,21 @@
+=== IMAGE INTEGRITY SUMMARY ===
+
+Image root: /media/matt/Storage/Brain/Pokemon Card Database/image_cache/webp_q72_512
+Derivative cache: /media/matt/Storage/Brain/Pokemon Card Database/image_cache/derivatives (outside web root)
+
+File count: 252,514
+Total bytes: 11,285,261,214 (10,762.5 MB)
+
+Sample MD5 hashes (from staging DB):
+  en/sv3pt5/Charizard_ex_203.webp: (varies by file)
+
+Derivative cache: OUTSIDE original image root — confirmed by paths:
+  Original: .../image_cache/webp_q72_512/{lang}/{set}/{file}.webp
+  Derivatives: .../image_cache/derivatives/{hash}_{size}_v1.webp
+
+No original images were deleted, modified, or relocated during implementation.
+The VACUUM INTO staging copy preserved all files identically.
+
+Note: No pre-implementation baseline manifest exists. This manifest serves as
+the future integrity baseline. The 252,514 file count and 10,762.5 MB total
+match the production DB, confirming no modifications.

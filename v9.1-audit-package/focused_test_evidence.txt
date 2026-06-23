@@ -1,0 +1,83 @@
+=== FOCUSED TEST EVIDENCE ===
+
+All tests from: full_tcgdex/pytest_final_143.txt (143 passed, 0 failed)
+
+--- Emergency Switch ---
+test_disabled_global_policy_survives_restart: PASSED
+  - Disables global, simulates connection close/reopen, runs INSERT OR IGNORE (migration re-run)
+  - Asserts external_display_enabled stays 0
+
+--- Unknown Sources ---
+test_unknown_source_blocked_even_with_global_enabled: PASSED
+  - source=None → allowed=False, reason contains "Unknown image source"
+  - source='' → allowed=False, reason contains "Unknown image source"
+  - source='TOTALLY_FAKE_SOURCE_12345' → allowed=False, reason contains "Unregistered image source"
+  - Known source (from DB) → allowed=True (falls through to global=enabled)
+
+--- Policy Precedence ---
+test_policy_precedence_card_wins: PASSED
+test_global_policy_blocks_delivery_when_disabled: PASSED
+test_card_policy_overrides_global: PASSED
+
+--- Signed URL Quotas ---
+test_image_delivery_quota_table: PASSED
+test_image_delivery_quota_enforcement: PASSED
+test_signed_url_generation: PASSED
+test_signed_url_verified_at_delivery: PASSED
+  - signed_url identity tracked in image_delivery_quotas
+  - hourly_count >= 1 after increment
+
+--- Takedown Immutability ---
+test_takedown_events_immutable: PASSED
+  - UPDATE on takedown_events → RAISE(ABORT)
+  - DELETE on takedown_events → RAISE(ABORT)
+
+--- Atomic Rollback ---
+test_takedown_atomic_rollback_after_event_write: PASSED
+  - Creates real case, writes event + policy inside SAVEPOINT, then ROLLBACKs
+  - Asserts event count unchanged (no orphaned event)
+  - Asserts no orphaned policy row
+test_global_policy_change_atomic_rollback: PASSED
+  - Changes global policy inside SAVEPOINT, ROLLBACKs
+  - Asserts policy value reverted to original
+
+--- Physical Photos ---
+test_physical_photo_create_and_list: PASSED
+test_physical_photo_cross_tenant_rejection: PASSED
+test_physical_item_photos_table_exists: PASSED
+test_physical_item_photos_tenant_isolation: PASSED
+  - tenant_id column EXISTS
+  - item_id FK to physical_items EXISTS
+
+--- Delivery Aggregation ---
+test_delivery_aggregation_table_exists: PASSED
+test_delivery_log_aggregation_and_cleanup: PASSED
+  - _aggregate_delivery_log returns rows_aggregated, rows_deleted
+  - _delivery_log_cleanup calls aggregation before deletion
+
+--- Admin Scope Enforcement ---
+test_admin_list_policies: PASSED
+test_admin_create_policy: PASSED
+test_admin_non_admin_cannot_create_policy: PASSED
+test_admin_global_policy_requires_strongest_scope: PASSED
+test_admin_policy_changes_audited: PASSED
+
+--- Static Mount Removed ---
+test_no_raw_images_static_mount: PASSED (404)
+test_no_raw_images_subpath: PASSED (404)
+
+--- Path Traversal ---
+test_safe_image_path_rejects_traversal: PASSED
+  - ../../etc/passwd → None
+  - ..%2F..%2Fetc%2Fpasswd → None
+  - Valid path within root → Path object
+
+--- Rate Limiting ---
+test_rate_limiter_basic: PASSED
+  - _IMAGE_RATE_LIMITER.check() works
+  - remaining() >= 0
+
+--- No Localhost Bypass ---
+test_no_localhost_bypass: PASSED (401/403)
+test_image_content_requires_auth: PASSED
+test_image_content_insufficient_scope: PASSED

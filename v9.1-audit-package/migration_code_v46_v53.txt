@@ -1,0 +1,50 @@
+=== MIGRATION CODE v46-v53b (from source) ===
+
+('v46', "CREATE TABLE IF NOT EXISTS image_delivery_policies (policy_id INTEGER PRIMARY KEY AUTOINCREMENT, scope_type TEXT NOT NULL CHECK (scope_type IN ('global', 'source', 'language', 'set', 'card', 'image')), scope_value TEXT NOT NULL, external_display_enabled INTEGER NOT NULL CHECK (external_display_enabled IN (0, 1)), reason TEXT, attribution_text TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), UNIQUE(scope_type, scope_value), CHECK ((scope_type = 'global' AND scope_value = 'global') OR (scope_type <> 'global' AND length(trim(scope_value)) > 0)))")
+
+('v46b', "INSERT OR IGNORE INTO image_delivery_policies(scope_type, scope_value, external_display_enabled, reason) VALUES ('global', 'global', 1, 'Default: catalogue images enabled by design')")
+
+('v47', "CREATE TABLE IF NOT EXISTS takedown_cases (case_id INTEGER PRIMARY KEY AUTOINCREMENT, requester_identity TEXT NOT NULL, requester_contact TEXT NOT NULL, rights_description TEXT, status TEXT NOT NULL CHECK (status IN ('open', 'under_review', 'resolved', 'rejected')), opened_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), resolved_at TEXT, resolution_summary TEXT)")
+
+('v48', "CREATE TABLE IF NOT EXISTS takedown_events (event_id INTEGER PRIMARY KEY AUTOINCREMENT, case_id INTEGER NOT NULL, action_type TEXT NOT NULL CHECK (action_type IN ('case_opened', 'disabled', 'restored', 'replaced', 'case_resolved', 'case_rejected')), scope_type TEXT CHECK (scope_type IS NULL OR scope_type IN ('global', 'source', 'language', 'set', 'card', 'image')), scope_value TEXT, actor_membership_id INTEGER, reason TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), FOREIGN KEY(case_id) REFERENCES takedown_cases(case_id) ON DELETE RESTRICT, FOREIGN KEY(actor_membership_id) REFERENCES tenant_memberships(membership_id) ON DELETE RESTRICT, CHECK ((scope_type IS NULL AND scope_value IS NULL) OR (scope_type IS NOT NULL AND scope_value IS NOT NULL AND length(trim(scope_value)) > 0)))")
+
+('v48b', "CREATE TRIGGER IF NOT EXISTS reject_update_takedown_events BEFORE UPDATE ON takedown_events BEGIN SELECT RAISE(ABORT, 'Cannot update takedown events'); END")
+
+('v48c', "CREATE TRIGGER IF NOT EXISTS reject_delete_takedown_events BEFORE DELETE ON takedown_events BEGIN SELECT RAISE(ABORT, 'Cannot delete takedown events'); END")
+
+('v49', "CREATE TABLE IF NOT EXISTS image_delivery_policy_records (record_id INTEGER PRIMARY KEY AUTOINCREMENT, image_id INTEGER, card_key TEXT, tenant_id INTEGER, api_key_id INTEGER, requested_size TEXT, policy_decision TEXT NOT NULL, response_status INTEGER NOT NULL, response_outcome TEXT NOT NULL, request_id TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))")
+
+('v49b', "CREATE INDEX IF NOT EXISTS idx_delivery_log_created ON image_delivery_policy_records(created_at)")
+
+('v49c', "CREATE INDEX IF NOT EXISTS idx_delivery_log_card ON image_delivery_policy_records(card_key)")
+
+('v49d', "CREATE INDEX IF NOT EXISTS idx_delivery_log_tenant ON image_delivery_policy_records(tenant_id)")
+
+('v50', "CREATE TABLE IF NOT EXISTS derivative_cache (cache_id INTEGER PRIMARY KEY AUTOINCREMENT, source_image_id INTEGER, source_hash TEXT NOT NULL, size TEXT NOT NULL CHECK (size IN ('thumbnail', 'small', 'medium', 'large')), cache_version INTEGER NOT NULL DEFAULT 1, local_path TEXT NOT NULL, file_bytes INTEGER NOT NULL DEFAULT 0, mime_type TEXT NOT NULL DEFAULT 'image/webp', created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), UNIQUE(source_hash, size, cache_version))")
+
+('v50b', "CREATE INDEX IF NOT EXISTS idx_derivative_cache_source ON derivative_cache(source_image_id)")
+
+('v51', "CREATE TABLE IF NOT EXISTS physical_item_photos (photo_id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT NOT NULL, tenant_id INTEGER NOT NULL, uploaded_by TEXT, original_filename TEXT, storage_path TEXT NOT NULL, mime_type TEXT NOT NULL DEFAULT 'image/jpeg', file_bytes INTEGER, is_published INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), FOREIGN KEY (item_id) REFERENCES physical_items(item_id) ON DELETE CASCADE)")
+
+('v51b', "CREATE INDEX IF NOT EXISTS idx_physical_item_photos_item ON physical_item_photos(item_id)")
+
+('v51c', "CREATE INDEX IF NOT EXISTS idx_physical_item_photos_tenant ON physical_item_photos(tenant_id)")
+
+('v52', "CREATE TABLE IF NOT EXISTS image_delivery_quotas (quota_id INTEGER PRIMARY KEY AUTOINCREMENT, access_identity TEXT NOT NULL, identity_type TEXT NOT NULL CHECK (identity_type IN ('api_key', 'signed_url', 'tenant')), window_start TEXT NOT NULL, window_end TEXT NOT NULL, hourly_count INTEGER NOT NULL DEFAULT 0, daily_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), UNIQUE(access_identity, window_start))")
+
+('v52b', "CREATE INDEX IF NOT EXISTS idx_image_delivery_quotas_identity ON image_delivery_quotas(access_identity)")
+
+('v52c', "CREATE INDEX IF NOT EXISTS idx_image_delivery_quotas_window ON image_delivery_quotas(window_start, window_end)")
+
+('v53', "CREATE TABLE IF NOT EXISTS image_delivery_daily_aggregation (agg_id INTEGER PRIMARY KEY AUTOINCREMENT, agg_date TEXT NOT NULL, tenant_id INTEGER, api_key_id INTEGER, card_key TEXT, policy_decision TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), UNIQUE(agg_date, tenant_id, api_key_id, card_key, policy_decision))")
+
+('v53b', "CREATE INDEX IF NOT EXISTS idx_delivery_agg_date ON image_delivery_daily_aggregation(agg_date)")
+
+=== v46c ABSENT ===
+Confirmed: 0 rows in schema_migrations where version='v46c'
+
+=== DISABLED GLOBAL SURVIVES RESTART ===
+Disabled global → close connection (simulated restart) → migration re-run (INSERT OR IGNORE)
+Result: external_display_enabled remains 0
+INSERT OR IGNORE never overwrites an existing row.
+No migration or startup code re-enables a disabled global policy.
