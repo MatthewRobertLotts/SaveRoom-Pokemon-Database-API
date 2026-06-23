@@ -361,6 +361,7 @@ class PhysicalItemResponse(BaseModel):
     item_id: str
     sku_id: int
     sku_identity: SellableSKUIdentity | None = None
+    revision: int = 0
     certification_number: str | None = None
     certification_company: str | None = None
     certification_grade: float | None = None
@@ -478,12 +479,16 @@ class InventoryValuationBreakdown(BaseModel):
 
 
 class InventoryValuation(BaseModel):
-    total_valuation: float = 0.0
     currency: str = "GBP"
-    valuation_basis: InventoryValuationBreakdown
-    valuation_breakdown: dict[str, float] = {}
-    confidence: str = "MEDIUM"
-    as_of: str | None = None
+    acquisition_cost_total_minor: int = 0
+    current_market_value_total_minor: int = 0
+    realised_sales_total_minor: int = 0
+    valued_item_count: int = 0
+    unvalued_item_count: int = 0
+    stale_valuation_count: int = 0
+    valuation_source: str = "v8 price snapshots"
+    external_requests_used: int = 0
+    total_items: int = 0
 
 
 class TenantResponse(BaseModel):
@@ -499,6 +504,8 @@ class TenantCreate(BaseModel):
     tenant_name: str
     tenant_slug: str
     is_active: bool = True
+    owner_username: str | None = None
+    owner_email: str | None = None
 
 
 class UserResponse(BaseModel):

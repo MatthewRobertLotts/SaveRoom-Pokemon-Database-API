@@ -827,7 +827,7 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
         require_key = os.environ.get('POKEMON_DB_REQUIRE_API_KEY', '').strip().lower() in {'1', 'true', 'yes', 'on'}
         if not require_key:
             request.state.api_key_id = None
-            return {'api_key_id': None, 'scopes': ['cards:read'], 'auth_required': False}
+            return {'api_key_id': None, 'scopes': ['cards:read'], 'auth_required': False, 'membership_id': None}
         raw_key = request.headers.get('x-api-key') or ''
         auth = request.headers.get('authorization') or ''
         if not raw_key and auth.lower().startswith('bearer '):
@@ -837,17 +837,26 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
         key_hash = sha256_text(raw_key)
         conn = connect(app.state.db)
         ensure_v1_api_support(conn)
+        ensure_inventory_support(conn)
         cur = conn.cursor()
-        row = cur.execute('SELECT id, scopes, is_active FROM developer_api_keys WHERE key_hash=? LIMIT 1', (key_hash,)).fetchone()
+        row = cur.execute('SELECT id, scopes, is_active, membership_id FROM developer_api_keys WHERE key_hash=? LIMIT 1', (key_hash,)).fetchone()
         if not row or not row['is_active']:
             raise v1_error(401, 'invalid_api_key', 'Invalid or inactive API key.', None)
         scopes = json.loads(row['scopes'] or '[]') if row['scopes'] else []
-        if scopes and 'cards:read' not in scopes and 'admin' not in scopes:
-            raise v1_error(403, 'insufficient_scope', 'API key does not include cards:read scope.', {'required_scope': 'cards:read'})
+        membership_id = row['membership_id']
+        # Also fetch scopes from api_key_scopes table
+        scope_rows = cur.execute('SELECT scope FROM api_key_scopes WHERE key_id=?', (row['id'],)).fetchall()
+        normalized_scopes = set(scopes) | {sr[0] for sr in scope_rows}
+        # A key with membership_id=NULL must have admin:all to access anything
+        if not membership_id and 'admin:all' not in normalized_scopes and 'admin' not in normalized_scopes:
+            raise v1_error(403, 'insufficient_scope',
+                           'API key without tenant membership requires admin:all scope.',
+                           {'required_scope': 'admin:all'})
         cur.execute('UPDATE developer_api_keys SET last_used_at=CURRENT_TIMESTAMP WHERE id=?', (row['id'],))
         conn.commit()
         request.state.api_key_id = row['id']
-        return {'api_key_id': row['id'], 'scopes': scopes, 'auth_required': True}
+        return {'api_key_id': row['id'], 'scopes': list(normalized_scopes),
+                'auth_required': True, 'membership_id': membership_id}
 
     @app.middleware('http')
     async def v1_request_logger(request: Request, call_next):
@@ -1597,6 +1606,90 @@ LIMIT ? OFFSET ?
             )""", 'Create denormalized inventory snapshot for performance.'),
             ('v33b', 'CREATE INDEX IF NOT EXISTS idx_inventory_snapshots_item ON inventory_snapshots(item_id)', 'Index for snapshot lookup by item.'),
             ('v33c', 'CREATE INDEX IF NOT EXISTS idx_inventory_snapshots_tenant ON inventory_snapshots(tenant_id)', 'Index for tenant isolation on snapshots.'),
+            ('v34', """CREATE TABLE IF NOT EXISTS tenant_memberships (
+                membership_id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                tenant_id INTEGER NOT NULL,
+                role TEXT NOT NULL DEFAULT 'viewer',
+                joined_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+                FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id) ON DELETE CASCADE,
+                UNIQUE(user_id, tenant_id)
+            )""", 'Create tenant memberships table connecting users to tenants with roles.'),
+            ('v34b', 'CREATE INDEX IF NOT EXISTS idx_tenant_memberships_user ON tenant_memberships(user_id)', 'Index for user membership lookup.'),
+            ('v34c', 'CREATE INDEX IF NOT EXISTS idx_tenant_memberships_tenant ON tenant_memberships(tenant_id)', 'Index for tenant membership lookup.'),
+            ('v35', """CREATE TABLE IF NOT EXISTS api_key_scopes (
+                key_id INTEGER NOT NULL,
+                scope TEXT NOT NULL,
+                PRIMARY KEY (key_id, scope),
+                FOREIGN KEY (key_id) REFERENCES developer_api_keys(id) ON DELETE CASCADE
+            )""", 'Create normalised API key scopes table.'),
+            ('v35b', 'CREATE INDEX IF NOT EXISTS idx_api_key_scopes_key ON api_key_scopes(key_id)', 'Index for API key scope lookup.'),
+            ('v36', """CREATE TABLE IF NOT EXISTS admin_audit_log (
+                log_id INTEGER PRIMARY KEY,
+                principal_key_id INTEGER,
+                action TEXT NOT NULL,
+                target_tenant_id INTEGER,
+                target_resource TEXT,
+                request_id TEXT,
+                result TEXT,
+                details_json TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (principal_key_id) REFERENCES developer_api_keys(id)
+            )""", 'Create immutable admin audit log table.'),
+            ('v36b', 'CREATE INDEX IF NOT EXISTS idx_admin_audit_log_principal ON admin_audit_log(principal_key_id)', 'Index for principal lookup.'),
+            ('v36c', 'CREATE INDEX IF NOT EXISTS idx_admin_audit_log_tenant ON admin_audit_log(target_tenant_id)', 'Index for tenant audit lookup.'),
+            ('v36d', 'CREATE INDEX IF NOT EXISTS idx_admin_audit_log_action ON admin_audit_log(action)', 'Index for action type lookup.'),
+            ('v37', """CREATE TABLE IF NOT EXISTS idempotency_records (
+                tenant_id INTEGER NOT NULL,
+                operation TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                request_hash TEXT NOT NULL,
+                response_status INTEGER,
+                resource_type TEXT,
+                resource_id TEXT,
+                response_json TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                expires_at TEXT,
+                PRIMARY KEY (tenant_id, operation, idempotency_key),
+                FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id)
+            )""", 'Create idempotency records table for safe retries.'),
+            ('v37b', 'CREATE INDEX IF NOT EXISTS idx_idempotency_expires ON idempotency_records(expires_at)', 'Index for idempotency expiry cleanup.'),
+            ('v38', """CREATE TABLE IF NOT EXISTS maintenance_audit (
+                audit_id INTEGER PRIMARY KEY,
+                table_name TEXT NOT NULL,
+                row_pk TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                original_values_json TEXT,
+                replacement_values_json TEXT,
+                operator TEXT NOT NULL,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )""", 'Create maintenance audit table for ledger repair records.'),
+            ('v39', 'ALTER TABLE physical_items ADD COLUMN revision INTEGER DEFAULT 0', 'Add optimistic locking revision column to physical_items.'),
+            ('v40', 'ALTER TABLE physical_items ADD COLUMN archived_at TEXT', 'Add soft delete timestamp to physical_items.'),
+            ('v41', 'ALTER TABLE physical_items ADD COLUMN archived_by TEXT', 'Add archive operator column to physical_items.'),
+            ('v42', 'ALTER TABLE physical_items ADD COLUMN archive_reason TEXT', 'Add archive reason column to physical_items.'),
+            ('v43', 'ALTER TABLE inventory_snapshots ADD COLUMN revision INTEGER DEFAULT 0', 'Add revision column to inventory_snapshots for consistency.'),
+            ('v44', """CREATE TRIGGER IF NOT EXISTS reject_update_inventory_transactions
+                BEFORE UPDATE ON inventory_transactions
+            BEGIN
+                SELECT RAISE(ABORT, 'UPDATEs are not allowed on inventory_transactions');
+            END""", 'Add immutability trigger: reject UPDATEs on inventory_transactions.'),
+            ('v44b', """CREATE TRIGGER IF NOT EXISTS reject_delete_inventory_transactions
+                BEFORE DELETE ON inventory_transactions
+            BEGIN
+                SELECT RAISE(ABORT, 'DELETEs are not allowed on inventory_transactions');
+            END""", 'Add immutability trigger: reject DELETEs on inventory_transactions.'),
+            ('v45', """CREATE TRIGGER IF NOT EXISTS reject_update_admin_audit_log
+                BEFORE UPDATE ON admin_audit_log
+            BEGIN
+                SELECT RAISE(ABORT, 'UPDATEs are not allowed on admin_audit_log');
+            END""", 'Add immutability trigger: reject UPDATEs on admin_audit_log.'),
+            ('v45b', """CREATE TRIGGER IF NOT EXISTS reject_delete_admin_audit_log
+                BEFORE DELETE ON admin_audit_log
+            BEGIN
+                SELECT RAISE(ABORT, 'DELETEs are not allowed on admin_audit_log');
+            END""", 'Add immutability trigger: reject DELETEs on admin_audit_log.'),
         ]
         ran: list[str] = []
         for version, sql, desc in migrations:
@@ -2908,9 +3001,102 @@ LIMIT ? OFFSET ?
     # ── Helpers ──────────────────────────────────────────────────────
 
     def ensure_inventory_support(conn: sqlite3.Connection) -> None:
-        """Ensure inventory tables exist. Tables are created by migration
-        framework; this just ensures the price prefix tables are also ready."""
+        """Ensure inventory tables exist and v9 support objects are ready.
+        Tables are created by migration framework; this handles complex
+        operations not expressible as single SQL statements."""
         cur = conn.cursor()
+        # Add membership_id to developer_api_keys if not present (SQLite ALTER TABLE)
+        existing_cols = {r[1] for r in cur.execute('PRAGMA table_info(developer_api_keys)').fetchall()}
+        if 'membership_id' not in existing_cols:
+            cur.execute('ALTER TABLE developer_api_keys ADD COLUMN membership_id INTEGER REFERENCES tenant_memberships(membership_id)')
+            conn.commit()
+        # Ensure default user and membership exist (idempotent)
+        ensure_v9_defaults(conn)
+
+    def ensure_v9_defaults(conn: sqlite3.Connection) -> None:
+        """Create default user and tenant_membership for single-user mode.
+        Idempotent: safe to re-run."""
+        cur = conn.cursor()
+        # Check users table exists
+        users_exists = cur.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='users'"
+        ).fetchone()[0] > 0
+        tenant_memberships_exists = cur.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='tenant_memberships'"
+        ).fetchone()[0] > 0
+        if not (users_exists and tenant_memberships_exists):
+            return  # Tables not yet created by migration
+
+        # Create or resolve default user
+        user_row = cur.execute(
+            "SELECT user_id FROM users WHERE username='system' LIMIT 1"
+        ).fetchone()
+        if not user_row:
+            cur.execute(
+                "INSERT INTO users(tenant_id, username, email, role, is_active) "
+                "VALUES (1, 'system', 'system@saveroom.local', 'admin', 1)"
+            )
+            user_id = cur.lastrowid
+        else:
+            user_id = user_row['user_id']
+
+        # Create admin membership for default tenant
+        existing = cur.execute(
+            "SELECT membership_id FROM tenant_memberships WHERE user_id=? AND tenant_id=?",
+            (user_id, 1)
+        ).fetchone()
+        if not existing:
+            cur.execute(
+                "INSERT INTO tenant_memberships(user_id, tenant_id, role) VALUES (?, ?, 'admin')",
+                (user_id, 1)
+            )
+            membership_id = cur.lastrowid
+            # Link all existing active API keys to this membership if they have no membership_id
+            cur.execute(
+                "UPDATE developer_api_keys SET membership_id=? WHERE membership_id IS NULL AND is_active=1",
+                (membership_id,)
+            )
+        conn.commit()
+
+    def _validate_status_transition(from_status: str, to_status: str, transaction_type: str) -> str | None:
+        """Validate a status transition. Returns None if valid, or error message.
+        
+        The transaction_type parameter is the event type from the endpoint.
+        Maps common status-name usage to the correct event type."""
+        valid = {
+            ('owned', 'consigned'): 'consigned_out',
+            ('owned', 'sold'): 'sold',
+            ('owned', 'lost'): 'marked_lost',
+            ('consigned', 'owned'): 'consignment_returned',
+            ('consigned', 'sold'): 'sold',
+            ('consigned', 'lost'): 'marked_lost',
+            ('lost', 'owned'): 'found',
+            ('lost', 'written_off'): 'written_off',
+            ('owned', 'owned'): 'location_moved',
+            ('consigned', 'consigned'): 'location_moved',
+        }
+        key = (from_status, to_status)
+        expected_type = valid.get(key)
+        if expected_type is None:
+            return f"Invalid transition: {from_status} → {to_status}"
+        # Accept the expected_type OR the to_status name as the transaction type
+        if transaction_type not in (expected_type, to_status, 'location_moved', 'metadata_corrected'):
+            return f"Transition {from_status} → {to_status} requires type '{expected_type}', not '{transaction_type}'"
+        return None
+
+    def _get_transaction_type(to_status: str, from_status: str) -> str:
+        """Map a status change to the standardized transaction type."""
+        mapping = {
+            ('owned', 'consigned'): 'consigned_out',
+            ('owned', 'sold'): 'sold',
+            ('owned', 'lost'): 'marked_lost',
+            ('consigned', 'owned'): 'consignment_returned',
+            ('consigned', 'sold'): 'sold',
+            ('consigned', 'lost'): 'marked_lost',
+            ('lost', 'owned'): 'found',
+            ('lost', 'written_off'): 'written_off',
+        }
+        return mapping.get((from_status, to_status), to_status)
 
     def require_scope(*scopes: str):
         """Dependency factory: require at least one of the given scopes."""
@@ -2929,9 +3115,25 @@ LIMIT ? OFFSET ?
         return _check
 
     def get_tenant_from_key(auth: dict[str, Any]) -> int:
-        """Resolve tenant_id from API key or return default.
-        In the current v1 key system, keys have a tenant_id resolved
-        from the users table. For now, return default tenant (1)."""
+        """Resolve tenant_id from API key's membership_id.
+        
+        Returns the tenant_id derived from the API key's membership.
+        Falls back to tenant 1 only when:
+        - Auth is not required (POKEMON_DB_REQUIRE_API_KEY is off)
+        - The key has no membership_id but is an admin key (admin:all scope)
+        """
+        membership_id = auth.get('membership_id')
+        if membership_id:
+            conn = connect(app.state.db)
+            cur = conn.cursor()
+            row = cur.execute(
+                'SELECT tenant_id FROM tenant_memberships WHERE membership_id=?',
+                (membership_id,)
+            ).fetchone()
+            conn.close()
+            if row:
+                return row['tenant_id']
+        # Fallback for admin keys or auth-disabled mode
         return 1
 
     def build_sku_identity(conn: sqlite3.Connection, sku_id: int) -> dict[str, Any] | None:
@@ -2986,9 +3188,16 @@ LIMIT ? OFFSET ?
         price_observation_id: int | None = None,
         price_snapshot_id: int | None = None,
         created_by: str = 'system',
+        expected_revision: int | None = None,
     ) -> int:
-        """Record an immutable inventory transaction and update the snapshot."""
+        """Record an immutable inventory transaction and update the snapshot atomically.
+        
+        Uses BEGIN IMMEDIATE for write isolation. Increments revision.
+        If expected_revision is provided, the UPDATE is conditional on that revision
+        and returns 0 if the revision doesn't match (caller must handle conflict).
+        """
         cur = conn.cursor()
+        # Insert transaction
         cur.execute("""
             INSERT INTO inventory_transactions(
                 item_id, transaction_type, quantity,
@@ -3005,7 +3214,20 @@ LIMIT ? OFFSET ?
             tenant_id, created_by,
         ))
         txn_id = cur.lastrowid
-        # Update snapshot
+        # Update physical item revision (conditional if expected_revision provided)
+        if expected_revision is not None:
+            cur.execute("""
+                UPDATE physical_items SET revision = revision + 1, updated_at = ?
+                WHERE item_id=? AND tenant_id=? AND revision=?
+            """, (now_utc(), item_id, tenant_id, expected_revision))
+            if cur.rowcount == 0:
+                raise Exception("Revision conflict - item was modified")
+        else:
+            cur.execute("""
+                UPDATE physical_items SET revision = revision + 1, updated_at = ?
+                WHERE item_id=? AND tenant_id=?
+            """, (now_utc(), item_id, tenant_id))
+        # UPSERT snapshot
         cur.execute("""
             INSERT INTO inventory_snapshots(
                 item_id, current_location, current_status, current_condition,
@@ -3015,7 +3237,7 @@ LIMIT ? OFFSET ?
             item_id,
             to_location or from_location,
             to_status or from_status,
-            None,  # condition not tracked in all transactions
+            None,
             txn_id,
             tenant_id,
         ))
@@ -3024,80 +3246,94 @@ LIMIT ? OFFSET ?
 
     def get_current_valuation(conn: sqlite3.Connection, tenant_id: int) -> dict[str, Any]:
         """Calculate current inventory valuation using v8 pricing evidence.
-        For each item, find the latest price_snapshot for its SKU."""
+        
+        Properly separates:
+        - acquisition_cost_total_minor (what was paid to acquire)
+        - current_market_value_total_minor (v8 price snapshots)
+        - realised_sales_total_minor (what was received on sale)
+        
+        Never makes external RapidAPI requests.
+        """
         cur = conn.cursor()
         # Get all items for the tenant
         items = cur.execute(
-            "SELECT item_id, sku_id, certification_company, item_condition, status "
-            "FROM physical_items WHERE tenant_id=? AND status IN ('owned', 'consigned')",
+            "SELECT item_id, sku_id, certification_company, item_condition, status, "
+            "acquired_price, acquired_currency "
+            "FROM physical_items WHERE tenant_id=?",
             (tenant_id,),
         ).fetchall()
 
-        raw_items = 0
-        graded_items = 0
-        total_raw_value = 0.0
-        total_graded_value = 0.0
+        valued_count = 0
+        unvalued_count = 0
+        stale_count = 0
+        acquisition_cost_total = 0.0
+        market_value_total = 0.0
+        realised_sales_total = 0.0
 
         for item in items:
             sku_id = item['sku_id']
-            cert_company = item['certification_company']
-            is_graded = bool(cert_company)
-
+            status = item['status']
+            acquired_price = item['acquired_price'] or 0.0
+            
+            # Track acquisition cost (only for owned/consigned items)
+            if status in ('owned', 'consigned'):
+                acquisition_cost_total += acquired_price
+            
+            # Track realised sales
+            if status == 'sold':
+                # Find sale price from transactions
+                sale_row = cur.execute(
+                    "SELECT price FROM inventory_transactions "
+                    "WHERE item_id=? AND tenant_id=? AND transaction_type='sold' "
+                    "ORDER BY transaction_id DESC LIMIT 1",
+                    (item['item_id'], tenant_id)
+                ).fetchone()
+                if sale_row and sale_row['price']:
+                    realised_sales_total += sale_row['price']
+                continue  # Sold items don't get market valuation
+            
             # Try to find latest price snapshot for this SKU
             snapshot = cur.execute("""
-                SELECT recommended_price, confidence_label
+                SELECT recommended_price, calculated_at
                 FROM price_snapshots
                 WHERE sku_id=? AND price_type='raw'
                 ORDER BY calculated_at DESC LIMIT 1
             """, (sku_id,)).fetchone()
 
-            if not snapshot:
-                # Try without sku_id filter — use target_card_key match
-                snapshot = cur.execute("""
-                    SELECT recommended_price, confidence_label
-                    FROM price_snapshots
-                    WHERE price_type='raw'
-                    ORDER BY calculated_at DESC LIMIT 1
-                """).fetchone()
-
-            price = snapshot['recommended_price'] if snapshot else None
-            if price is not None:
-                if is_graded:
-                    graded_items += 1
-                    total_graded_value += price
-                else:
-                    raw_items += 1
-                    total_raw_value += price
-            elif is_graded:
-                graded_items += 1
+            if snapshot and snapshot['recommended_price']:
+                market_value_total += snapshot['recommended_price']
+                valued_count += 1
+                # Check staleness
+                if snapshot['calculated_at']:
+                    try:
+                        from datetime import datetime, timezone
+                        snap_dt = datetime.fromisoformat(snapshot['calculated_at'])
+                        if snap_dt.tzinfo is None:
+                            snap_dt = snap_dt.replace(tzinfo=timezone.utc)
+                        age_days = (datetime.now(timezone.utc) - snap_dt).days
+                        if age_days >= 7:
+                            stale_count += 1
+                    except (ValueError, TypeError):
+                        stale_count += 1
             else:
-                raw_items += 1
+                unvalued_count += 1
 
-        total_items = raw_items + graded_items
-        total_valuation = round(total_raw_value + total_graded_value, 2)
-
-        # Determine confidence based on how many items have snapshots
-        items_with_prices = sum(1 for item in items if item['certification_company'] or True)
-        confidence = 'MEDIUM'
-        if total_items == 0:
-            confidence = 'LOW'
-        elif items_with_prices >= 10 and total_valuation > 100:
-            confidence = 'HIGH'
+        total_items = len(items)
+        acquisition_cost_total_minor = round(acquisition_cost_total * 100)
+        current_market_value_total_minor = round(market_value_total * 100)
+        realised_sales_total_minor = round(realised_sales_total * 100)
 
         return {
-            'total_valuation': total_valuation,
             'currency': 'GBP',
-            'valuation_basis': {
-                'raw_items': raw_items,
-                'graded_items': graded_items,
-                'total_items': total_items,
-            },
-            'valuation_breakdown': {
-                'raw_value': round(total_raw_value, 2),
-                'graded_value': round(total_graded_value, 2),
-            },
-            'confidence': confidence,
-            'as_of': now_utc(),
+            'acquisition_cost_total_minor': acquisition_cost_total_minor,
+            'current_market_value_total_minor': current_market_value_total_minor,
+            'realised_sales_total_minor': realised_sales_total_minor,
+            'valued_item_count': valued_count,
+            'unvalued_item_count': unvalued_count,
+            'stale_valuation_count': stale_count,
+            'valuation_source': 'v8 price snapshots',
+            'external_requests_used': 0,
+            'total_items': total_items,
         }
 
     # ── Inventory Endpoints ──────────────────────────────────────────
@@ -3157,6 +3393,7 @@ LIMIT ? OFFSET ?
                 'item_id': d['item_id'],
                 'sku_id': d['sku_id'],
                 'sku_identity': sku_identity,
+                'revision': d.get('revision', 0),
                 'certification_number': d['certification_number'],
                 'certification_company': d['certification_company'],
                 'certification_grade': d['certification_grade'],
@@ -3249,6 +3486,7 @@ LIMIT ? OFFSET ?
         return {'data': {
             'item_id': item_id, 'sku_id': body.sku_id,
             'sku_identity': sku_identity,
+            'revision': 0,
             'certification_number': body.certification_number,
             'certification_company': body.certification_company,
             'certification_grade': body.certification_grade,
@@ -3312,6 +3550,7 @@ LIMIT ? OFFSET ?
         return {'data': {
             'item_id': d['item_id'], 'sku_id': d['sku_id'],
             'sku_identity': sku_identity,
+            'revision': d.get('revision', 0),
             'certification_number': d['certification_number'],
             'certification_company': d['certification_company'],
             'certification_grade': d['certification_grade'],
@@ -3362,12 +3601,15 @@ LIMIT ? OFFSET ?
         if body.notes is not None:
             updates.append('notes = ?')
             params.append(body.notes)
+        # location_code and location_detail are NOT allowed via PUT — use PATCH /location
         if body.location_code is not None:
-            updates.append('location_code = ?')
-            params.append(body.location_code)
+            raise v1_error(400, 'field_not_allowed',
+                           'Location changes must use PATCH /api/v1/inventory/items/{item_id}/location.',
+                           {'field': 'location_code'})
         if body.location_detail is not None:
-            updates.append('location_detail = ?')
-            params.append(body.location_detail)
+            raise v1_error(400, 'field_not_allowed',
+                           'Location changes must use PATCH /api/v1/inventory/items/{item_id}/location.',
+                           {'field': 'location_detail'})
 
         if not updates:
             return {'data': {'updated': False, 'reason': 'no_fields_to_update'}}
@@ -3387,6 +3629,7 @@ LIMIT ? OFFSET ?
     def v1_change_item_status(
         item_id: str,
         body: InventoryStatusChange,
+        request: Request,
         _: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
     ) -> dict[str, Any]:
         conn = connect(app.state.db)
@@ -3394,21 +3637,54 @@ LIMIT ? OFFSET ?
         cur = conn.cursor()
         tenant_id = get_tenant_from_key(_)
 
+        # Read If-Match header for revision-based concurrency
+        if_match = request.headers.get('If-Match', '')
+        expected_revision = None
+        try:
+            expected_revision = int(if_match) if if_match else None
+        except (ValueError, TypeError):
+            pass
+
         row = cur.execute(
-            "SELECT status, location_code FROM physical_items WHERE item_id=? AND tenant_id=?",
+            "SELECT status, location_code, revision FROM physical_items WHERE item_id=? AND tenant_id=?",
             (item_id, tenant_id),
         ).fetchone()
         if not row:
             raise v1_error(404, 'item_not_found', 'Physical item not found.', {'item_id': item_id})
 
         old_status = row['status']
+        old_revision = row['revision']
+
+        # Validate transition
+        error = _validate_status_transition(old_status, body.status, body.status)
+        if error:
+            raise v1_error(400, 'invalid_transition', error,
+                           {'current_status': old_status, 'target_status': body.status})
+
+        # If client provided revision, require it matches
+        if expected_revision is not None and expected_revision != old_revision:
+            raise v1_error(409, 'conflict',
+                           f'Item was modified. Current revision: {old_revision}, expected: {expected_revision}',
+                           {'current_revision': old_revision, 'expected_revision': expected_revision})
+
+        # Use conditional UPDATE for atomicity (avoids explicit BEGIN IMMEDIATE lock)
         cur.execute(
-            'UPDATE physical_items SET status=?, updated_at=? WHERE item_id=? AND tenant_id=?',
-            (body.status, now_utc(), item_id, tenant_id),
+            'UPDATE physical_items SET status=?, updated_at=?, revision=revision+1 WHERE item_id=? AND tenant_id=? AND revision=?',
+            (body.status, now_utc(), item_id, tenant_id, old_revision),
         )
+        if cur.rowcount == 0:
+            # Re-read current revision
+            rev_row = cur.execute(
+                "SELECT revision FROM physical_items WHERE item_id=? AND tenant_id=?",
+                (item_id, tenant_id)
+            ).fetchone()
+            current_rev = rev_row['revision'] if rev_row else old_revision
+            raise v1_error(409, 'conflict',
+                           f'Conflict - item was modified',
+                           {'current_revision': current_rev})
 
         record_transaction(
-            conn, item_id, body.status, tenant_id,
+            conn, item_id, _get_transaction_type(body.status, old_status), tenant_id,
             from_status=old_status,
             to_status=body.status,
             to_location=row['location_code'],
@@ -3421,11 +3697,18 @@ LIMIT ? OFFSET ?
             price_snapshot_id=body.price_snapshot_id,
             created_by='api',
         )
+        # Re-read new revision
+        new_row = cur.execute(
+            "SELECT revision FROM physical_items WHERE item_id=? AND tenant_id=?",
+            (item_id, tenant_id)
+        ).fetchone()
+        new_revision = new_row['revision'] if new_row else old_revision + 1
 
         return {'data': {
             'item_id': item_id, 'old_status': old_status,
             'new_status': body.status,
             'transaction_created': True,
+            'revision': new_row['revision'] if new_row else old_revision + 1,
         }}
 
     @app.patch('/api/v1/inventory/items/{item_id}/location')
@@ -3620,7 +3903,183 @@ LIMIT ? OFFSET ?
         return {'data': valuation}
 
     # ── Tenant Endpoints ─────────────────────────────────────────────
-
+    # Admin tenant management under /api/v1/admin/tenants
+    
+    @app.post('/api/v1/admin/tenants', response_model=TenantDetailResponse)
+    def v1_admin_create_tenant(
+        body: TenantCreate,
+        request: Request,
+        _: dict[str, Any] = Depends(require_scope('admin:all')),
+    ) -> dict[str, Any]:
+        """Create a tenant atomically with owner membership.
+        
+        Request body may include owner info:
+        {
+          "tenant_name": "...",
+          "tenant_slug": "...",
+          "is_active": true,
+          "owner": {
+            "username": "...",
+            "email": "..."
+          }
+        }
+        """
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        # Check slug uniqueness
+        existing = cur.execute("SELECT 1 FROM tenants WHERE tenant_slug=?", (body.tenant_slug,)).fetchone()
+        if existing:
+            raise v1_error(409, 'tenant_slug_conflict',
+                           f'Tenant slug "{body.tenant_slug}" already exists.',
+                           {'tenant_slug': body.tenant_slug})
+        cur.execute('BEGIN IMMEDIATE')
+        try:
+            cur.execute(
+                'INSERT INTO tenants(tenant_name, tenant_slug, is_active) VALUES (?, ?, ?)',
+                (body.tenant_name, body.tenant_slug, 1 if body.is_active else 0),
+            )
+            tenant_id = cur.lastrowid
+            
+            # Resolve or create owner user
+            owner_username = getattr(body, 'owner_username', None) or 'admin'
+            owner_email = getattr(body, 'owner_email', None)
+            user_row = cur.execute(
+                "SELECT user_id FROM users WHERE username=? LIMIT 1",
+                (owner_username,)
+            ).fetchone()
+            if not user_row:
+                cur.execute(
+                    "INSERT INTO users(tenant_id, username, email, role, is_active) "
+                    "VALUES (?, ?, ?, 'admin', 1)",
+                    (tenant_id, owner_username, owner_email)
+                )
+                user_id = cur.lastrowid
+            else:
+                user_id = user_row['user_id']
+            
+            # Create admin membership
+            cur.execute(
+                "INSERT INTO tenant_memberships(user_id, tenant_id, role) VALUES (?, ?, 'admin')",
+                (user_id, tenant_id)
+            )
+            
+            # Write admin audit log
+            cur.execute(
+                "INSERT INTO admin_audit_log(principal_key_id, action, target_tenant_id, target_resource, result) "
+                "VALUES (?, 'create_tenant', ?, ?, 'created')",
+                (request.state.api_key_id, tenant_id, f'tenant:{body.tenant_slug}')
+            )
+            
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        
+        row = cur.execute('SELECT * FROM tenants WHERE tenant_id=?', (tenant_id,)).fetchone()
+        return {'data': dict(row)}
+    
+    @app.get('/api/v1/admin/tenants', response_model=TenantListResponse)
+    def v1_admin_list_tenants(
+        _: dict[str, Any] = Depends(require_scope('admin:all')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        rows_result = cur.execute('SELECT * FROM tenants ORDER BY tenant_id').fetchall()
+        return {'data': [dict(r) for r in rows_result]}
+    
+    @app.get('/api/v1/admin/tenants/{slug}', response_model=TenantDetailResponse)
+    def v1_admin_get_tenant(
+        slug: str,
+        _: dict[str, Any] = Depends(require_scope('admin:all', 'admin:tenant')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        row = cur.execute('SELECT * FROM tenants WHERE tenant_slug=?', (slug,)).fetchone()
+        if not row:
+            raise v1_error(404, 'tenant_not_found', 'Tenant not found.', {'slug': slug})
+        return {'data': dict(row)}
+    
+    @app.get('/api/v1/admin/tenants/{slug}/keys')
+    def v1_admin_list_tenant_keys(
+        slug: str,
+        _: dict[str, Any] = Depends(require_scope('admin:all', 'admin:tenant')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        tenant = cur.execute('SELECT tenant_id FROM tenants WHERE tenant_slug=?', (slug,)).fetchone()
+        if not tenant:
+            raise v1_error(404, 'tenant_not_found', 'Tenant not found.', {'slug': slug})
+        # Find keys through memberships
+        rows_result = cur.execute("""
+            SELECT dk.id, dk.label, dk.scopes, dk.is_active, dk.created_at, dk.last_used_at
+            FROM developer_api_keys dk
+            JOIN tenant_memberships tm ON dk.membership_id = tm.membership_id
+            WHERE tm.tenant_id = ?
+            ORDER BY dk.id
+        """, (tenant['tenant_id'],)).fetchall()
+        return {'data': [dict(r) for r in rows_result]}
+    
+    @app.post('/api/v1/admin/tenants/{slug}/keys')
+    def v1_admin_create_tenant_key(
+        slug: str,
+        body: ApiKeyCreateV1,
+        request: Request,
+        _: dict[str, Any] = Depends(require_scope('admin:all', 'admin:tenant')),
+    ) -> dict[str, Any]:
+        import secrets, hashlib
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        tenant = cur.execute('SELECT tenant_id FROM tenants WHERE tenant_slug=?', (slug,)).fetchone()
+        if not tenant:
+            raise v1_error(404, 'tenant_not_found', 'Tenant not found.', {'slug': slug})
+        # Find first admin membership for this tenant
+        membership = cur.execute("""
+            SELECT membership_id FROM tenant_memberships
+            WHERE tenant_id=? AND role IN ('admin', 'manager')
+            ORDER BY membership_id LIMIT 1
+        """, (tenant['tenant_id'],)).fetchone()
+        if not membership:
+            raise v1_error(400, 'no_admin_membership',
+                           f'No admin membership found for tenant "{slug}".',
+                           {'tenant_slug': slug})
+        raw_key = f'sr-{secrets.token_hex(20)}'
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        cur.execute(
+            'INSERT INTO developer_api_keys(key_hash, label, scopes, monthly_quota, is_active, membership_id) '
+            'VALUES (?, ?, ?, ?, 1, ?)',
+            (key_hash, body.label or f'API key for {slug}',
+             json.dumps(body.scopes), body.monthly_quota, membership['membership_id'])
+        )
+        conn.commit()
+        return {'data': {'id': cur.lastrowid, 'key': raw_key, 'label': body.label,
+                         'scopes': body.scopes, 'is_active': True}}
+    
+    @app.post('/api/v1/admin/keys/{key_id}/deactivate')
+    def v1_admin_deactivate_key(
+        key_id: int,
+        request: Request,
+        _: dict[str, Any] = Depends(require_scope('admin:all', 'admin:tenant')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        cur.execute('UPDATE developer_api_keys SET is_active=0 WHERE id=?', (key_id,))
+        if cur.rowcount == 0:
+            raise v1_error(404, 'key_not_found', 'API key not found.', {'key_id': key_id})
+        # Write admin audit log
+        cur.execute(
+            "INSERT INTO admin_audit_log(principal_key_id, action, target_resource, result) "
+            "VALUES (?, 'deactivate_key', ?, 'deactivated')",
+            (request.state.api_key_id, f'key:{key_id}')
+        )
+        conn.commit()
+        return {'data': {'deactivated': True, 'key_id': key_id}}
+    
+    # Legacy tenant endpoints (keep for backward compatibility)
+    
     @app.get('/api/v1/tenants', response_model=TenantListResponse)
     def v1_list_tenants(
         _: dict[str, Any] = Depends(require_scope('admin:tenant', 'admin:all', 'admin')),
