@@ -261,6 +261,65 @@ def test_global_policy_blocks_delivery_when_disabled():
     conn.close()
 
 
+def test_unknown_source_blocked_even_with_global_enabled():
+    """A card with unknown/null image source is blocked, even with global=enabled."""
+    from pokemon_db_v2_fastapi import _eval_image_policy
+    conn = sqlite3.connect(str(client.app.state.db))
+    # Global is enabled — verify
+    gp = conn.execute(
+        "SELECT external_display_enabled FROM image_delivery_policies WHERE scope_type='global' AND scope_value='global'"
+    ).fetchone()
+    assert gp and gp[0] == 1, 'Global policy should be enabled for this test'
+
+    # Evaluate policy for a card with None source_type
+    result = _eval_image_policy(conn, 'en:sv3pt5-203', 'sv3pt5', 'en', None)
+    assert result['allowed'] is False, f'Expected blocked for null source, got {result}'
+    assert 'unknown' in str(result['reason']).lower() or 'no delivery policy' in str(result['reason']).lower(), \
+        f'Reason should mention unknown source, got: {result["reason"]}'
+
+    # Evaluate with empty-string source
+    result2 = _eval_image_policy(conn, 'en:sv3pt5-203', 'sv3pt5', 'en', '')
+    assert result2['allowed'] is False, f'Expected blocked for empty source, got {result2}'
+
+    # Evaluate with a known source and no explicit policy — should fall through to global
+    result3 = _eval_image_policy(conn, 'en:sv3pt5-203', 'sv3pt5', 'en', 'asia_official')
+    assert result3['allowed'] is True, f'Known source should fall through to global=enabled, got {result3}'
+
+    conn.close()
+
+
+def test_disabled_global_policy_survives_restart():
+    """A deliberately disabled global policy stays disabled across migration re-runs.
+    v46b uses INSERT OR IGNORE, so it won't overwrite an existing disabled row.
+    """
+    conn = sqlite3.connect(str(client.app.state.db))
+    # Disable global
+    conn.execute(
+        "UPDATE image_delivery_policies SET external_display_enabled=0, updated_at=datetime('now') "
+        "WHERE scope_type='global' AND scope_value='global'"
+    )
+    conn.commit()
+    # Simulate migration re-run (INSERT OR IGNORE should NOT re-enable)
+    conn.execute(
+        "INSERT OR IGNORE INTO image_delivery_policies(scope_type, scope_value, external_display_enabled, reason) "
+        "VALUES ('global', 'global', 1, 'Default: catalogue images enabled by design')"
+    )
+    conn.commit()
+    # Check global is still disabled
+    gp = conn.execute(
+        "SELECT external_display_enabled FROM image_delivery_policies WHERE scope_type='global' AND scope_value='global'"
+    ).fetchone()
+    assert gp is not None
+    assert gp[0] == 0, f'Global policy was re-enabled by INSERT OR IGNORE! Expected 0, got {gp[0]}'
+    # Restore
+    conn.execute(
+        "UPDATE image_delivery_policies SET external_display_enabled=1, updated_at=datetime('now') "
+        "WHERE scope_type='global' AND scope_value='global'"
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_card_policy_overrides_global():
     """Card-level policy takes precedence over global."""
     conn = sqlite3.connect(str(client.app.state.db))

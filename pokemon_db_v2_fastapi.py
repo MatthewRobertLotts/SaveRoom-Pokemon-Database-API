@@ -864,6 +864,11 @@ def _eval_image_policy(conn: sqlite3.Connection, card_key: str, set_id: str | No
         ).fetchone()
         if row:
             return {'allowed': bool(row[0]), 'reason': row[1], 'attribution': row[2], 'matched_scope': 'source', 'scope_value': source_type}
+        # Known source with no explicit policy — falls through to global
+    else:
+        # Unknown/null source — blocked. Must have a known source or an explicit policy.
+        return {'allowed': False, 'reason': 'Unknown image source — no delivery policy',
+                'attribution': None, 'matched_scope': None, 'scope_value': None}
 
     # 5) Global default policy
     row = cur.execute(
@@ -2058,8 +2063,8 @@ LIMIT ? OFFSET ?
             ('v46', "CREATE TABLE IF NOT EXISTS image_delivery_policies (policy_id INTEGER PRIMARY KEY AUTOINCREMENT, scope_type TEXT NOT NULL CHECK (scope_type IN ('global', 'source', 'language', 'set', 'card', 'image')), scope_value TEXT NOT NULL, external_display_enabled INTEGER NOT NULL CHECK (external_display_enabled IN (0, 1)), reason TEXT, attribution_text TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), UNIQUE(scope_type, scope_value), CHECK ((scope_type = 'global' AND scope_value = 'global') OR (scope_type <> 'global' AND length(trim(scope_value)) > 0)))", 'Create image delivery policy table.'),
             ('v46b', "INSERT OR IGNORE INTO image_delivery_policies(scope_type, scope_value, external_display_enabled, reason) VALUES ('global', 'global', 1, 'Default: catalogue images enabled by design')",
                          'Seed explicit global default policy.'),
-                        ('v46c', "UPDATE image_delivery_policies SET external_display_enabled=1, reason='Default: catalogue images enabled by design (re-seed)' WHERE scope_type='global' AND scope_value='global' AND external_display_enabled=0",
-                         'Re-seed global default if it was disabled.'),
+            ('v47', "CREATE TABLE IF NOT EXISTS takedown_cases (case_id INTEGER PRIMARY KEY AUTOINCREMENT, requester_identity TEXT NOT NULL, requester_contact TEXT NOT NULL, rights_description TEXT, status TEXT NOT NULL CHECK (status IN ('open', 'under_review', 'resolved', 'rejected')), opened_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), resolved_at TEXT, resolution_summary TEXT)",
+                     'Create append-only takedown case registry.'),
             ('v48', "CREATE TABLE IF NOT EXISTS takedown_events (event_id INTEGER PRIMARY KEY AUTOINCREMENT, case_id INTEGER NOT NULL, action_type TEXT NOT NULL CHECK (action_type IN ('case_opened', 'disabled', 'restored', 'replaced', 'case_resolved', 'case_rejected')), scope_type TEXT CHECK (scope_type IS NULL OR scope_type IN ('global', 'source', 'language', 'set', 'card', 'image')), scope_value TEXT, actor_membership_id INTEGER, reason TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), FOREIGN KEY(case_id) REFERENCES takedown_cases(case_id) ON DELETE RESTRICT, FOREIGN KEY(actor_membership_id) REFERENCES tenant_memberships(membership_id) ON DELETE RESTRICT, CHECK ((scope_type IS NULL AND scope_value IS NULL) OR (scope_type IS NOT NULL AND scope_value IS NOT NULL AND length(trim(scope_value)) > 0)))", 'Create immutable takedown event audit log.'),
             ('v48b', "CREATE TRIGGER IF NOT EXISTS reject_update_takedown_events BEFORE UPDATE ON takedown_events BEGIN SELECT RAISE(ABORT, 'Cannot update takedown events'); END", 'Reject UPDATEs on takedown_events.'),
             ('v48c', "CREATE TRIGGER IF NOT EXISTS reject_delete_takedown_events BEFORE DELETE ON takedown_events BEGIN SELECT RAISE(ABORT, 'Cannot delete takedown events'); END", 'Reject DELETEs on takedown_events.'),
