@@ -32,8 +32,7 @@ from pokemon_db_v2_fastapi import create_app
 
 
 # ── Fixture: Two-tenant setup ─────────────────────────────────────────
-# Enable API key authentication for multi-tenant tests
-os.environ['POKEMON_DB_REQUIRE_API_KEY'] = '1'
+# Auth is managed by conftest.py pytest_runtest_setup/teardown hooks.
 
 TENANT_A_SLUG = 'tenant-a-test'
 TENANT_B_SLUG = 'tenant-b-test'

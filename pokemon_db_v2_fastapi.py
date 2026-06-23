@@ -1114,10 +1114,12 @@ def _get_derivative_cache_key(source_path: Path, size: str) -> str:
 
 
 def _aggregate_delivery_log(conn: sqlite3.Connection, *, target_date: str | None = None) -> dict[str, Any]:
-    """Aggregate yesterday's delivery log entries into daily summary rows.
+    """Aggregate delivery log entries into daily summary rows.
 
     Aggregates by tenant_id, api_key_id, card_key, policy_decision.
     Deletes raw aggregated rows only after successful insert.
+    Idempotent: repeated calls with the same date are safe.
+    Failed aggregation preserves raw records.
     Returns dict with rows_aggregated, rows_deleted.
     """
     cur = conn.cursor()
@@ -1133,48 +1135,48 @@ def _aggregate_delivery_log(conn: sqlite3.Connection, *, target_date: str | None
     if rows_found == 0:
         return {'rows_aggregated': 0, 'rows_deleted': 0, 'target_date': target_date}
 
-    # Aggregate by tenant_id, api_key_id, card_key, policy_decision
-    cur.execute("""
-        INSERT OR IGNORE INTO image_delivery_daily_aggregation
-            (agg_date, tenant_id, api_key_id, card_key, policy_decision, count)
-        SELECT
-            date(created_at) AS agg_date,
-            COALESCE(tenant_id, 0) AS tenant_id,
-            api_key_id,
-            COALESCE(card_key, '') AS card_key,
-            policy_decision,
-            COUNT(*) AS count
-        FROM image_delivery_policy_records
-        WHERE date(created_at) = ?
-        GROUP BY date(created_at), tenant_id, api_key_id, card_key, policy_decision
-    """, (target_date,))
-    rows_aggregated = cur.rowcount
-    conn.commit()
-
-    # Update existing rows with accumulated count
-    cur.execute("""
-        UPDATE image_delivery_daily_aggregation
-        SET count = (
-            SELECT COUNT(*) FROM image_delivery_policy_records
+    try:
+        # First, compute the aggregation from raw records
+        cur.execute("""
+            SELECT
+                date(created_at) AS agg_date,
+                COALESCE(tenant_id, 0) AS tenant_id,
+                COALESCE(api_key_id, 0) AS api_key_id,
+                COALESCE(card_key, '') AS card_key,
+                policy_decision,
+                COUNT(*) AS new_count
+            FROM image_delivery_policy_records
             WHERE date(created_at) = ?
-              AND (tenant_id IS NULL OR tenant_id = image_delivery_daily_aggregation.tenant_id)
-              AND api_key_id = image_delivery_daily_aggregation.api_key_id
-              AND (card_key IS NULL OR card_key = image_delivery_daily_aggregation.card_key)
-              AND policy_decision = image_delivery_daily_aggregation.policy_decision
+            GROUP BY date(created_at), COALESCE(tenant_id, 0), COALESCE(api_key_id, 0),
+                     COALESCE(card_key, ''), policy_decision
+        """, (target_date,))
+        groups = cur.fetchall()
+        rows_aggregated = 0
+        for g in groups:
+            agg_date, tenant_id, api_key_id, card_key, policy_decision, new_count = g
+            # Upsert: add to existing count or insert new
+            cur.execute("""
+                INSERT INTO image_delivery_daily_aggregation
+                    (agg_date, tenant_id, api_key_id, card_key, policy_decision, count, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(agg_date, tenant_id, api_key_id, card_key, policy_decision)
+                DO UPDATE SET count = count + excluded.count
+            """, (agg_date, tenant_id, api_key_id, card_key, policy_decision, new_count))
+            rows_aggregated += 1
+        conn.commit()
+
+        # Delete raw rows only after successful aggregation
+        cur.execute(
+            "DELETE FROM image_delivery_policy_records WHERE date(created_at) = ?",
+            (target_date,)
         )
-        WHERE agg_date = ?
-    """, (target_date, target_date))
-    conn.commit()
+        rows_deleted = cur.rowcount
+        conn.commit()
 
-    # Delete raw rows only after successful aggregation
-    cur.execute(
-        "DELETE FROM image_delivery_policy_records WHERE date(created_at) = ?",
-        (target_date,)
-    )
-    rows_deleted = cur.rowcount
-    conn.commit()
-
-    return {'rows_aggregated': rows_aggregated, 'rows_deleted': rows_deleted, 'target_date': target_date}
+        return {'rows_aggregated': rows_aggregated, 'rows_deleted': rows_deleted, 'target_date': target_date}
+    except Exception:
+        conn.rollback()
+        return {'rows_aggregated': 0, 'rows_deleted': 0, 'target_date': target_date, 'error': 'aggregation_failed'}
 
 
 def _delivery_log_cleanup(conn: sqlite3.Connection, *, retention_days: int = 30) -> dict[str, Any]:
