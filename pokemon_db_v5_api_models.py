@@ -585,3 +585,107 @@ class PriceFetchResponseV1(BaseModel):
     source: PriceSourceV1 | None = None
     outliers: dict[str, Any]
 
+
+# ── v9.1 Image Gateway Models ────────────────────────────────────────
+
+class DeliveryPolicyArticle(BaseModel):
+    """A single delivery policy entry."""
+    policy_id: int
+    scope_type: str
+    scope_value: str
+    external_display_enabled: bool
+    reason: str | None = None
+    attribution_text: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class DeliveryPolicyCreate(BaseModel):
+    scope_type: str = Field(..., description="Global, source, language, set, card, image")
+    scope_value: str
+    external_display_enabled: bool
+    reason: str | None = None
+    attribution_text: str | None = None
+
+
+class DeliveryPolicyUpdate(BaseModel):
+    external_display_enabled: bool
+    reason: str | None = None
+    attribution_text: str | None = None
+
+
+class DeliveryPolicyListResponse(BaseModel):
+    data: list[DeliveryPolicyArticle]
+
+
+class DeliveryPolicyArticleResponse(BaseModel):
+    data: DeliveryPolicyArticle
+
+
+class TakedownCaseCreate(BaseModel):
+    requester_identity: str = Field(..., description="Name or email of the requester")
+    requester_contact: str = Field(..., description="Contact email or phone")
+    rights_description: str | None = None
+
+
+class TakedownCaseResolve(BaseModel):
+    resolution: str = Field(..., description="restore or remove")
+    resolution_summary: str | None = None
+
+
+class TakedownEventResponse(BaseModel):
+    event_id: int
+    case_id: int
+    action_type: str
+    scope_type: str | None = None
+    scope_value: str | None = None
+    actor_membership_id: int | None = None
+    reason: str | None = None
+    created_at: str
+
+
+class TakedownCaseResponse(BaseModel):
+    case_id: int
+    requester_identity: str
+    requester_contact: str
+    rights_description: str | None = None
+    status: str
+    opened_at: str
+    resolved_at: str | None = None
+    resolution_summary: str | None = None
+    events: list[TakedownEventResponse] = []
+
+
+class TakedownCaseListResponse(BaseModel):
+    data: list[TakedownCaseResponse]
+
+
+class ImageContentResponse(BaseModel):
+    """Binary content response — not directly used as a Pydantic model
+    but returned as StreamingResponse in the gateway route."""
+    pass
+
+
+class DeliveryLogEntry(BaseModel):
+    log_id: int
+    image_id: int | None = None
+    card_key: str | None = None
+    tenant_id: int | None = None
+    api_key_id: int | None = None
+    size: str | None = None
+    policy_decision: str
+    response_status: int
+    response_outcome: str
+    created_at: str
+
+
+class SignedUrlResponse(BaseModel):
+    url: str
+    expires_at: str
+    image_id: int
+    size: str
+
+
+class SignedUrlResponseArticle(BaseModel):
+    data: SignedUrlResponse
+
