@@ -272,17 +272,18 @@ def test_unknown_source_blocked_even_with_global_enabled():
     assert gp and gp[0] == 1, 'Global policy should be enabled for this test'
 
     # Evaluate policy for a card with None source_type
-    result = _eval_image_policy(conn, 'en:sv3pt5-203', 'sv3pt5', 'en', None)
+    # Use set_id=None to isolate source-level check (avoid set policies from other tests)
+    result = _eval_image_policy(conn, 'en:sv1-999', None, 'en', None)
     assert result['allowed'] is False, f'Expected blocked for null source, got {result}'
     assert 'unknown' in str(result['reason']).lower() or 'no delivery policy' in str(result['reason']).lower(), \
         f'Reason should mention unknown source, got: {result["reason"]}'
 
     # Evaluate with empty-string source
-    result2 = _eval_image_policy(conn, 'en:sv3pt5-203', 'sv3pt5', 'en', '')
+    result2 = _eval_image_policy(conn, 'en:sv1-999', None, 'en', '')
     assert result2['allowed'] is False, f'Expected blocked for empty source, got {result2}'
 
     # Evaluate with a known source and no explicit policy — should fall through to global
-    result3 = _eval_image_policy(conn, 'en:sv3pt5-203', 'sv3pt5', 'en', 'asia_official')
+    result3 = _eval_image_policy(conn, 'en:sv1-999', None, 'en', 'asia_official')
     assert result3['allowed'] is True, f'Known source should fall through to global=enabled, got {result3}'
 
     conn.close()
