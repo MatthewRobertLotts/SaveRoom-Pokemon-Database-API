@@ -1,8 +1,0 @@
-v9.1-image-gateway
-59ad40b884583b38ca5333ebac9856ecb839369a
-59ad40b v9.1 final: fix delivery log test lock contention
-    v9.1 final: fix delivery log test lock contention
-
- tests/test_image_gateway_v9_1.py |    54 +-
- v9.1-image-gateway.patch         | 38549 ++++++++++++++++++++++++++++++++++++-
- 2 files changed, 38563 insertions(+), 40 deletions(-)
