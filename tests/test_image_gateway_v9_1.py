@@ -993,12 +993,14 @@ def test_delivery_log_cleanup_preserves_raw_on_failure():
 
 def test_delivery_log_cli_dry_run():
     """The CLI script can be invoked and reports correctly."""
-    import subprocess, shutil
-    venv_python = shutil.which('python', path='/home/matt/.hermes/hermes-agent/venv/bin') or '/home/matt/.hermes/hermes-agent/venv/bin/python'
+    import subprocess, sys
+    from pathlib import Path
+    script_dir = Path(__file__).resolve().parent.parent / 'scripts'
+    script_path = script_dir / 'delivery_log_cleanup.py'
     result = subprocess.run(
-        [venv_python, 'scripts/delivery_log_cleanup.py', 'dry-run', '--retention-days', '0'],
+        [sys.executable, str(script_path), 'dry-run', '--retention-days', '0'],
         capture_output=True, text=True, timeout=30,
-        cwd='/media/matt/Storage/Brain/Pokemon Card Database',
+        cwd=str(script_dir.parent),
         env={**os.environ, 'POKEMON_DB_DB': str(client.app.state.db)}
     )
     assert result.returncode == 0, f"CLI failed: {result.stderr}\nstdout: {result.stdout}"

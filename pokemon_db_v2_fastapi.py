@@ -801,23 +801,27 @@ PHYSICAL_PHOTOS_DIR: Path | None = None
 def _get_signed_url_secret() -> str:
     """Return signed URL HMAC secret.
 
-    Production/CI: MUST be set via POKEMON_DB_SIGNED_URL_SECRET env var (min 16 chars).
-    Test mode: set via fixture. Falls back only when env var is explicitly set to 'dev-ephemeral'.
+    Behaviour governed by POKEMON_DB_ENV:
+      production|unset:  Must have POKEMON_DB_SIGNED_URL_SECRET (>=32 chars) or fail closed.
+      development:       Ephemeral 64-char secret allowed with stderr warning.
+      test:              Fixture supplies fixed secret via POKEMON_DB_SIGNED_URL_SECRET env.
     """
     global SIGNED_URL_SECRET
     if SIGNED_URL_SECRET is None:
         import secrets as _sec
+        env_mode = os.environ.get('POKEMON_DB_ENV', 'production')
         SIGNED_URL_SECRET = os.environ.get('POKEMON_DB_SIGNED_URL_SECRET', '')
-        if not SIGNED_URL_SECRET and os.environ.get('POKEMON_DB_REQUIRE_API_KEY', '') == 'dev-ephemeral':
-            # Explicit development mode — ephemeral 64-char hex secret with warning
-            SIGNED_URL_SECRET = _sec.token_hex(32)
-            import sys as _sys
-            print('[v9.1] WARNING: Using ephemeral signed URL secret — URLs will be invalidated on restart', file=_sys.stderr)
-        elif len(SIGNED_URL_SECRET) < 16:
-            raise RuntimeError(
-                'POKEMON_DB_SIGNED_URL_SECRET must be set (min 16 chars). '
-                'Set to a strong random secret for production. For development, set POKEMON_DB_REQUIRE_API_KEY=dev-ephemeral.'
-            )
+        if not SIGNED_URL_SECRET:
+            if env_mode == 'development':
+                SIGNED_URL_SECRET = _sec.token_hex(32)  # 64 hex chars = 256 bits
+                import sys as _sys
+                print('[v9.1] WARNING: Using ephemeral signed URL secret (POKEMON_DB_ENV=development) — URLs invalidated on restart', file=_sys.stderr)
+            elif env_mode == 'test':
+                raise RuntimeError('POKEMON_DB_SIGNED_URL_SECRET must be set in test mode (fixture should provide it)')
+            else:
+                raise RuntimeError('POKEMON_DB_SIGNED_URL_SECRET must be set (min 32 chars). Generate: python -c "import secrets; print(secrets.token_hex(32))"')
+        elif len(SIGNED_URL_SECRET) < 32:
+            raise RuntimeError('POKEMON_DB_SIGNED_URL_SECRET too short (got %d chars, need >=32 for 128-bit entropy)' % len(SIGNED_URL_SECRET))
     return SIGNED_URL_SECRET
 
 
@@ -1725,8 +1729,8 @@ LIMIT ? OFFSET ?
         images = detail.get('images') or {}
         display_lang = images.get('display_image_source_language_code')
         card_k = canonical_card_key(language_code, card_id)
-        # Gateway URL — controlled delivery, never raw filesystem
-        gateway_url = f'/api/v1/images/assets/0/content?size=medium&card_key={card_k}'
+        # Gateway URL — controlled card-key compatibility route
+        gateway_url = f'/api/v1/images/cards/{card_k}/content?size=medium'
         return {
             'data': {
                 'has_exact_image': bool(images.get('has_exact_image')),
@@ -4962,6 +4966,79 @@ LIMIT ? OFFSET ?
                 'X-Content-Type-Options': 'nosniff',
             },
         )
+
+    # ── Compatibility route: /cards/{card_key}/content ────────────────
+
+    @app.get('/api/v1/images/cards/{card_key:path}/content')
+    def v1_card_image_content(
+        card_key: str,
+        size: str = Query('medium', pattern='^(thumbnail|small|medium|large)$'),
+        token: str | None = Query(None, description='Signed URL token (alternative to API key)'),
+        request: Request = None,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> Response:
+        """Controlled card image delivery by card_key — same gateway semantics."""
+        # Auth info from request.state
+        api_key_id = getattr(request.state, 'api_key_id', None)
+        api_scopes = getattr(request.state, 'api_scopes', [])
+
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+
+        # Verify access
+        access_identity = None
+        if token:
+            secret = _get_signed_url_secret()
+            verified = _verify_signed_url(token, secret)
+            if not verified:
+                raise v1_error(403, 'invalid_token', 'Invalid or expired signed URL token.', {})
+            access_identity = f'signed:{verified["image_id"]}'
+        else:
+            if 'images:read' not in api_scopes:
+                raise v1_error(403, 'insufficient_scope', 'Requires images:read scope.', {})
+            access_identity = f'key:{api_key_id}'
+
+        # Quota check
+        identity_type = 'api_key' if api_key_id else 'signed_url'
+        quota = _check_and_increment_quota(conn, access_identity, identity_type)
+        if not quota['allowed']:
+            raise v1_error(429, quota['reason'], f'Image delivery quota exceeded.', {})
+
+        # Resolve card image
+        image_root = _image_root_dir()
+        if not image_root or not image_root.exists():
+            raise v1_error(500, 'image_root_missing', 'Image storage not available.', {})
+        info = _resolve_card_image(conn, card_key)
+        if not info:
+            raise v1_error(404, 'image_not_found', 'No image found for card_key.', {'card_key': card_key})
+        local_path = _safe_image_path(info['image_path'], image_root)
+        if not local_path:
+            raise v1_error(404, 'image_not_found', 'Image file not found.', {'card_key': card_key})
+
+        # Policy check
+        policy = _eval_image_policy(conn, card_key, info.get('set_id'), info.get('language_code', ''), info.get('source_type'))
+        if not policy['allowed']:
+            _record_delivery_log(image_id=0, card_key=card_key, api_key_id=api_key_id,
+                                 requested_size=size, policy_decision=policy['matched_scope'] or 'blocked',
+                                 response_status=403, response_outcome='policy_blocked')
+            raise v1_error(403, 'image_disabled', 'Image delivery blocked by policy.',
+                           {'reason': policy['reason'], 'scope': policy['matched_scope']})
+
+        # Derivative
+        deriv_path = _derive_image(local_path, size, image_root)
+        if not deriv_path or not deriv_path.exists():
+            deriv_path = local_path
+
+        mime_type = 'image/webp' if deriv_path.suffix.lower() in ('.webp',) else 'image/jpeg'
+        file_bytes = deriv_path.stat().st_size
+
+        _record_delivery_log(image_id=0, card_key=card_key, api_key_id=api_key_id,
+                             requested_size=size, policy_decision='delivered',
+                             response_status=200, response_outcome='ok')
+
+        return Response(content=open(deriv_path, 'rb').read(), media_type=mime_type,
+                        headers={'Content-Type': mime_type, 'Content-Length': str(file_bytes),
+                                 'Content-Disposition': 'inline', 'X-Content-Type-Options': 'nosniff'})
 
 # ── Signed URL endpoint ──────────────────────────────────────────
 
