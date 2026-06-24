@@ -124,3 +124,73 @@ def test_token_format():
     assert int(p[0]) > 0
     assert len(p[1]) == 16
     assert p[2] == '0'; assert p[3] == 'medium'
+
+# ── Direct signing-secret tests ──
+
+def test_secret_required_in_production(monkeypatch):
+    """production + missing secret → RuntimeError"""
+    from pokemon_db_v2_fastapi import SIGNED_URL_SECRET, _get_signed_url_secret
+    monkeypatch.setattr("pokemon_db_v2_fastapi.SIGNED_URL_SECRET", None)
+    monkeypatch.delenv("POKEMON_DB_SIGNED_URL_SECRET", raising=False)
+    monkeypatch.setenv("POKEMON_DB_ENV", "production")
+    with pytest.raises(RuntimeError):
+        _get_signed_url_secret()
+
+
+def test_weak_secret_rejected_in_production(monkeypatch):
+    """production + weak secret → RuntimeError"""
+    from pokemon_db_v2_fastapi import SIGNED_URL_SECRET, _get_signed_url_secret
+    monkeypatch.setattr("pokemon_db_v2_fastapi.SIGNED_URL_SECRET", None)
+    monkeypatch.setenv("POKEMON_DB_SIGNED_URL_SECRET", "too-short")
+    monkeypatch.setenv("POKEMON_DB_ENV", "production")
+    with pytest.raises(RuntimeError):
+        _get_signed_url_secret()
+
+
+def test_strong_secret_accepted_in_production(monkeypatch):
+    """production + strong secret → accepted"""
+    from pokemon_db_v2_fastapi import SIGNED_URL_SECRET, _get_signed_url_secret
+    monkeypatch.setattr("pokemon_db_v2_fastapi.SIGNED_URL_SECRET", None)
+    import secrets
+    strong = secrets.token_hex(32)
+    monkeypatch.setenv("POKEMON_DB_SIGNED_URL_SECRET", strong)
+    monkeypatch.setenv("POKEMON_DB_ENV", "production")
+    s = _get_signed_url_secret()
+    assert s == strong
+
+
+def test_development_ephemeral_secret_allowed(monkeypatch):
+    """development + missing secret → ephemeral generated"""
+    from pokemon_db_v2_fastapi import SIGNED_URL_SECRET, _get_signed_url_secret
+    monkeypatch.setattr("pokemon_db_v2_fastapi.SIGNED_URL_SECRET", None)
+    monkeypatch.delenv("POKEMON_DB_SIGNED_URL_SECRET", raising=False)
+    monkeypatch.setenv("POKEMON_DB_ENV", "development")
+    s = _get_signed_url_secret()
+    assert len(s) == 64  # token_hex(32)
+
+
+def test_test_mode_fixed_secret_accepted(monkeypatch):
+    """test + fixed secret → accepted"""
+    from pokemon_db_v2_fastapi import SIGNED_URL_SECRET, _get_signed_url_secret
+    monkeypatch.setattr("pokemon_db_v2_fastapi.SIGNED_URL_SECRET", None)
+    monkeypatch.setenv("POKEMON_DB_SIGNED_URL_SECRET", "test-mode-fixed-secret-32chars!!")
+    monkeypatch.setenv("POKEMON_DB_ENV", "test")
+    s = _get_signed_url_secret()
+    assert s == "test-mode-fixed-secret-32chars!!"
+
+
+def test_api_key_setting_does_not_control_secret(monkeypatch):
+    """changing POKEMON_DB_REQUIRE_API_KEY does not affect secret policy"""
+    from pokemon_db_v2_fastapi import SIGNED_URL_SECRET, _get_signed_url_secret
+    monkeypatch.setattr("pokemon_db_v2_fastapi.SIGNED_URL_SECRET", None)
+    monkeypatch.delenv("POKEMON_DB_SIGNED_URL_SECRET", raising=False)
+    monkeypatch.setenv("POKEMON_DB_REQUIRE_API_KEY", "1")
+    monkeypatch.setenv("POKEMON_DB_ENV", "production")
+    with pytest.raises(RuntimeError):
+        _get_signed_url_secret()
+    # Now with REQUIRE_API_KEY off — same result
+    monkeypatch.setattr("pokemon_db_v2_fastapi.SIGNED_URL_SECRET", None)
+    monkeypatch.delenv("POKEMON_DB_REQUIRE_API_KEY", raising=False)
+    monkeypatch.setenv("POKEMON_DB_ENV", "production")
+    with pytest.raises(RuntimeError):
+        _get_signed_url_secret()
