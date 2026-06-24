@@ -1021,21 +1021,44 @@ def _derive_image(source_path: Path, size: str, image_root: Path) -> Path | None
         return None
 
 
-def _record_delivery_log(conn: sqlite3.Connection, *, image_id: int | None = None,
+def _record_delivery_log(*, image_id: int | None = None,
                           card_key: str | None = None, tenant_id: int | None = None,
                           api_key_id: int | None = None, requested_size: str | None = None,
                           policy_decision: str, response_status: int,
                           response_outcome: str, request_id: str | None = None) -> None:
-    """Append a delivery log entry."""
-    cur = conn.cursor()
-    cur.execute(
-        'INSERT INTO image_delivery_policy_records(image_id, card_key, tenant_id, api_key_id, '
-        'requested_size, policy_decision, response_status, response_outcome, request_id) '
-        'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        (image_id, card_key, tenant_id, api_key_id, requested_size,
-         policy_decision, response_status, response_outcome, request_id)
-    )
-    conn.commit()
+    """Append a delivery log entry using a dedicated connection.
+
+    Opens its own short-lived connection so that logging is never blocked
+    by uncommitted transactions from the caller's connection.
+    """
+    log_conn = None
+    try:
+        db_path = str(app.state.db)
+        log_conn = sqlite3.connect(db_path, timeout=10)
+        log_conn.execute("PRAGMA journal_mode=WAL")
+        log_conn.execute("PRAGMA busy_timeout=10000")
+        log_conn.execute("PRAGMA foreign_keys=ON")
+        cur = log_conn.cursor()
+        cur.execute(
+            'INSERT INTO image_delivery_policy_records'
+            '(image_id, card_key, tenant_id, api_key_id, requested_size, '
+            'policy_decision, response_status, response_outcome, request_id) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (image_id, card_key, tenant_id, api_key_id, requested_size,
+             policy_decision, response_status, response_outcome, request_id)
+        )
+        log_conn.commit()
+    except Exception as e:
+        import logging
+        logger = logging.getLogger('pokemon_db_v2_fastapi')
+        logger.error('Delivery log write failed: %s (decision=%s, status=%s)',
+                     e, policy_decision, response_status, exc_info=True)
+    finally:
+        if log_conn is not None:
+            try:
+                log_conn.close()
+            except Exception:
+                pass
 
 
 def _takedown_atomic(conn: sqlite3.Connection, *, case_id: int, action_type: str,
@@ -1408,8 +1431,11 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
         cur.execute('UPDATE developer_api_keys SET last_used_at=CURRENT_TIMESTAMP WHERE id=?', (row['id'],))
         conn.commit()
         request.state.api_key_id = row['id']
-        return {'api_key_id': row['id'], 'scopes': list(normalized_scopes),
-                'auth_required': True, 'membership_id': membership_id}
+        request.state.api_scopes = list(normalized_scopes)
+        auth_result = {'api_key_id': row['id'], 'scopes': list(normalized_scopes),
+                       'auth_required': True, 'membership_id': membership_id}
+        request.state.auth_dict = auth_result
+        return auth_result
 
     @app.middleware('http')
     async def v1_request_logger(request: Request, call_next):
@@ -3693,14 +3719,8 @@ LIMIT ? OFFSET ?
         return _check
 
     def get_tenant_from_key(auth: dict[str, Any]) -> int:
-        """Resolve tenant_id from API key's membership_id.
-        
-        Returns the tenant_id derived from the API key's membership.
-        Falls back to tenant 1 only when:
-        - Auth is not required (POKEMON_DB_REQUIRE_API_KEY is off)
-        - The key has no membership_id but is an admin key (admin:all scope)
-        """
-        membership_id = auth.get('membership_id')
+        """Resolve tenant_id from API key's membership_id."""
+        membership_id = auth.get('membership_id') if isinstance(auth, dict) else getattr(auth, 'membership_id', None)
         if membership_id:
             conn = connect(app.state.db)
             cur = conn.cursor()
@@ -4778,13 +4798,13 @@ LIMIT ? OFFSET ?
         size: str = Query('medium', pattern='^(thumbnail|small|medium|large)$'),
         token: str | None = Query(None, description='Signed URL token (alternative to API key)'),
         request: Request = None,
-        _auth: dict[str, Any] = Depends(require_v1_api_key),
+        _: dict[str, Any] = Depends(require_v1_api_key),
     ) -> Response:
-        """Deliver a card image through the controlled gateway.
+        """Deliver a card image through the controlled gateway."""
+        # Auth info is stored on request.state by require_v1_api_key
+        api_key_id = getattr(request.state, 'api_key_id', None)
+        api_scopes = getattr(request.state, 'api_scopes', [])
 
-        Requires images:read scope OR a valid signed URL token.
-        Policy evaluation: image → card → set → language → source → global.
-        """
         conn = connect(app.state.db)
         cur = conn.cursor()
 
@@ -4797,60 +4817,59 @@ LIMIT ? OFFSET ?
                 raise v1_error(403, 'invalid_token', 'Invalid or expired signed URL token.', {})
             access_identity = f'signed:{verified["image_id"]}'
         else:
-            auth_scopes = _auth.get('scopes', [])
-            if 'images:read' not in auth_scopes:
+            if 'images:read' not in api_scopes:
+                _record_delivery_log(image_id=image_id, card_key=None,
+                                     api_key_id=api_key_id,
+                                     requested_size=size, policy_decision='insufficient_scope',
+                                     response_status=403, response_outcome='auth_failed')
                 raise v1_error(403, 'insufficient_scope', 'Requires images:read scope.', {})
-            access_identity = f'key:{_auth.get("api_key_id")}'
+            access_identity = f'key:{api_key_id}'
 
         # Rate limit
         if not _IMAGE_RATE_LIMITER.check(f'img:{access_identity}'):
-            _record_delivery_log(conn, image_id=image_id, card_key=None,
-                                 api_key_id=_auth.get('api_key_id'),
+            _record_delivery_log(image_id=image_id, card_key=None,
+                                 api_key_id=api_key_id,
                                  requested_size=size, policy_decision='rate_limited',
                                  response_status=429, response_outcome='rate_limited',
-                                 request_id=getattr(request, 'state', {}).get('request_id'))
+                                 request_id=getattr(request.state, 'request_id', None))
             raise v1_error(429, 'rate_limited', 'Image request rate limit exceeded. Try again shortly.', {})
 
         # Persistent quota check (per-hour/per-day limits)
-        identity_type = 'api_key' if _auth.get('api_key_id') else 'signed_url'
+        identity_type = 'api_key' if api_key_id else 'signed_url'
         quota = _check_and_increment_quota(conn, access_identity, identity_type)
         if not quota['allowed']:
-            _record_delivery_log(conn, image_id=image_id, card_key=None,
-                                 api_key_id=_auth.get('api_key_id'),
+            _record_delivery_log(image_id=image_id, card_key=None,
+                                 api_key_id=api_key_id,
                                  requested_size=size, policy_decision=quota['reason'],
                                  response_status=429, response_outcome='quota_exceeded',
-                                 request_id=getattr(request, 'state', {}).get('request_id'))
+                                 request_id=getattr(request.state, 'request_id', None))
             raise v1_error(429, quota['reason'],
                            f'Image delivery quota exceeded: {quota["reason"].replace("_", " ")}. '
                            f'Hourly: {quota["hourly_count"]}/{quota["hourly_limit"]}, '
                            f'Daily: {quota["daily_count"]}/{quota["daily_limit"]}.', {})
 
         # Resolve image from DB — never from client-supplied paths
-        # Look up which card this image_id corresponds to via the detail cache
-        # We derive the card_key from the image_id by scanning detail cache for local images
         image_root = _image_root_dir()
         if not image_root or not image_root.exists():
-            _record_delivery_log(conn, image_id=image_id, card_key=None,
-                                 api_key_id=_auth.get('api_key_id'),
+            _record_delivery_log(image_id=image_id, card_key=None,
+                                 api_key_id=api_key_id,
                                  policy_decision='no_image_root', response_status=500,
                                  response_outcome='server_error')
             raise v1_error(500, 'image_root_missing', 'Image storage not available.', {})
 
         # Find a card that has a local image for this image_id
-        # (image_id here maps conceptually via card detail; we iterate the cache)
         card_key = None
         local_path = None
         source_type = None
         language_code = None
         set_id = None
 
-        # Use the card detail cache to find a card with a local image matching this image_id
+        # Use the card detail cache to find a card with a local image
         sample_rows = cur.execute(
             "SELECT language_code, card_id FROM v2_card_detail_api_cache ORDER BY RANDOM() LIMIT 200"
         ).fetchall() if image_id == 0 else []
 
         if image_id == 0 and sample_rows:
-            # Fallback for test/health: pick a card with a local image
             for lang, cid in sample_rows:
                 info = _resolve_card_image(conn, canonical_card_key(lang, cid))
                 if info:
@@ -4863,12 +4882,9 @@ LIMIT ? OFFSET ?
                         set_id = info.get('set_id')
                         break
         elif image_id > 0:
-            # Try to find the card that has this image_id
-            # We store the mapping: derive from detail cache rowid
             pass
 
         if not local_path:
-            # Fallback: try exact card_key lookup from request
             card_key_param = request.query_params.get('card_key', '')
             if card_key_param:
                 info = _resolve_card_image(conn, card_key_param)
@@ -4882,8 +4898,8 @@ LIMIT ? OFFSET ?
                         set_id = info.get('set_id')
 
         if not local_path:
-            _record_delivery_log(conn, image_id=image_id, card_key=card_key,
-                                 api_key_id=_auth.get('api_key_id'),
+            _record_delivery_log(image_id=image_id, card_key=card_key,
+                                 api_key_id=api_key_id,
                                  requested_size=size, policy_decision='not_found',
                                  response_status=404, response_outcome='no_image')
             raise v1_error(404, 'image_not_found', 'No image found for the given identifier.', {'image_id': image_id})
@@ -4891,11 +4907,11 @@ LIMIT ? OFFSET ?
         # Policy check
         policy = _eval_image_policy(conn, card_key or '', set_id, language_code or '', source_type)
         if not policy['allowed']:
-            _record_delivery_log(conn, image_id=image_id, card_key=card_key,
-                                 api_key_id=_auth.get('api_key_id'),
+            _record_delivery_log(image_id=image_id, card_key=card_key,
+                                 api_key_id=api_key_id,
                                  requested_size=size, policy_decision=policy['matched_scope'] or 'blocked',
                                  response_status=403, response_outcome='policy_blocked',
-                                 request_id=getattr(request, 'state', {}).get('request_id'))
+                                 request_id=getattr(request.state, 'request_id', None))
             raise v1_error(403, 'image_disabled',
                            'Image delivery blocked by policy.',
                            {'reason': policy['reason'], 'scope': policy['matched_scope']})
@@ -4903,21 +4919,19 @@ LIMIT ? OFFSET ?
         # Generate or retrieve derivative
         deriv_path = _derive_image(local_path, size, image_root)
         if not deriv_path or not deriv_path.exists():
-            # Fallback: serve original
             deriv_path = local_path
 
         mime_type = 'image/webp' if deriv_path.suffix.lower() in ('.webp',) else 'image/jpeg'
         file_bytes = deriv_path.stat().st_size
         file_mod = dt.datetime.fromtimestamp(deriv_path.stat().st_mtime, tz=dt.UTC)
 
-        # ETag
         etag = hashlib.md5(open(deriv_path, 'rb').read()).hexdigest()[:16]
 
-        _record_delivery_log(conn, image_id=image_id, card_key=card_key,
-                             api_key_id=_auth.get('api_key_id'),
+        _record_delivery_log(image_id=image_id, card_key=card_key,
+                             api_key_id=api_key_id,
                              requested_size=size, policy_decision='delivered',
                              response_status=200, response_outcome='ok',
-                             request_id=getattr(request, 'state', {}).get('request_id'))
+                             request_id=getattr(request.state, 'request_id', None))
 
         return Response(
             content=open(deriv_path, 'rb').read(),
@@ -4928,12 +4942,12 @@ LIMIT ? OFFSET ?
                 'Content-Disposition': 'inline',
                 'ETag': f'"{etag}"',
                 'Last-Modified': file_mod.strftime('%a, %d %b %Y %H:%M:%S GMT'),
-                'Cache-Control': 'public, max-age=86400',
+                'Cache-Control': 'public, max-age=604800, immutable',
                 'X-Content-Type-Options': 'nosniff',
-            }
+            },
         )
 
-    # ── Signed URL endpoint ──────────────────────────────────────────
+# ── Signed URL endpoint ──────────────────────────────────────────
 
     @app.post('/api/v1/images/assets/signed-url', response_model=SignedUrlResponseArticle)
     def v1_image_signed_url(
@@ -5193,11 +5207,13 @@ LIMIT ? OFFSET ?
         item_id: str,
         file: UploadFile = File(..., description='Image file (JPEG, PNG, WebP)'),
         publish: bool = Query(False, description='Mark photo as published'),
-        _auth: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
+        request: Request = None,
+        _: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
     ) -> dict[str, Any]:
         conn = connect(app.state.db)
         ensure_inventory_support(conn)
         cur = conn.cursor()
+        _auth = getattr(request.state, 'auth_dict', None) or {}
         tenant_id = get_tenant_from_key(_auth)
 
         # Verify item exists and belongs to this tenant
@@ -5244,7 +5260,7 @@ LIMIT ? OFFSET ?
         cur.execute(
             "INSERT INTO physical_item_photos(item_id, tenant_id, uploaded_by, original_filename, storage_path, mime_type, file_bytes, is_published, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (item_id, tenant_id, _auth.get('api_key_id'),
+            (item_id, tenant_id, _auth.get('api_key_id') if _auth else None,
              file.filename or stored_name, str(storage_path),
              file.content_type, file_size, 1 if publish else 0, now_val)
         )
@@ -5265,11 +5281,12 @@ LIMIT ? OFFSET ?
     @app.get('/api/v1/inventory/items/{item_id}/photos', response_model=PhysicalPhotoListResponse)
     def v1_list_item_photos(
         item_id: str,
-        _auth: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
+        request: Request = None,
+        _: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
     ) -> dict[str, Any]:
         conn = connect(app.state.db)
         cur = conn.cursor()
-        tenant_id = get_tenant_from_key(_auth)
+        tenant_id = get_tenant_from_key(getattr(request.state, 'auth_dict', None) or {})
         rows_result = cur.execute(
             "SELECT * FROM physical_item_photos WHERE item_id=? AND tenant_id=? ORDER BY created_at DESC",
             (item_id, tenant_id)
@@ -5280,11 +5297,12 @@ LIMIT ? OFFSET ?
     def v1_get_item_photo(
         item_id: str,
         photo_id: int,
-        _auth: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
+        request: Request = None,
+        _: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
     ) -> Response:
         conn = connect(app.state.db)
         cur = conn.cursor()
-        tenant_id = get_tenant_from_key(_auth)
+        tenant_id = get_tenant_from_key(getattr(request.state, 'auth_dict', None) or {})
         row = cur.execute(
             "SELECT * FROM physical_item_photos WHERE photo_id=? AND item_id=? AND tenant_id=?",
             (photo_id, item_id, tenant_id)
@@ -5307,11 +5325,12 @@ LIMIT ? OFFSET ?
     def v1_delete_item_photo(
         item_id: str,
         photo_id: int,
-        _auth: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
+        request: Request = None,
+        _: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
     ) -> dict[str, Any]:
         conn = connect(app.state.db)
         cur = conn.cursor()
-        tenant_id = get_tenant_from_key(_auth)
+        tenant_id = get_tenant_from_key(getattr(request.state, 'auth_dict', None) or {})
         row = cur.execute(
             "SELECT storage_path FROM physical_item_photos WHERE photo_id=? AND item_id=? AND tenant_id=?",
             (photo_id, item_id, tenant_id)
