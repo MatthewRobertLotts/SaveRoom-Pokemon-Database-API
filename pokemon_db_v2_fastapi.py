@@ -856,6 +856,34 @@ def _ensure_physical_photos_dir() -> Path:
     return PHYSICAL_PHOTOS_DIR
 
 
+
+def resolve_image_asset(conn: sqlite3.Connection, image_id: int) -> dict[str, Any] | None:
+    """Resolve a stable image_id (v2_card_detail_api_cache.rowid) to its asset.
+
+    Returns dict with image_id, card_key, set_id, language_code, source_type,
+    image_path, or None if the ID doesn't exist or has no local image.
+    """
+    cur = conn.cursor()
+    row = cur.execute(
+        "SELECT language_code, card_id, local_display_image_url,"
+        " display_image_source_type, display_image_source_language_code,"
+        " resolved_set_id"
+        " FROM v2_card_detail_api_cache WHERE rowid = ?",
+        (image_id,)
+    ).fetchone()
+    if not row or not row[2]:
+        return None
+    lang, cid = row[0], row[1]
+    return {
+        'image_id': image_id,
+        'card_key': canonical_card_key(lang, cid),
+        'set_id': row[5],
+        'language_code': row[3] or lang,
+        'source_type': row[3],
+        'image_path': str(row[2]).lstrip('/'),
+    }
+
+
 def _eval_image_policy(conn: sqlite3.Connection, card_key: str, set_id: str | None,
                        language_code: str, source_type: str | None,
                        image_id: int = 0) -> dict[str, Any]:
@@ -2336,6 +2364,7 @@ LIMIT ? OFFSET ?
             ('v53', "CREATE TABLE IF NOT EXISTS image_delivery_daily_aggregation (agg_id INTEGER PRIMARY KEY AUTOINCREMENT, agg_date TEXT NOT NULL, tenant_id INTEGER, api_key_id INTEGER, card_key TEXT, policy_decision TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), UNIQUE(agg_date, tenant_id, api_key_id, card_key, policy_decision))",
              'Create daily delivery log aggregation table.'),
             ('v53b', "CREATE INDEX IF NOT EXISTS idx_delivery_agg_date ON image_delivery_daily_aggregation(agg_date)", 'Index for date-based aggregation queries.'),
+            ('v54', "CREATE UNIQUE INDEX IF NOT EXISTS idx_card_cache_rowid ON v2_card_detail_api_cache(rowid)", 'Stable image identity — rowid is the canonical image_id.'),
         ]
         ran: list[str] = []
         for version, sql, desc in migrations:
@@ -4908,23 +4937,16 @@ LIMIT ? OFFSET ?
         set_id = None
 
         if image_id > 0:
-            # Direct rowid lookup — deterministic, no RANDOM()
-            row = cur.execute(
-                "SELECT language_code, card_id, local_display_image_url,"
-                " display_image_source_type, display_image_source_language_code,"
-                " resolved_set_id"
-                " FROM v2_card_detail_api_cache WHERE rowid = ?",
-                (image_id,)
-            ).fetchone()
-            if row and row[2]:
-                lang, cid = row[0], row[1]
-                card_key = canonical_card_key(lang, cid)
-                safe = _safe_image_path(str(row[2]).lstrip('/'), image_root)
+            # Deterministic lookup via stable image_id (rowid)
+            asset = resolve_image_asset(conn, image_id)
+            if asset:
+                safe = _safe_image_path(asset['image_path'], image_root)
                 if safe:
                     local_path = safe
-                    source_type = row[3]
-                    language_code = row[4]
-                    set_id = row[5]
+                    card_key = asset['card_key']
+                    source_type = asset['source_type']
+                    language_code = asset['language_code']
+                    set_id = asset['set_id']
 
         if not local_path:
             # Fallback: resolve by card_key query param (compatibility)
@@ -5078,8 +5100,13 @@ LIMIT ? OFFSET ?
 
         Signed URLs are still subject to policy evaluation at delivery time.
         """
+        # Validate image exists before signing
+        conn = connect(app.state.db)
+        asset = resolve_image_asset(conn, image_id)
+        if not asset:
+            raise v1_error(404, 'image_not_found', 'No image found for the given image_id.', {'image_id': image_id})
         secret = _get_signed_url_secret()
-        token, expires_at = _generate_signed_url(image_id, size, secret, expires_in=expires_in)
+        token, expires_at = _generate_signed_url(image_id, size, secret, expires_in=expires_in, api_key_id=getattr(request.state, 'api_key_id', None))
         url = f'/api/v1/images/assets/{image_id}/content?size={size}&token={token}'
         return {
             'data': {
