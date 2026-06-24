@@ -4,11 +4,11 @@ import sqlite3
 import json
 import sys
 import os
-sys.path.insert(0, '/media/matt/Storage/Brain/Pokemon Card Database')
-os.chdir('/media/matt/Storage/Brain/Pokemon Card Database')
+PROJECT_DIR = __import__('pathlib').Path(__file__).resolve().parent.parent; import sys; sys.path.insert(0, str(PROJECT_DIR))
+__import__('os').chdir(str(PROJECT_DIR))
 from pokemon_db_v2_fastapi import _eval_image_policy, _check_and_increment_quota, _delivery_log_cleanup, _QUOTA_HOURLY_LIMIT, _QUOTA_DAILY_LIMIT
 
-db = "/media/matt/Storage/Brain/Pokemon Card Database/full_tcgdex/staging_v9.1_final.sqlite"
+db = __import__('os').environ.get('POKEMON_DB_DB', str(PROJECT_DIR / 'full_tcgdex' / 'pokemon_tcg_set_knowledge_base.sqlite'))
 conn = sqlite3.connect(db)
 cur = conn.cursor()
 

@@ -826,7 +826,18 @@ def _get_signed_url_secret() -> str:
 
 
 def _image_root_dir() -> Path:
-    return DEFAULT_SETTINGS.image_cache_dir or (Path(os.environ.get('POKEMON_DB_IMAGE_ROOT', '/media/matt/Storage/Brain/Pokemon Card Database/image_cache/webp_q72_512')))
+    """Return the canonical image root directory.
+
+    Priority: DEFAULT_SETTINGS.image_cache_dir > POKEMON_DB_IMAGE_ROOT env var > project-relative default.
+    """
+    if DEFAULT_SETTINGS.image_cache_dir:
+        return DEFAULT_SETTINGS.image_cache_dir
+    env = os.environ.get('POKEMON_DB_IMAGE_ROOT', '')
+    if env:
+        return Path(env)
+    # Fallback: relative to the DB file's parent directory
+    db_path = Path(DEFAULT_SETTINGS.db) if DEFAULT_SETTINGS.db else Path('.')
+    return db_path.parent / 'image_cache' / 'webp_q72_512'
 
 
 def _ensure_derivatives_dir() -> Path:

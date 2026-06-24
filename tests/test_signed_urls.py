@@ -11,9 +11,9 @@ READER = "signed-url-test-reader"
 
 @pytest.fixture(scope='module')
 def app_setup():
-    import os
-    os.environ['POKEMON_DB_REQUIRE_API_KEY'] = '1'
-    os.environ['POKEMON_DB_SIGNED_URL_SECRET'] = SECRET
+    import os as _os
+    _os.environ['POKEMON_DB_REQUIRE_API_KEY'] = '1'
+    _os.environ['POKEMON_DB_SIGNED_URL_SECRET'] = SECRET
     from pokemon_db_v2_fastapi import create_app
     app = create_app()
     db = str(app.state.db)
@@ -29,6 +29,13 @@ def app_setup():
     c.commit(); c.close()
     client = TestClient(app)
     yield app, client
+    # Teardown: close all connections to release WAL locks
+    try:
+        import pokemon_db_v2_search_api
+        if hasattr(pokemon_db_v2_search_api, 'close_all'):
+            pokemon_db_v2_search_api.close_all()
+    except Exception:
+        pass
 
 
 H = {'X-API-Key': READER}
