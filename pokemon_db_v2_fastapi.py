@@ -858,29 +858,60 @@ def _ensure_physical_photos_dir() -> Path:
 
 
 def resolve_image_asset(conn: sqlite3.Connection, image_id: int) -> dict[str, Any] | None:
-    """Resolve a stable image_id (v2_card_detail_api_cache.rowid) to its asset.
+    """Resolve a stable image_id from catalogue_image_assets.
 
     Returns dict with image_id, card_key, set_id, language_code, source_type,
-    image_path, or None if the ID doesn't exist or has no local image.
+    source_language_code, image_path, source_hash, or None if not found.
+    """
+    if image_id <= 0:
+        return None
+    cur = conn.cursor()
+    row = cur.execute(
+        "SELECT image_id, card_key, set_id, language_code, source_type,"
+        " source_language_code, local_path, source_hash"
+        " FROM catalogue_image_assets WHERE image_id = ?",
+        (image_id,)
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        'image_id': row[0],
+        'card_key': row[1],
+        'set_id': row[2],
+        'language_code': row[3],
+        'source_type': row[4],
+        'source_language_code': row[5],
+        'image_path': str(row[6]).lstrip('/'),
+        'source_hash': row[7],
+    }
+
+
+
+
+def resolve_preferred_card_image(conn: sqlite3.Connection, card_key: str) -> dict[str, Any] | None:
+    """Resolve the preferred image for a card key from catalogue_image_assets.
+
+    Returns the same dict as resolve_image_asset, or None if no image exists.
     """
     cur = conn.cursor()
     row = cur.execute(
-        "SELECT language_code, card_id, local_display_image_url,"
-        " display_image_source_type, display_image_source_language_code,"
-        " resolved_set_id"
-        " FROM v2_card_detail_api_cache WHERE rowid = ?",
-        (image_id,)
+        "SELECT image_id, card_key, set_id, language_code, source_type,"
+        " source_language_code, local_path, source_hash"
+        " FROM catalogue_image_assets WHERE card_key = ?"
+        " ORDER BY image_id LIMIT 1",
+        (card_key,)
     ).fetchone()
-    if not row or not row[2]:
+    if not row:
         return None
-    lang, cid = row[0], row[1]
     return {
-        'image_id': image_id,
-        'card_key': canonical_card_key(lang, cid),
-        'set_id': row[5],
-        'language_code': row[3] or lang,
-        'source_type': row[3],
-        'image_path': str(row[2]).lstrip('/'),
+        'image_id': row[0],
+        'card_key': row[1],
+        'set_id': row[2],
+        'language_code': row[3],
+        'source_type': row[4],
+        'source_language_code': row[5],
+        'image_path': str(row[6]).lstrip('/'),
+        'source_hash': row[7],
     }
 
 
@@ -1413,7 +1444,7 @@ def resolve_card_local_path(card_key: str, conn: sqlite3.Connection) -> Path | N
 
     Returns a Path relative to the image root, or None if not found.
     """
-    image_info = _resolve_card_image(conn, card_key)
+    image_info = resolve_preferred_card_image(conn, card_key)
     if not image_info or not image_info.get('image_path'):
         return None
     return Path(image_info['image_path'])
@@ -2364,7 +2395,36 @@ LIMIT ? OFFSET ?
             ('v53', "CREATE TABLE IF NOT EXISTS image_delivery_daily_aggregation (agg_id INTEGER PRIMARY KEY AUTOINCREMENT, agg_date TEXT NOT NULL, tenant_id INTEGER, api_key_id INTEGER, card_key TEXT, policy_decision TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), UNIQUE(agg_date, tenant_id, api_key_id, card_key, policy_decision))",
              'Create daily delivery log aggregation table.'),
             ('v53b', "CREATE INDEX IF NOT EXISTS idx_delivery_agg_date ON image_delivery_daily_aggregation(agg_date)", 'Index for date-based aggregation queries.'),
-            ('v54', "CREATE UNIQUE INDEX IF NOT EXISTS idx_card_cache_rowid ON v2_card_detail_api_cache(rowid)", 'Stable image identity — rowid is the canonical image_id.'),
+            ('v54', """
+                CREATE TABLE IF NOT EXISTS catalogue_image_assets (
+                    image_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    card_key TEXT NOT NULL,
+                    set_id TEXT,
+                    language_code TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_language_code TEXT,
+                    local_path TEXT NOT NULL,
+                    source_hash TEXT,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    UNIQUE(card_key, source_type, COALESCE(source_language_code, language_code))
+                )
+            """, 'Stable catalogue image identity — explicit PK, not rowid.'),
+            ('v54b', """
+                INSERT OR IGNORE INTO catalogue_image_assets
+                    (card_key, set_id, language_code, source_type, source_language_code, local_path)
+                SELECT
+                    language_code || ':' || card_id,
+                    resolved_set_id,
+                    language_code,
+                    COALESCE(display_image_source_type, 'unknown'),
+                    display_image_source_language_code,
+                    local_display_image_url
+                FROM v2_card_detail_api_cache
+                WHERE has_display_image = 1
+                  AND local_display_image_url IS NOT NULL
+                  AND trim(local_display_image_url) != ''
+                ORDER BY language_code, card_id
+            """, 'Backfill catalogue_image_assets from existing card cache.'),
         ]
         ran: list[str] = []
         for version, sql, desc in migrations:
@@ -4952,7 +5012,7 @@ LIMIT ? OFFSET ?
             # Fallback: resolve by card_key query param (compatibility)
             card_key_param = request.query_params.get('card_key', '')
             if card_key_param:
-                info = _resolve_card_image(conn, card_key_param)
+                info = resolve_preferred_card_image(conn, card_key_param)
                 if info:
                     card_key = info['card_key']
                     safe = _safe_image_path(info['image_path'], image_root)
@@ -5055,7 +5115,7 @@ LIMIT ? OFFSET ?
         image_root = _image_root_dir()
         if not image_root or not image_root.exists():
             raise v1_error(500, 'image_root_missing', 'Image storage not available.', {})
-        info = _resolve_card_image(conn, card_key)
+        info = resolve_preferred_card_image(conn, card_key)
         if not info:
             raise v1_error(404, 'image_not_found', 'No image found for card_key.', {'card_key': card_key})
         local_path = _safe_image_path(info['image_path'], image_root)
