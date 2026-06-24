@@ -32,6 +32,7 @@ import hmac
 import json
 import os
 import sqlite3
+import tempfile
 import time
 import datetime as dt
 from pathlib import Path
@@ -992,28 +993,52 @@ def test_delivery_log_cleanup_preserves_raw_on_failure():
 
 
 def test_delivery_log_cli_dry_run():
-    """The CLI script can be invoked and reports correctly."""
-    import subprocess, sys, shutil, tempfile
+    """The CLI script can be invoked and reports correctly using a dedicated minimal DB."""
+    import subprocess, sys, sqlite3 as _sq, datetime as _dt
     from pathlib import Path
 
-    # Use an isolated copy to avoid WAL lock contention with other fixtures
-    src_db = str(client.app.state.db)
-    tmp_db = tempfile.mktemp(suffix='.sqlite')
-    shutil.copy2(src_db, tmp_db)
+    script_path = Path(__file__).resolve().parent.parent / 'scripts' / 'delivery_log_cleanup.py'
+    db_path = Path(tempfile.mkdtemp(prefix='cli-test-')) / 'cleanup.db'
 
-    script_dir = Path(__file__).resolve().parent.parent / 'scripts'
-    script_path = script_dir / 'delivery_log_cleanup.py'
+    # Create minimal DB with only the tables needed by the cleanup function
+    c = _sq.connect(str(db_path), timeout=10)
+    c.execute("PRAGMA journal_mode=WAL")
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS image_delivery_policy_records(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            image_id INTEGER, card_key TEXT, api_key_id INTEGER,
+            policy_decision TEXT, response_status INTEGER, response_outcome TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS image_delivery_daily_aggregation(
+            agg_date TEXT, tenant_id INTEGER, api_key_id INTEGER,
+            card_key TEXT, policy_decision TEXT, count INTEGER DEFAULT 0,
+            created_at TEXT,
+            UNIQUE(agg_date, tenant_id, api_key_id, card_key, policy_decision)
+        )
+    """)
+    # Insert a test log entry with an old date to trigger aggregation
+    old_date = (_dt.datetime.now(_dt.UTC) - _dt.timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    c.execute("INSERT INTO image_delivery_policy_records(created_at) VALUES (?)", (old_date,))
+    c.commit()
+    c.close()
+
     try:
         result = subprocess.run(
-            [sys.executable, str(script_path), 'dry-run', '--retention-days', '0'],
+            [sys.executable, str(script_path), 'dry-run', '--retention-days', '1', '--db', str(db_path)],
             capture_output=True, text=True, timeout=30,
-            cwd=str(script_dir.parent),
-            env={**os.environ, 'POKEMON_DB_DB': tmp_db}
+            cwd=db_path.parent,  # temp dir, not repo root
+            env={k: v for k, v in os.environ.items()
+                 if not k.startswith('POKEMON_DB_')}  # clean env
         )
         assert result.returncode == 0, f"CLI failed: {result.stderr}\n{result.stdout}"
-        assert 'dry run' in result.stdout.lower() or 'aggregate' in result.stdout.lower()
+        assert 'dry run' in result.stdout.lower() or 'aggregate' in result.stdout.lower(), \
+            f"Unexpected output: {result.stdout}"
     finally:
-        Path(tmp_db).unlink(missing_ok=True)
+        import shutil
+        shutil.rmtree(str(db_path.parent), ignore_errors=True)
 
 
 # ══════════════════════════════════════════════════════════════════════
