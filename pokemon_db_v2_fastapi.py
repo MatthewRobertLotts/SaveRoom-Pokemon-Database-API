@@ -799,12 +799,25 @@ PHYSICAL_PHOTOS_DIR: Path | None = None
 
 
 def _get_signed_url_secret() -> str:
+    """Return signed URL HMAC secret.
+
+    Production/CI: MUST be set via POKEMON_DB_SIGNED_URL_SECRET env var (min 16 chars).
+    Test mode: set via fixture. Falls back only when env var is explicitly set to 'dev-ephemeral'.
+    """
     global SIGNED_URL_SECRET
     if SIGNED_URL_SECRET is None:
-        import secrets
-        SIGNED_URL_SECRET = os.environ.get('POKEMON_DB_SIGNED_URL_SECRET')
-        if not SIGNED_URL_SECRET:
-            SIGNED_URL_SECRET = secrets.token_hex(32)
+        import secrets as _sec
+        SIGNED_URL_SECRET = os.environ.get('POKEMON_DB_SIGNED_URL_SECRET', '')
+        if not SIGNED_URL_SECRET and os.environ.get('POKEMON_DB_REQUIRE_API_KEY', '') == 'dev-ephemeral':
+            # Explicit development mode — ephemeral 64-char hex secret with warning
+            SIGNED_URL_SECRET = _sec.token_hex(32)
+            import sys as _sys
+            print('[v9.1] WARNING: Using ephemeral signed URL secret — URLs will be invalidated on restart', file=_sys.stderr)
+        elif len(SIGNED_URL_SECRET) < 16:
+            raise RuntimeError(
+                'POKEMON_DB_SIGNED_URL_SECRET must be set (min 16 chars). '
+                'Set to a strong random secret for production. For development, set POKEMON_DB_REQUIRE_API_KEY=dev-ephemeral.'
+            )
     return SIGNED_URL_SECRET
 
 
@@ -1711,20 +1724,23 @@ LIMIT ? OFFSET ?
             raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': canonical_card_key(language_code, card_id)})
         images = detail.get('images') or {}
         display_lang = images.get('display_image_source_language_code')
+        card_k = canonical_card_key(language_code, card_id)
+        # Gateway URL — controlled delivery, never raw filesystem
+        gateway_url = f'/api/v1/images/assets/0/content?size=medium&card_key={card_k}'
         return {
             'data': {
                 'has_exact_image': bool(images.get('has_exact_image')),
                 'has_display_image': bool(images.get('has_display_image')),
                 'exact_image_url': images.get('exact_image_url'),
                 'display_image_url': images.get('display_image_url'),
-                'local_display_image_url': images.get('local_display_image_url'),
+                'local_display_image_url': gateway_url,  # gateway, not raw path
                 'local_display_image_cache_profile': images.get('local_display_image_cache_profile'),
                 'local_display_image_bytes': images.get('local_display_image_bytes'),
                 'display_image_source_type': images.get('display_image_source_type'),
                 'display_image_source_language_code': display_lang,
                 'language_matches_card': (display_lang in (None, '', language_code)),
             },
-            'card_key': canonical_card_key(language_code, card_id),
+            'card_key': card_k,
             'language_code': language_code,
             'card_id': card_id,
         }

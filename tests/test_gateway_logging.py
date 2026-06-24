@@ -186,6 +186,11 @@ class TestV1MetadataContract:
         assert isinstance(data['display_image_url'], str)
         assert isinstance(data['has_display_image'], (bool, int))
 
+        # local_display_image_url is now a controlled gateway URL, not a raw path
+        gateway = data.get('local_display_image_url', '')
+        assert '/api/v1/images/assets/' in gateway, f"Expected gateway URL, got {gateway}"
+        assert '/images/' not in gateway or 'api/v1/images' in gateway  # no raw /images/ mount
+
         # No absolute local filesystem paths
         body_str = json.dumps(body)
         assert '/home/matt' not in body_str
