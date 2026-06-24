@@ -5,9 +5,9 @@ After=network.target
 [Service]
 Type=oneshot
 User=matt
-WorkingDirectory=/media/matt/Storage/Brain/Pokemon Card Database
-ExecStart=/home/matt/.hermes/hermes-agent/venv/bin/python scripts/delivery_log_cleanup.py delivery-log-cleanup --retention-days 30
-Environment=POKEMON_DB_DB=/media/matt/Storage/Brain/Pokemon Card Database/full_tcgdex/pokemon_tcg_set_knowledge_base.sqlite
+WorkingDirectory=<PROJECT_DIR>
+ExecStart=<PYTHON_BIN> scripts/delivery_log_cleanup.py cleanup --retention-days 30
+Environment=POKEMON_DB_DB=<PROJECT_DIR>/full_tcgdex/pokemon_tcg_set_knowledge_base.sqlite
 StandardOutput=journal
 StandardError=journal
 

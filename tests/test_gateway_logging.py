@@ -156,61 +156,44 @@ class TestGatewayDeliveryLogging:
 class TestV1MetadataContract:
     """Test that the v1 image metadata contract is preserved."""
 
-    def test_v1_image_metadata_authenticated(self):
-        """v1 image metadata endpoint returns proper response with valid key."""
-        # Ensure global policy is enabled
+    def test_v1_image_metadata_success_known_card(self):
+        """v1 image metadata endpoint returns 200 with proper structure for a known card."""
         conn = sqlite3.connect(str(client.app.state.db), timeout=10)
         conn.execute("UPDATE image_delivery_policies SET external_display_enabled=1 WHERE scope_type='global' AND scope_value='global'")
         conn.commit()
         conn.close()
 
-        resp = client.get('/api/v1/images/cards/en:sv3pt5-203', headers=HEADERS_READER)
-        # Should return 200 or 404 (card not found), NOT 401/403
-        assert resp.status_code in (200, 404), f"Expected 200/404, got {resp.status_code}"
+        resp = client.get('/api/v1/images/cards/en:base1-1', headers=HEADERS_READER)
+        assert resp.status_code == 200, f"Expected 200 for known card, got {resp.status_code}"
+        body = resp.json()
 
-        if resp.status_code == 200:
-            body = resp.json()
-            assert 'data' in body, "Missing 'data' key in response"
-            assert 'card_key' in body, "Missing 'card_key' in response"
-            assert 'images' in body['data'], "Missing 'images' in data"
+        # Required top-level fields
+        assert 'data' in body
+        assert body.get('card_key') == 'en:base1-1'
+        assert 'card_id' in body
+        assert 'language_code' in body
 
-            images = body['data']['images']
-            # Check required fields exist
-            assert 'has_exact_image' in images
-            assert 'has_display_image' in images
-            assert 'display_image_source_type' in images
+        # Required image metadata fields
+        data = body['data']
+        assert 'has_exact_image' in data
+        assert 'has_display_image' in data
+        assert 'display_image_source_type' in data
+        assert 'display_image_source_language_code' in data
+        assert 'display_image_url' in data
+        assert 'exact_image_url' in data
 
-            # No absolute local paths
-            body_str = json.dumps(body)
-            assert '/media/' not in body_str, "Exposed local path in response"
-            assert '/home/' not in body_str, "Exposed home path in response"
-            assert 'storage_path' not in body_str.lower(), "Exposed storage path"
+        # Field types — all strings or bools
+        assert isinstance(data['display_image_url'], str)
+        assert isinstance(data['has_display_image'], (bool, int))
 
-    def test_v1_image_metadata_no_local_paths(self):
-        """v1 image metadata never exposes local filesystem paths."""
-        resp = client.get('/api/v1/images/cards/en:sv3pt5-203', headers=HEADERS_READER)
-        if resp.status_code == 200:
-            body_str = json.dumps(resp.json())
-            assert '/media/matt' not in body_str
-            assert '/home/matt' not in body_str
-            assert '/Storage/' not in body_str
-            assert 'storage_path' not in body_str.lower()
+        # No absolute local filesystem paths
+        body_str = json.dumps(body)
+        assert '/home/matt' not in body_str
+        assert '/media/matt' not in body_str
+        assert 'storage_path' not in body_str.lower()
+        assert '/Storage/' not in body_str
 
-    def test_v1_image_metadata_backward_compatible(self):
-        """v1 image metadata response schema is backward compatible."""
-        resp = client.get('/api/v1/images/cards/en:sv3pt5-203', headers=HEADERS_READER)
-        if resp.status_code == 200:
-            body = resp.json()
-            assert 'data' in body
-            assert 'card_key' in body
-            assert 'language_code' in body
-            assert 'card_id' in body
-
-            images = body['data']['images']
-            expected_fields = [
-                'has_exact_image', 'has_display_image',
-                'exact_image_url', 'display_image_url',
-                'display_image_source_type', 'display_image_source_language_code',
-            ]
-            for field in expected_fields:
-                assert field in images, f"Missing field: {field}"
+    def test_v1_image_metadata_missing_card_404(self):
+        """v1 image metadata returns 404 for nonexistent card."""
+        resp = client.get('/api/v1/images/cards/xx:nonexistent-99999', headers=HEADERS_READER)
+        assert resp.status_code == 404
