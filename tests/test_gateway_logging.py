@@ -188,7 +188,7 @@ class TestV1MetadataContract:
 
         # local_display_image_url is now a controlled compatibility route URL
         gateway = data.get('local_display_image_url', '')
-        assert '/api/v1/images/cards/' in gateway, f"Expected /api/v1/images/cards/ URL, got {gateway}"
+        assert '/api/v1/images/card/' in gateway, f"Expected /api/v1/images/card/ URL, got {gateway}"
         assert '/content' in gateway
 
         # No absolute local filesystem paths

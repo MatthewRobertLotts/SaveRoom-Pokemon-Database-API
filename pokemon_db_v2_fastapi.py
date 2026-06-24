@@ -1741,7 +1741,7 @@ LIMIT ? OFFSET ?
         display_lang = images.get('display_image_source_language_code')
         card_k = canonical_card_key(language_code, card_id)
         # Gateway URL — controlled card-key compatibility route
-        gateway_url = f'/api/v1/images/cards/{card_k}/content?size=medium'
+        gateway_url = f'/api/v1/images/card/{card_k}/content?size=medium'
         return {
             'data': {
                 'has_exact_image': bool(images.get('has_exact_image')),
@@ -4980,7 +4980,7 @@ LIMIT ? OFFSET ?
 
     # ── Compatibility route: /cards/{card_key}/content ────────────────
 
-    @app.get('/api/v1/images/cards/{card_key:path}/content')
+    @app.get('/api/v1/images/card/{card_key:path}/content')
     def v1_card_image_content(
         card_key: str,
         size: str = Query('medium', pattern='^(thumbnail|small|medium|large)$'),
