@@ -864,6 +864,14 @@ def _eval_image_policy(conn: sqlite3.Connection, card_key: str, set_id: str | No
     Returns dict with allowed, reason, attribution.
     """
     cur = conn.cursor()
+    # 0) Check image-level policy (highest precedence)
+    if image_id:
+        row = cur.execute(
+            "SELECT external_display_enabled, reason, attribution_text FROM image_delivery_policies WHERE scope_type='image' AND scope_value=?",
+            (str(image_id),)
+        ).fetchone()
+        if row:
+            return {'allowed': bool(row[0]), 'reason': row[1], 'attribution': row[2], 'matched_scope': 'image', 'scope_value': str(image_id)}
     # 1) Check card-level policy
     row = cur.execute(
         "SELECT external_display_enabled, reason, attribution_text FROM image_delivery_policies WHERE scope_type='card' AND scope_value=?",
@@ -974,35 +982,38 @@ def _resolve_card_image(conn: sqlite3.Connection, card_key: str) -> dict[str, An
     }
 
 
-def _generate_signed_url(image_id: int, size: str, secret: str, *, expires_in: int = 3600) -> tuple[str, str]:
+def _generate_signed_url(image_id: int, size: str, secret: str, *, expires_in: int = 3600, api_key_id: int | None = None) -> tuple[str, str]:
     """Generate a signed URL for image delivery.
 
-    Returns (signed_url_part, expires_at_iso).
+    Returns (signed_token, expires_at_iso).
+    Binds: image_id:size:expires:api_key_id
     """
     expires = int(time.time()) + expires_in
-    message = f'{image_id}:{size}:{expires}'
-    sig = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()[:16]
-    token = f'{expires}:{sig}:{image_id}:{size}'
+    kid = api_key_id or 0
+    message = f'{image_id}:{size}:{expires}:{kid}'
+    sig = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
+    token = f'{expires}:{sig}:{image_id}:{size}:{kid}'
     expires_at = dt.datetime.fromtimestamp(expires, tz=dt.UTC).isoformat()
     return token, expires_at
 
 
 def _verify_signed_url(token: str, secret: str) -> dict[str, Any] | None:
-    """Verify a signed URL token. Returns dict with image_id and size, or None."""
+    """Verify a signed URL token. Returns dict with image_id, size, api_key_id, or None."""
     try:
         parts = token.split(':')
-        if len(parts) != 4:
+        if len(parts) < 5:
             return None
-        expires_str, sig, image_id_str, size = parts
+        expires_str, sig, image_id_str, size = parts[0:4]
+        kid = parts[4] if len(parts) >= 5 else '0'
         expires = int(expires_str)
         if int(time.time()) > expires:
             return None
-        expected_sig = hmac.new(secret.encode(), f'{image_id_str}:{size}:{expires_str}'.encode(), hashlib.sha256).hexdigest()[:16]
+        expected_sig = hmac.new(secret.encode(), f'{image_id_str}:{size}:{expires_str}:{kid}'.encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(sig, expected_sig):
             return None
         if size not in ALLOWED_IMAGE_SIZES:
             return None
-        return {'image_id': int(image_id_str), 'size': size}
+        return {'image_id': int(image_id_str), 'size': size, 'api_key_id': int(kid) if kid != '0' else None}
     except (ValueError, IndexError):
         return None
 
@@ -4915,18 +4926,6 @@ LIMIT ? OFFSET ?
         elif image_id > 0:
             pass
 
-        if not local_path:
-            card_key_param = request.query_params.get('card_key', '')
-            if card_key_param:
-                info = _resolve_card_image(conn, card_key_param)
-                if info:
-                    safe = _safe_image_path(info['image_path'], image_root)
-                    if safe:
-                        local_path = safe
-                        card_key = info['card_key']
-                        source_type = info.get('source_type')
-                        language_code = info.get('language_code')
-                        set_id = info.get('set_id')
 
         if not local_path:
             _record_delivery_log(image_id=image_id, card_key=card_key,
