@@ -857,7 +857,8 @@ def _ensure_physical_photos_dir() -> Path:
 
 
 def _eval_image_policy(conn: sqlite3.Connection, card_key: str, set_id: str | None,
-                       language_code: str, source_type: str | None) -> dict[str, Any]:
+                       language_code: str, source_type: str | None,
+                       image_id: int = 0) -> dict[str, Any]:
     """Evaluate delivery policy for a card image. Most-specific scope wins.
 
     Precedence: image > card > set > language > source > global
@@ -4949,7 +4950,7 @@ LIMIT ? OFFSET ?
             raise v1_error(404, 'image_not_found', 'No image found for the given identifier.', {'image_id': image_id})
 
         # Policy check
-        policy = _eval_image_policy(conn, card_key or '', set_id, language_code or '', source_type)
+        policy = _eval_image_policy(conn, card_key or '', set_id, language_code or '', source_type, image_id)
         if not policy['allowed']:
             _record_delivery_log(image_id=image_id, card_key=card_key,
                                  api_key_id=api_key_id,
@@ -5040,7 +5041,7 @@ LIMIT ? OFFSET ?
             raise v1_error(404, 'image_not_found', 'Image file not found.', {'card_key': card_key})
 
         # Policy check
-        policy = _eval_image_policy(conn, card_key, info.get('set_id'), info.get('language_code', ''), info.get('source_type'))
+        policy = _eval_image_policy(conn, card_key, info.get('set_id'), info.get('language_code', ''), info.get('source_type'), image_id)
         if not policy['allowed']:
             _record_delivery_log(image_id=0, card_key=card_key, api_key_id=api_key_id,
                                  requested_size=size, policy_decision=policy['matched_scope'] or 'blocked',
