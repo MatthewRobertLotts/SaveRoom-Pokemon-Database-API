@@ -4899,21 +4899,37 @@ LIMIT ? OFFSET ?
                                  response_outcome='server_error')
             raise v1_error(500, 'image_root_missing', 'Image storage not available.', {})
 
-        # Find a card that has a local image for this image_id
+        # Resolve image identity from the real database rowid
         card_key = None
         local_path = None
         source_type = None
         language_code = None
         set_id = None
 
-        # Use the card detail cache to find a card with a local image
-        sample_rows = cur.execute(
-            "SELECT language_code, card_id FROM v2_card_detail_api_cache ORDER BY RANDOM() LIMIT 200"
-        ).fetchall() if image_id == 0 else []
+        if image_id > 0:
+            # Direct rowid lookup — deterministic, no RANDOM()
+            row = cur.execute(
+                "SELECT language_code, card_id, local_display_image_url,"
+                " display_image_source_type, display_image_source_language_code,"
+                " resolved_set_id"
+                " FROM v2_card_detail_api_cache WHERE rowid = ?",
+                (image_id,)
+            ).fetchone()
+            if row and row[2]:
+                lang, cid = row[0], row[1]
+                card_key = canonical_card_key(lang, cid)
+                safe = _safe_image_path(str(row[2]).lstrip('/'), image_root)
+                if safe:
+                    local_path = safe
+                    source_type = row[3]
+                    language_code = row[4]
+                    set_id = row[5]
 
-        if image_id == 0 and sample_rows:
-            for lang, cid in sample_rows:
-                info = _resolve_card_image(conn, canonical_card_key(lang, cid))
+        if not local_path:
+            # Fallback: resolve by card_key query param (compatibility)
+            card_key_param = request.query_params.get('card_key', '')
+            if card_key_param:
+                info = _resolve_card_image(conn, card_key_param)
                 if info:
                     card_key = info['card_key']
                     safe = _safe_image_path(info['image_path'], image_root)
@@ -4922,9 +4938,7 @@ LIMIT ? OFFSET ?
                         source_type = info.get('source_type')
                         language_code = info.get('language_code')
                         set_id = info.get('set_id')
-                        break
-        elif image_id > 0:
-            pass
+
 
 
         if not local_path:

@@ -113,16 +113,16 @@ def test_hmac_compare_digest(app_setup):
     t = _token()
     r = _verify_signed_url(t, SECRET)
     assert r is not None and r['image_id'] == 0
-    assert _verify_signed_url("999:deadbeef:0:medium", SECRET) is None
+    assert _verify_signed_url("999:deadbeef:0:medium:0", SECRET) is None
 
 
 def test_token_format():
     from pokemon_db_v2_fastapi import _generate_signed_url
     t, exp = _generate_signed_url(0, 'medium', SECRET, expires_in=3600)
     p = t.split(':')
-    assert len(p) == 4
+    assert len(p) == 5
     assert int(p[0]) > 0
-    assert len(p[1]) == 16
+    assert len(p[1]) == 64
     assert p[2] == '0'; assert p[3] == 'medium'
 
 # ── Direct signing-secret tests ──
