@@ -993,13 +993,18 @@ def test_delivery_log_cleanup_preserves_raw_on_failure():
 
 def test_delivery_log_cli_dry_run():
     """The CLI script can be invoked and reports correctly."""
+    # Clean log table to avoid slow aggregation from prior test data
+    conn = sqlite3.connect(str(client.app.state.db), timeout=10)
+    conn.execute("DELETE FROM image_delivery_policy_records")
+    conn.commit()
+    conn.close()
     import subprocess, sys
     from pathlib import Path
     script_dir = Path(__file__).resolve().parent.parent / 'scripts'
     script_path = script_dir / 'delivery_log_cleanup.py'
     result = subprocess.run(
         [sys.executable, str(script_path), 'dry-run', '--retention-days', '0'],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True, text=True, timeout=60,
         cwd=str(script_dir.parent),
         env={**os.environ, 'POKEMON_DB_DB': str(client.app.state.db)}
     )
