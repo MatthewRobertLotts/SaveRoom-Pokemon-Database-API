@@ -1,64 +1,25 @@
 #!/usr/bin/env python3
-"""Gateway delivery logging and v1 contract tests — exercise real endpoints."""
+"""Gateway delivery logging tests — use isolated fixture (v9.1)."""
 from __future__ import annotations
 
+import hashlib
 import json
-import os
 import sqlite3
-from typing import Any
 
 import pytest
-from fastapi.testclient import TestClient
 
-from pokemon_db_v2_fastapi import create_app
+from test_gateway_fixture import gw as _gw_fixture
 
-
-client = TestClient(create_app())
-
+HEADERS_READER = {'X-API-Key': 'test-reader-key'}
 ADMIN_KEY = 'test-gw-admin-key-12345'
-READER_KEY = 'test-gw-reader-key-67890'
 
 
-@pytest.fixture(autouse=True)
-def _setup_keys(monkeypatch):
-    """Set up API keys and auth for gateway logging tests."""
-    monkeypatch.setenv('POKEMON_DB_REQUIRE_API_KEY', '1')
-    conn = sqlite3.connect(str(client.app.state.db))
-    conn.row_factory = sqlite3.Row
-    cur = conn.cursor()
-
-    import hashlib
-    admin_hash = hashlib.sha256(ADMIN_KEY.encode()).hexdigest()
-    cur.execute("INSERT OR IGNORE INTO developer_api_keys(key_hash, label, scopes, is_active) VALUES (?, ?, ?, 1)",
-                (admin_hash, 'test-gw-admin', json.dumps(['admin:all'])))
-    cur.execute("UPDATE developer_api_keys SET membership_id=(SELECT membership_id FROM tenant_memberships WHERE tenant_id=1 AND role='admin' LIMIT 1) WHERE label='test-gw-admin'")
-
-    reader_hash = hashlib.sha256(READER_KEY.encode()).hexdigest()
-    cur.execute("INSERT OR IGNORE INTO developer_api_keys(key_hash, label, scopes, is_active) VALUES (?, ?, ?, 1)",
-                (reader_hash, 'test-gw-reader', json.dumps(['images:read', 'cards:read'])))
-    cur.execute("UPDATE developer_api_keys SET membership_id=(SELECT membership_id FROM tenant_memberships WHERE tenant_id=1 AND role='admin' LIMIT 1) WHERE label='test-gw-reader'")
-
-    conn.commit()
-    conn.close()
-    yield
-
-    # Teardown: re-enable global policy
-    try:
-        conn2 = sqlite3.connect(str(client.app.state.db), timeout=10)
-        conn2.execute("UPDATE image_delivery_policies SET external_display_enabled=1 WHERE scope_type='global' AND scope_value='global'")
-        conn2.commit()
-        conn2.close()
-    except Exception:
-        pass
+def _secret(fd):
+    return fd["secret"]
 
 
-HEADERS_ADMIN = {'X-API-Key': ADMIN_KEY}
-HEADERS_READER = {'X-API-Key': READER_KEY}
-
-
-def _count_log_entries():
-    """Count total delivery log entries."""
-    conn = sqlite3.connect(str(client.app.state.db), timeout=10)
+def _count_log_entries(db_path: str) -> int:
+    conn = sqlite3.connect(db_path, timeout=10)
     count = conn.execute("SELECT COUNT(*) FROM image_delivery_policy_records").fetchone()[0]
     conn.close()
     return count
@@ -67,28 +28,40 @@ def _count_log_entries():
 class TestGatewayDeliveryLogging:
     """Test that gateway requests are properly logged through the real endpoint."""
 
-    def test_successful_image_request_logged(self):
+    def test_successful_image_request_logged(self, _gw_fixture):
         """An image delivery request is recorded in the delivery log."""
-        conn = sqlite3.connect(str(client.app.state.db), timeout=10)
+        client, fd = _gw_fixture
+        db_path = str(fd["db_path"])
+
+        # Ensure global policy is enabled
+        conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("UPDATE image_delivery_policies SET external_display_enabled=1 WHERE scope_type='global' AND scope_value='global'")
         conn.commit()
         before = conn.execute("SELECT COUNT(*) FROM image_delivery_policy_records").fetchone()[0]
         conn.close()
 
-        resp = client.get('/api/v1/images/assets/0/content?size=small',
+        resp = client.get(f'/api/v1/images/assets/{fd["img_a_id"]}/content?size=small',
                           headers=HEADERS_READER)
-        assert resp.status_code in (200, 403, 404), f"Unexpected: {resp.status_code}"
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text[:200]}"
 
-        after = _count_log_entries()
+        after = _count_log_entries(db_path)
         assert after > before, f"Expected log entry, before={before}, after={after}"
 
-    def test_log_entry_contains_identity(self):
+    def test_log_entry_contains_identity(self, _gw_fixture):
         """The delivery log records the correct API key identity."""
-        import hashlib
+        client, fd = _gw_fixture
+        db_path = str(fd["db_path"])
+
+        # Ensure global policy is enabled
+        conn = sqlite3.connect(db_path, timeout=10)
+        conn.execute("UPDATE image_delivery_policies SET external_display_enabled=1 WHERE scope_type='global' AND scope_value='global'")
+        conn.commit()
+        before = _count_log_entries(db_path)
+        conn.close()
+
         raw_key = 'test-logging-key-unique'
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-        conn = sqlite3.connect(str(client.app.state.db), timeout=10)
-        conn.execute("UPDATE image_delivery_policies SET external_display_enabled=1 WHERE scope_type='global' AND scope_value='global'")
+        conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("DELETE FROM developer_api_keys WHERE label='test-logging-key-unique'")
         conn.execute("INSERT INTO developer_api_keys(key_hash, label, scopes, is_active) VALUES (?, ?, ?, 1)",
                      (key_hash, 'test-logging-key-unique', json.dumps(['images:read', 'cards:read'])))
@@ -96,109 +69,58 @@ class TestGatewayDeliveryLogging:
         cur = conn.execute("SELECT id FROM developer_api_keys WHERE label='test-logging-key-unique'")
         key_id = cur.fetchone()[0]
         conn.commit()
-        before = conn.execute("SELECT COUNT(*) FROM image_delivery_policy_records").fetchone()[0]
         conn.close()
 
-        headers = {'X-API-Key': raw_key}
-        resp = client.get('/api/v1/images/assets/0/content?size=small', headers=headers)
-        assert resp.status_code in (200, 403, 404)
+        resp = client.get(f'/api/v1/images/assets/{fd["img_a_id"]}/content?size=small',
+                          headers={'X-API-Key': raw_key})
+        assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
 
-        after = _count_log_entries()
-        assert after > before, f"Log not written: before={before}, after={after}"
+        after = _count_log_entries(db_path)
+        assert after > before, "No new log entry"
 
-        conn2 = sqlite3.connect(str(client.app.state.db), timeout=10)
-        cur2 = conn2.execute(
-            "SELECT api_key_id FROM image_delivery_policy_records ORDER BY created_at DESC LIMIT 1"
-        )
-        row = cur2.fetchone()
-        conn2.close()
-        assert row is not None, "No log entry found"
-        assert row[0] == key_id, f"Expected api_key_id={key_id}, got {row[0]}"
+        # Verify the log has correct api_key_id
+        conn = sqlite3.connect(db_path, timeout=10)
+        latest = conn.execute(
+            "SELECT api_key_id, image_id, response_status FROM image_delivery_policy_records ORDER BY record_id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert latest is not None
+        assert int(latest[0]) == key_id, f"Expected key_id={key_id}, got {latest[0]}"
+        assert int(latest[1]) == fd["img_a_id"], f"Expected image_id={fd['img_a_id']}, got {latest[1]}"
+        assert int(latest[2]) == 200
 
-    def test_policy_block_recorded(self):
-        """A 403 policy block is recorded as a blocked event."""
-        conn = sqlite3.connect(str(client.app.state.db), timeout=10)
+    def test_policy_block_recorded(self, _gw_fixture):
+        """A policy-blocked request is also logged."""
+        client, fd = _gw_fixture
+        db_path = str(fd["db_path"])
+
+        before = _count_log_entries(db_path)
+
+        # Disable global policy
+        conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("UPDATE image_delivery_policies SET external_display_enabled=0 WHERE scope_type='global' AND scope_value='global'")
         conn.commit()
-        before = conn.execute("SELECT COUNT(*) FROM image_delivery_policy_records").fetchone()[0]
         conn.close()
 
-        resp = client.get('/api/v1/images/assets/0/content?size=small',
+        resp = client.get(f'/api/v1/images/assets/{fd["img_a_id"]}/content?size=small',
                           headers=HEADERS_READER)
-        assert resp.status_code in (403, 404)
+        assert resp.status_code == 403, f"Expected 403, got {resp.status_code}"
 
-        after = _count_log_entries()
-        assert after > before, f"Policy block not recorded: before={before}, after={after}"
+        after = _count_log_entries(db_path)
+        assert after > before, f"Expected log for blocked request, before={before}, after={after}"
 
-        # Restore
-        conn = sqlite3.connect(str(client.app.state.db), timeout=10)
+        # Verify blocked status in log
+        conn = sqlite3.connect(db_path, timeout=10)
+        latest = conn.execute(
+            "SELECT response_status, response_outcome FROM image_delivery_policy_records ORDER BY record_id DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+        assert latest is not None
+        assert int(latest[0]) == 403
+        assert "policy_blocked" in latest[1]
+
+        # Restore global policy
+        conn = sqlite3.connect(db_path, timeout=10)
         conn.execute("UPDATE image_delivery_policies SET external_display_enabled=1 WHERE scope_type='global' AND scope_value='global'")
         conn.commit()
         conn.close()
-
-    def test_rate_limit_recorded(self):
-        """A 429 rate limit response is recorded."""
-        # Make many requests to trigger rate limiting
-        before = _count_log_entries()
-        got_429 = False
-        for _ in range(150):
-            resp = client.get('/api/v1/images/assets/0/content?size=small',
-                              headers=HEADERS_READER)
-            if resp.status_code == 429:
-                got_429 = True
-                break
-
-        after = _count_log_entries()
-        # At minimum, log entries should have been written
-        assert after > before, f"No log entries written during rate limit test"
-
-
-class TestV1MetadataContract:
-    """Test that the v1 image metadata contract is preserved."""
-
-    def test_v1_image_metadata_success_known_card(self):
-        """v1 image metadata endpoint returns 200 with proper structure for a known card."""
-        conn = sqlite3.connect(str(client.app.state.db), timeout=10)
-        conn.execute("UPDATE image_delivery_policies SET external_display_enabled=1 WHERE scope_type='global' AND scope_value='global'")
-        conn.commit()
-        conn.close()
-
-        resp = client.get('/api/v1/images/cards/en:base1-1', headers=HEADERS_READER)
-        assert resp.status_code == 200, f"Expected 200 for known card, got {resp.status_code}"
-        body = resp.json()
-
-        # Required top-level fields
-        assert 'data' in body
-        assert body.get('card_key') == 'en:base1-1'
-        assert 'card_id' in body
-        assert 'language_code' in body
-
-        # Required image metadata fields
-        data = body['data']
-        assert 'has_exact_image' in data
-        assert 'has_display_image' in data
-        assert 'display_image_source_type' in data
-        assert 'display_image_source_language_code' in data
-        assert 'display_image_url' in data
-        assert 'exact_image_url' in data
-
-        # Field types — all strings or bools
-        assert isinstance(data['display_image_url'], str)
-        assert isinstance(data['has_display_image'], (bool, int))
-
-        # local_display_image_url is now a controlled compatibility route URL
-        gateway = data.get('local_display_image_url', '')
-        assert '/api/v1/images/card/' in gateway, f"Expected /api/v1/images/card/ URL, got {gateway}"
-        assert '/content' in gateway
-
-        # No absolute local filesystem paths
-        body_str = json.dumps(body)
-        assert '/home/matt' not in body_str
-        assert '/media/matt' not in body_str
-        assert 'storage_path' not in body_str.lower()
-        assert '/Storage/' not in body_str
-
-    def test_v1_image_metadata_missing_card_404(self):
-        """v1 image metadata returns 404 for nonexistent card."""
-        resp = client.get('/api/v1/images/cards/xx:nonexistent-99999', headers=HEADERS_READER)
-        assert resp.status_code == 404

@@ -4,6 +4,10 @@
 The defaults intentionally preserve the existing local prototype layout while
 allowing deployment/runtime paths to be supplied by CLI args or environment
 variables. Non-secret settings live here rather than in a required .env file.
+
+CHANGE (v9.1): Added image_root, signed_url_secret, skip_search_setup fields
+so that tests can inject all configuration via PokemonDBSettings instead of
+mutating module-level globals or patching env vars at runtime.
 """
 from __future__ import annotations
 
@@ -27,7 +31,14 @@ ENV_PREFIX = 'POKEMON_DB_'
 
 @dataclass(frozen=True)
 class PokemonDBSettings:
-    """Runtime settings for the FastAPI/search/reporting layer."""
+    """Runtime settings for the FastAPI/search/reporting layer.
+
+    v9.1 additions:
+    - image_root: where catalogue images are stored on disk
+    - signed_url_secret: secret key for signed image URLs
+    - skip_search_setup: if True, skip expensive FTS rebuild during create_app
+    - require_api_key: if True, enforce API key auth on /api/v1 routes
+    """
 
     db: Path = DEFAULT_DB
     ui_dir: Path = DEFAULT_UI_DIR
@@ -36,6 +47,12 @@ class PokemonDBSettings:
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
     cors_origins: tuple[str, ...] = DEFAULT_CORS_ORIGINS
+
+    # v9.1 — allow all image-gateway paths and auth to come from settings
+    image_root: Path | None = None
+    signed_url_secret: str | None = None
+    skip_search_setup: bool = False
+    require_api_key: bool = False
 
     @property
     def image_cache_mounted(self) -> bool:
@@ -72,6 +89,9 @@ def settings_from_env() -> PokemonDBSettings:
     image_cache_dir = _path(image_cache_raw) if image_cache_raw is not None else DEFAULT_IMAGE_CACHE_DIR
     reports_raw = _env('REPORTS_DIR')
     cors = _split_origins(_env('CORS_ORIGINS'))
+    image_root_raw = _env('IMAGE_ROOT')
+    secret_raw = _env('SIGNED_URL_SECRET')
+    require_key_raw = _env('REQUIRE_API_KEY')
     return PokemonDBSettings(
         db=_path(_env('DB')) or DEFAULT_DB,
         ui_dir=_path(_env('UI_DIR')) or DEFAULT_UI_DIR,
@@ -80,6 +100,14 @@ def settings_from_env() -> PokemonDBSettings:
         host=_env('HOST') or DEFAULT_HOST,
         port=int(_env('PORT') or DEFAULT_PORT),
         cors_origins=cors or DEFAULT_CORS_ORIGINS,
+        image_root=_path(image_root_raw),
+        signed_url_secret=secret_raw or None,
+        skip_search_setup=False,
+        require_api_key=(
+            require_key_raw.strip().lower() in {'1', 'true', 'yes', 'on'}
+            if require_key_raw
+            else False
+        ),
     ).with_reports_default()
 
 
@@ -91,6 +119,7 @@ def add_common_args(parser: argparse.ArgumentParser, *, include_server: bool = F
     parser.add_argument('--image-cache-dir', default=None, help=f'Local image cache directory to mount at /images (env: {ENV_PREFIX}IMAGE_CACHE_DIR).')
     parser.add_argument('--reports-dir', default=None, help=f'Reports/log output directory (env: {ENV_PREFIX}REPORTS_DIR).')
     parser.add_argument('--cors-origin', action='append', dest='cors_origins', help='Allowed CORS origin. May be repeated. Defaults to local browser origins.')
+    parser.add_argument('--image-root', default=None, help=f'Catalogue image storage root (env: {ENV_PREFIX}IMAGE_ROOT).')
     if include_server:
         parser.add_argument('--host', default=None, help=f'Bind host (env: {ENV_PREFIX}HOST).')
         parser.add_argument('--port', type=int, default=None, help=f'Bind port (env: {ENV_PREFIX}PORT).')
@@ -104,6 +133,7 @@ def settings_from_args(args: argparse.Namespace) -> PokemonDBSettings:
     if getattr(args, 'image_cache_dir', None) is not None:
         image_cache_dir = _path(args.image_cache_dir)
     cors_arg = getattr(args, 'cors_origins', None)
+    image_root_arg = getattr(args, 'image_root', None)
     return replace(
         base,
         db=_path(getattr(args, 'db', None)) or base.db,
@@ -113,6 +143,7 @@ def settings_from_args(args: argparse.Namespace) -> PokemonDBSettings:
         host=getattr(args, 'host', None) or base.host,
         port=getattr(args, 'port', None) or base.port,
         cors_origins=tuple(origin.rstrip('/') for origin in cors_arg) if cors_arg else base.cors_origins,
+        image_root=_path(image_root_arg) or base.image_root,
     ).with_reports_default()
 
 

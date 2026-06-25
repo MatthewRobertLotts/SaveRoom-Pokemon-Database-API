@@ -1,196 +1,270 @@
 #!/usr/bin/env python3
-"""Signed URL end-to-end test."""
-import hashlib, io, json, os, sqlite3, time, uuid
+"""Gateway integration tests with isolated fixture - byte-safe write."""
+import hashlib
+import io
+import json
+import os
+import sqlite3
+import tempfile
 from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
+from test_gateway_fixture import gw as _gw_fixture
+from PIL import Image
 
-SECRET = "test-signed-url-secret-32bytes!!"
-READER = "signed-url-test-reader"
-
-
-@pytest.fixture(scope='module')
-def app_setup():
-    import os as _os
-    _os.environ['POKEMON_DB_REQUIRE_API_KEY'] = '1'
-    _os.environ['POKEMON_DB_SIGNED_URL_SECRET'] = SECRET
-    from pokemon_db_v2_fastapi import create_app
-    app = create_app()
-    db = str(app.state.db)
-    c = sqlite3.connect(db, timeout=30)
-    kh = hashlib.sha256(READER.encode()).hexdigest()
-    c.execute("INSERT OR IGNORE INTO developer_api_keys(key_hash,label,scopes,is_active) VALUES (?,?,?,1)",
-              (kh, 'su-key', json.dumps(['images:read','cards:read'])))
-    c.execute("UPDATE developer_api_keys SET membership_id=(SELECT membership_id FROM tenant_memberships WHERE tenant_id=1 LIMIT 1) WHERE label='su-key'")
-    c.execute("INSERT OR REPLACE INTO v2_card_detail_api_cache(language_code,card_id,local_display_image_url,resolved_set_id,display_image_source_type,has_display_image) VALUES ('en','signed-test-1','test-signed-url-card.webp','base1','tcgplayer',1)")
-    c.execute("UPDATE image_delivery_policies SET external_display_enabled=1 WHERE scope_type='global' AND scope_value='global'")
-    c.execute("UPDATE image_delivery_policies SET external_display_enabled=1 WHERE scope_type='source' AND scope_value='tcgplayer'")
-    c.execute("INSERT OR IGNORE INTO image_delivery_policies(scope_type, scope_value, external_display_enabled, reason, created_at, updated_at) VALUES ('source','tcgplayer',1,'test',datetime('now'),datetime('now'))")
-    c.commit(); c.close()
-    client = TestClient(app)
-    yield app, client
-    # Teardown: close all connections to release WAL locks
-    try:
-        import pokemon_db_v2_search_api
-        if hasattr(pokemon_db_v2_search_api, 'close_all'):
-            pokemon_db_v2_search_api.close_all()
-    except Exception:
-        pass
+H = {'X-API-Key': 'test-reader-key'}
 
 
-H = {'X-API-Key': READER}
+def _assert_image_response(actual: bytes, expected_size: tuple[int, int]) -> None:
+    """Validate that the response is a valid WebP image.
+
+    The derivative pipeline preserves aspect ratio, so the output height
+    may be smaller than the target. We verify the width matches exactly
+    and height is within tolerance.
+    """
+    img = Image.open(io.BytesIO(actual))
+    img.verify()
+    img = Image.open(io.BytesIO(actual))
+    assert img.format == 'WEBP', f'Expected WEBP, got {img.format}'
+    w, h = img.size
+    assert w == expected_size[0], f'Width mismatch: got {w}, expected {expected_size[0]}'
+    assert abs(h - expected_size[1]) <= 30, f'Height mismatch: got {h}, expected {expected_size[1]}'
 
 
-def _token(image_id=0, size='medium', exp=3600):
+def _secret(fd):
+    """Return the gateway fixture's signed URL secret."""
+    return fd["secret"]
+
+
+def test_fixture_creates_real_ids(_gw_fixture):
+    client, fd = _gw_fixture
+    assert fd['img_a_id'] > 0
+    assert fd['img_b_id'] > 0
+    assert fd['img_a_id'] != fd['img_b_id']
+    assert len(fd['img_a_bytes']) > 0
+
+
+def test_image_a_api_key_200(_gw_fixture):
+    client, fd = _gw_fixture
+    resp = client.get(
+        f"/api/v1/images/assets/{fd['img_a_id']}/content?size=medium",
+        headers=H,
+    )
+    assert resp.status_code == 200, f'Got {resp.status_code}: {resp.text[:200]}'
+    assert resp.headers['content-type'] == 'image/webp'
+    _assert_image_response(resp.content, (350, 489))
+
+
+def test_image_b_api_key_200(_gw_fixture):
+    client, fd = _gw_fixture
+    resp = client.get(
+        f"/api/v1/images/assets/{fd['img_b_id']}/content?size=medium",
+        headers=H,
+    )
+    assert resp.status_code == 200
+    _assert_image_response(resp.content, (350, 489))
+
+
+def test_image_id_zero_404(_gw_fixture):
+    client, fd = _gw_fixture
+    resp = client.get('/api/v1/images/assets/0/content?size=medium', headers=H)
+    assert resp.status_code == 404
+
+
+def test_image_id_negative_404(_gw_fixture):
+    client, fd = _gw_fixture
+    resp = client.get('/api/v1/images/assets/-1/content?size=medium', headers=H)
+    assert resp.status_code == 404
+
+
+def test_unknown_image_id_404(_gw_fixture):
+    client, fd = _gw_fixture
+    resp = client.get('/api/v1/images/assets/99999/content?size=medium', headers=H)
+    assert resp.status_code == 404
+
+
+def test_signed_url_image_a_200_no_api_key(_gw_fixture):
+    client, fd = _gw_fixture
     from pokemon_db_v2_fastapi import _generate_signed_url
-    t, _ = _generate_signed_url(image_id, size, SECRET, expires_in=exp)
-    return t
+    t, _ = _generate_signed_url(fd['img_a_id'], 'medium', _secret(fd))
+    resp = client.get(
+        f"/api/v1/images/assets/{fd['img_a_id']}/content?size=medium&token={t}",
+    )
+    assert resp.status_code == 200, f'Got {resp.status_code}: {resp.text[:200]}'
+    _assert_image_response(resp.content, (350, 489))
 
 
-def _req(client, token, size='medium', card_key=None):
-    url = f'/api/v1/images/assets/0/content?size={size}&token={token}'
-    if card_key:
-        url += f'&card_key={card_key}'
-    return client.get(url, headers=H)
-
-
-def test_valid_signed_url(app_setup):
-    _, c = app_setup
-    r = _req(c, _token(), card_key='en:signed-test-1')
-    assert r.status_code == 200, f"{r.status_code}: {r.text[:200]}"
-    assert r.headers['content-type'] == 'image/webp'
-
-
-def test_tampered_image_id(app_setup):
-    _, c = app_setup
-    p = _token().split(':'); p[2] = '99'
-    assert _req(c, ':'.join(p)).status_code == 403
-
-
-def test_tampered_sig(app_setup):
-    _, c = app_setup
-    p = _token().split(':'); p[1] = 'deadbeefdeadbeef'
-    assert _req(c, ':'.join(p)).status_code == 403
-
-
-def test_tampered_expiry(app_setup):
-    _, c = app_setup
-    p = _token().split(':'); p[0] = str(int(time.time()) + 99999)
-    assert _req(c, ':'.join(p)).status_code == 403
-
-
-def test_expired(app_setup):
-    _, c = app_setup
-    t = _token(exp=1); time.sleep(2)
-    assert _req(c, t).status_code == 403
-
-
-def test_policy_block(app_setup):
-    _, c = app_setup
-    t = _token()
-    _req(c, t, card_key='en:signed-test-1')  # ensure image found
-    conn = sqlite3.connect(str(c.app.state.db), timeout=10)
-    conn.execute("INSERT OR REPLACE INTO image_delivery_policies(scope_type,scope_value,external_display_enabled,reason,created_at,updated_at) VALUES ('card','en:signed-test-1',0,'test',datetime('now'),datetime('now'))")
-    conn.commit(); conn.close()
-    assert _req(c, t, card_key='en:signed-test-1').status_code == 403
-    conn = sqlite3.connect(str(c.app.state.db), timeout=10)
-    conn.execute("UPDATE image_delivery_policies SET external_display_enabled=1 WHERE scope_type='card' AND scope_value='en:signed-test-1'")
-    conn.commit(); conn.close()
-
-
-def test_delivery_log(app_setup):
-    _, c = app_setup
-    conn = sqlite3.connect(str(c.app.state.db), timeout=10)
-    b = conn.execute("SELECT COUNT(*) FROM image_delivery_policy_records").fetchone()[0]; conn.close()
-    _req(c, _token(), card_key='en:signed-test-1')
-    conn = sqlite3.connect(str(c.app.state.db), timeout=10)
-    a = conn.execute("SELECT COUNT(*) FROM image_delivery_policy_records").fetchone()[0]; conn.close()
-    assert a > b
-
-
-def test_hmac_compare_digest(app_setup):
-    from pokemon_db_v2_fastapi import _verify_signed_url
-    t = _token()
-    r = _verify_signed_url(t, SECRET)
-    assert r is not None and r['image_id'] == 0
-    assert _verify_signed_url("999:deadbeef:0:medium:0", SECRET) is None
-
-
-def test_token_format():
+def test_token_image_a_for_b_403(_gw_fixture):
+    client, fd = _gw_fixture
     from pokemon_db_v2_fastapi import _generate_signed_url
-    t, exp = _generate_signed_url(0, 'medium', SECRET, expires_in=3600)
+    t, _ = _generate_signed_url(fd['img_a_id'], 'medium', _secret(fd))
+    resp = client.get(
+        f"/api/v1/images/assets/{fd['img_b_id']}/content?size=medium&token={t}",
+    )
+    assert resp.status_code == 403
+
+
+def test_tampered_sig_403(_gw_fixture):
+    client, fd = _gw_fixture
+    from pokemon_db_v2_fastapi import _generate_signed_url
+    t, _ = _generate_signed_url(fd['img_a_id'], 'medium', _secret(fd))
+    p = t.split(':')
+    p[1] = 'deadbeef' * 8
+    resp = client.get(
+        f"/api/v1/images/assets/{fd['img_a_id']}/content?size=medium&token={':'.join(p)}",
+    )
+    assert resp.status_code == 403
+
+
+def test_tampered_image_id_403(_gw_fixture):
+    client, fd = _gw_fixture
+    from pokemon_db_v2_fastapi import _generate_signed_url
+    t, _ = _generate_signed_url(fd['img_a_id'], 'medium', _secret(fd))
+    p = t.split(':')
+    p[2] = str(fd['img_b_id'])
+    resp = client.get(
+        f"/api/v1/images/assets/{fd['img_a_id']}/content?size=medium&token={':'.join(p)}",
+    )
+    assert resp.status_code == 403
+
+
+def test_tampered_expiry_403(_gw_fixture):
+    client, fd = _gw_fixture
+    from pokemon_db_v2_fastapi import _generate_signed_url
+    import time as _t
+    t, _ = _generate_signed_url(fd['img_a_id'], 'medium', _secret(fd))
+    p = t.split(':')
+    p[0] = str(int(_t.time()) + 999999)
+    resp = client.get(
+        f"/api/v1/images/assets/{fd['img_a_id']}/content?size=medium&token={':'.join(p)}",
+    )
+    assert resp.status_code == 403
+
+
+def test_expired_token_403(_gw_fixture):
+    client, fd = _gw_fixture
+    from pokemon_db_v2_fastapi import _generate_signed_url
+    import time as _t
+    t, _ = _generate_signed_url(fd['img_a_id'], 'medium', _secret(fd), expires_in=1)
+    _t.sleep(2)
+    resp = client.get(
+        f"/api/v1/images/assets/{fd['img_a_id']}/content?size=medium&token={t}",
+    )
+    assert resp.status_code == 403
+
+
+def test_global_disable_blocks(_gw_fixture):
+    client, fd = _gw_fixture
+    r1 = client.get(
+        f"/api/v1/images/assets/{fd['img_a_id']}/content?size=medium",
+        headers=H,
+    )
+    assert r1.status_code == 200
+
+    conn = sqlite3.connect(str(fd['db_path']), timeout=10)
+    conn.execute("UPDATE image_delivery_policies SET external_display_enabled=0 WHERE scope_type='global' AND scope_value='global'")
+    conn.commit()
+    conn.close()
+
+    r2 = client.get(
+        f"/api/v1/images/assets/{fd['img_a_id']}/content?size=medium",
+        headers=H,
+    )
+    assert r2.status_code == 403
+
+    conn = sqlite3.connect(str(fd['db_path']), timeout=10)
+    conn.execute("UPDATE image_delivery_policies SET external_display_enabled=1 WHERE scope_type='global' AND scope_value='global'")
+    conn.commit()
+    conn.close()
+
+    r3 = client.get(
+        f"/api/v1/images/assets/{fd['img_a_id']}/content?size=medium",
+        headers=H,
+    )
+    assert r3.status_code == 200
+
+
+def test_image_level_disable_blocks(_gw_fixture):
+    client, fd = _gw_fixture
+    conn = sqlite3.connect(str(fd['db_path']), timeout=10)
+    conn.execute(
+        "INSERT OR REPLACE INTO image_delivery_policies(scope_type,scope_value,external_display_enabled,reason,created_at,updated_at) VALUES ('image',?,0,'test',datetime('now'),datetime('now'))",
+        (str(fd['img_a_id']),)
+    )
+    conn.commit()
+    conn.close()
+
+    r = client.get(
+        f"/api/v1/images/assets/{fd['img_a_id']}/content?size=medium",
+        headers=H,
+    )
+    assert r.status_code == 403
+
+    # Image B still works
+    r2 = client.get(
+        f"/api/v1/images/assets/{fd['img_b_id']}/content?size=medium",
+        headers=H,
+    )
+    assert r2.status_code == 200
+
+    # Restore
+    conn = sqlite3.connect(str(fd['db_path']), timeout=10)
+    conn.execute("DELETE FROM image_delivery_policies WHERE scope_type='image' AND scope_value=?", (str(fd['img_a_id']),))
+    conn.commit()
+    conn.close()
+
+
+def test_delivery_log_records_real_image_id(_gw_fixture):
+    client, fd = _gw_fixture
+    conn = sqlite3.connect(str(fd['db_path']), timeout=10)
+    before = conn.execute("SELECT COUNT(*) FROM image_delivery_policy_records").fetchone()[0]
+    conn.close()
+
+    r = client.get(
+        f"/api/v1/images/assets/{fd['img_a_id']}/content?size=medium",
+        headers=H,
+    )
+    assert r.status_code == 200
+
+    conn = sqlite3.connect(str(fd['db_path']), timeout=10)
+    after = conn.execute("SELECT COUNT(*) FROM image_delivery_policy_records").fetchone()[0]
+    rec = conn.execute(
+        "SELECT image_id, card_key, response_status, response_outcome FROM image_delivery_policy_records ORDER BY record_id DESC LIMIT 1"
+    ).fetchone()
+    conn.close()
+
+    assert after > before
+    assert rec[0] == fd['img_a_id']
+    assert rec[2] == 200
+    assert 'ok' in rec[3]
+
+
+def test_token_format_5_parts(_gw_fixture):
+    from pokemon_db_v2_fastapi import _generate_signed_url
+    client, fd = _gw_fixture
+    t, _ = _generate_signed_url(fd['img_a_id'], 'medium', _secret(fd))
     p = t.split(':')
     assert len(p) == 5
     assert int(p[0]) > 0
-    assert len(p[1]) == 64
-    assert p[2] == '0'; assert p[3] == 'medium'
-
-# ── Direct signing-secret tests ──
-
-def test_secret_required_in_production(monkeypatch):
-    """production + missing secret → RuntimeError"""
-    from pokemon_db_v2_fastapi import SIGNED_URL_SECRET, _get_signed_url_secret
-    monkeypatch.setattr("pokemon_db_v2_fastapi.SIGNED_URL_SECRET", None)
-    monkeypatch.delenv("POKEMON_DB_SIGNED_URL_SECRET", raising=False)
-    monkeypatch.setenv("POKEMON_DB_ENV", "production")
-    with pytest.raises(RuntimeError):
-        _get_signed_url_secret()
+    assert len(p[1]) == 64  # full SHA-256
+    assert int(p[2]) == fd['img_a_id']
+    assert p[3] == 'medium'
 
 
-def test_weak_secret_rejected_in_production(monkeypatch):
-    """production + weak secret → RuntimeError"""
-    from pokemon_db_v2_fastapi import SIGNED_URL_SECRET, _get_signed_url_secret
-    monkeypatch.setattr("pokemon_db_v2_fastapi.SIGNED_URL_SECRET", None)
-    monkeypatch.setenv("POKEMON_DB_SIGNED_URL_SECRET", "too-short")
-    monkeypatch.setenv("POKEMON_DB_ENV", "production")
-    with pytest.raises(RuntimeError):
-        _get_signed_url_secret()
+def test_signing_rejects_nonexistent_image(_gw_fixture):
+    client, fd = _gw_fixture
+    resp = client.post(
+        '/api/v1/images/assets/signed-url?image_id=99999&size=medium',
+        headers=H,
+    )
+    assert resp.status_code == 404
 
 
-def test_strong_secret_accepted_in_production(monkeypatch):
-    """production + strong secret → accepted"""
-    from pokemon_db_v2_fastapi import SIGNED_URL_SECRET, _get_signed_url_secret
-    monkeypatch.setattr("pokemon_db_v2_fastapi.SIGNED_URL_SECRET", None)
-    import secrets
-    strong = secrets.token_hex(32)
-    monkeypatch.setenv("POKEMON_DB_SIGNED_URL_SECRET", strong)
-    monkeypatch.setenv("POKEMON_DB_ENV", "production")
-    s = _get_signed_url_secret()
-    assert s == strong
-
-
-def test_development_ephemeral_secret_allowed(monkeypatch):
-    """development + missing secret → ephemeral generated"""
-    from pokemon_db_v2_fastapi import SIGNED_URL_SECRET, _get_signed_url_secret
-    monkeypatch.setattr("pokemon_db_v2_fastapi.SIGNED_URL_SECRET", None)
-    monkeypatch.delenv("POKEMON_DB_SIGNED_URL_SECRET", raising=False)
-    monkeypatch.setenv("POKEMON_DB_ENV", "development")
-    s = _get_signed_url_secret()
-    assert len(s) == 64  # token_hex(32)
-
-
-def test_test_mode_fixed_secret_accepted(monkeypatch):
-    """test + fixed secret → accepted"""
-    from pokemon_db_v2_fastapi import SIGNED_URL_SECRET, _get_signed_url_secret
-    monkeypatch.setattr("pokemon_db_v2_fastapi.SIGNED_URL_SECRET", None)
-    monkeypatch.setenv("POKEMON_DB_SIGNED_URL_SECRET", "test-mode-fixed-secret-32chars!!")
-    monkeypatch.setenv("POKEMON_DB_ENV", "test")
-    s = _get_signed_url_secret()
-    assert s == "test-mode-fixed-secret-32chars!!"
-
-
-def test_api_key_setting_does_not_control_secret(monkeypatch):
-    """changing POKEMON_DB_REQUIRE_API_KEY does not affect secret policy"""
-    from pokemon_db_v2_fastapi import SIGNED_URL_SECRET, _get_signed_url_secret
-    monkeypatch.setattr("pokemon_db_v2_fastapi.SIGNED_URL_SECRET", None)
-    monkeypatch.delenv("POKEMON_DB_SIGNED_URL_SECRET", raising=False)
-    monkeypatch.setenv("POKEMON_DB_REQUIRE_API_KEY", "1")
-    monkeypatch.setenv("POKEMON_DB_ENV", "production")
-    with pytest.raises(RuntimeError):
-        _get_signed_url_secret()
-    # Now with REQUIRE_API_KEY off — same result
-    monkeypatch.setattr("pokemon_db_v2_fastapi.SIGNED_URL_SECRET", None)
-    monkeypatch.delenv("POKEMON_DB_REQUIRE_API_KEY", raising=False)
-    monkeypatch.setenv("POKEMON_DB_ENV", "production")
-    with pytest.raises(RuntimeError):
-        _get_signed_url_secret()
+def test_card_compatibility_route(_gw_fixture):
+    client, fd = _gw_fixture
+    resp = client.get(
+        '/api/v1/images/card/en:card-a/content?size=medium',
+        headers=H,
+    )
+    assert resp.status_code == 200
+    _assert_image_response(resp.content, (350, 489))

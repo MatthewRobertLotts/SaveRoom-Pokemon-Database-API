@@ -31,6 +31,7 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
+import warnings
 from fastapi.staticfiles import StaticFiles
 
 HERE = Path(__file__).resolve().parent
@@ -116,7 +117,7 @@ from pokemon_db_v5_api_models import (  # noqa: E402
     PhysicalPhotoItem,
 )
 
-DEFAULT_SETTINGS = settings_from_env()
+# DEFAULT_SETTINGS removed in v9.1 — call settings_from_env() directly
 STARTED_AT = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
 
 
@@ -793,69 +794,71 @@ def _public_support_status(status: dict[str, Any]) -> dict[str, Any]:
 # ── v9.1 Image Gateway Helpers ──────────────────────────────────────
 
 ALLOWED_IMAGE_SIZES = frozenset({'thumbnail', 'small', 'medium', 'large'})
-SIGNED_URL_SECRET: str | None = None
-DERIVATIVES_DIR: Path | None = None
-PHYSICAL_PHOTOS_DIR: Path | None = None
+# v9.1: SIGNED_URL_SECRET moved into PokemonDBSettings
+# DERIVATIVES_DIR moved into PokemonDBSettings
+# PHYSICAL_PHOTOS_DIR moved into PokemonDBSettings
 
 
-def _get_signed_url_secret() -> str:
+def _get_signed_url_secret(custom_secret: str | None = None) -> str:
     """Return signed URL HMAC secret.
 
-    Behaviour governed by POKEMON_DB_ENV:
-      production|unset:  Must have POKEMON_DB_SIGNED_URL_SECRET (>=32 chars) or fail closed.
-      development:       Ephemeral 64-char secret allowed with stderr warning.
-      test:              Fixture supplies fixed secret via POKEMON_DB_SIGNED_URL_SECRET env.
+    Resolution order:
+      1. custom_secret argument (from settings.signed_url_secret)
+      2. POKEMON_DB_SIGNED_URL_SECRET env var
+      3. Ephemeral 64-char secret (development mode only)
+      4. RuntimeError in production
     """
-    global SIGNED_URL_SECRET
-    if SIGNED_URL_SECRET is None:
-        import secrets as _sec
+    import secrets as _sec
+    secret = custom_secret
+    if not secret:
+        secret = os.environ.get('POKEMON_DB_SIGNED_URL_SECRET', '')
+    if not secret:
         env_mode = os.environ.get('POKEMON_DB_ENV', 'production')
-        SIGNED_URL_SECRET = os.environ.get('POKEMON_DB_SIGNED_URL_SECRET', '')
-        if not SIGNED_URL_SECRET:
-            if env_mode == 'development':
-                SIGNED_URL_SECRET = _sec.token_hex(32)  # 64 hex chars = 256 bits
-                import sys as _sys
-                print('[v9.1] WARNING: Using ephemeral signed URL secret (POKEMON_DB_ENV=development) — URLs invalidated on restart', file=_sys.stderr)
-            elif env_mode == 'test':
-                raise RuntimeError('POKEMON_DB_SIGNED_URL_SECRET must be set in test mode (fixture should provide it)')
-            else:
-                raise RuntimeError('POKEMON_DB_SIGNED_URL_SECRET must be set (min 32 chars). Generate: python -c "import secrets; print(secrets.token_hex(32))"')
-        elif len(SIGNED_URL_SECRET) < 32:
-            raise RuntimeError('POKEMON_DB_SIGNED_URL_SECRET too short (got %d chars, need >=32 for 128-bit entropy)' % len(SIGNED_URL_SECRET))
-    return SIGNED_URL_SECRET
+        if env_mode == 'development':
+            secret = _sec.token_hex(32)
+            import sys as _sys
+            print('[v9.1] WARNING: Using ephemeral signed URL secret (POKEMON_DB_ENV=development) — URLs invalidated on restart', file=_sys.stderr)
+        else:
+            raise RuntimeError('POKEMON_DB_SIGNED_URL_SECRET must be set (min 32 chars). Generate: python -c "import secrets; print(secrets.token_hex(32))"')
+    elif len(secret) < 32:
+        raise RuntimeError('POKEMON_DB_SIGNED_URL_SECRET too short (got %d chars, need >=32 for 128-bit entropy)' % len(secret))
+    return secret
 
-
-def _image_root_dir() -> Path:
+def _image_root_dir(custom_root: Path | None = None, fallback_root: Path | None = None) -> Path | None:
     """Return the canonical image root directory.
 
-    Priority: DEFAULT_SETTINGS.image_cache_dir > POKEMON_DB_IMAGE_ROOT env var > project-relative default.
+    Resolution order:
+      1. custom_root argument (from settings.image_root)
+      2. POKEMON_DB_IMAGE_ROOT env var
+      3. fallback_root argument
+      4. None (no image_root configured)
     """
-    if DEFAULT_SETTINGS.image_cache_dir:
-        return DEFAULT_SETTINGS.image_cache_dir
+    if custom_root is not None:
+        if custom_root.exists():
+            return custom_root
+        return None
     env = os.environ.get('POKEMON_DB_IMAGE_ROOT', '')
     if env:
         return Path(env)
-    # Fallback: relative to the DB file's parent directory
-    db_path = Path(DEFAULT_SETTINGS.db) if DEFAULT_SETTINGS.db else Path('.')
-    return db_path.parent / 'image_cache' / 'webp_q72_512'
+    if fallback_root is not None:
+        return fallback_root
+    return None
 
+def _ensure_derivatives_dir(custom_root: Path | None = None) -> Path | None:
+    r = _image_root_dir(custom_root)
+    if r is None:
+        return None
+    d = r.parent / 'derivatives'
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
-def _ensure_derivatives_dir() -> Path:
-    global DERIVATIVES_DIR
-    if DERIVATIVES_DIR is None:
-        DERIVATIVES_DIR = _image_root_dir().parent / 'derivatives'
-        DERIVATIVES_DIR.mkdir(parents=True, exist_ok=True)
-    return DERIVATIVES_DIR
-
-
-def _ensure_physical_photos_dir() -> Path:
-    global PHYSICAL_PHOTOS_DIR
-    if PHYSICAL_PHOTOS_DIR is None:
-        PHYSICAL_PHOTOS_DIR = _image_root_dir().parent / 'physical_photos'
-        PHYSICAL_PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
-    return PHYSICAL_PHOTOS_DIR
-
-
+def _ensure_physical_photos_dir(custom_root: Path | None = None) -> Path | None:
+    r = _image_root_dir(custom_root)
+    if r is None:
+        return None
+    d = r.parent / 'physical_photos'
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 def resolve_image_asset(conn: sqlite3.Connection, image_id: int) -> dict[str, Any] | None:
     """Resolve a stable image_id from catalogue_image_assets.
@@ -1086,7 +1089,7 @@ def _derive_image(source_path: Path, size: str, image_root: Path) -> Path | None
     if size not in ALLOWED_IMAGE_SIZES:
         return None
     source_hash = _generate_image_hash(source_path)
-    derivatives_dir = _ensure_derivatives_dir()
+    derivatives_dir = _ensure_derivatives_dir(image_root)
     cache_ver = 1
     deriv_name = f'{source_hash}_{size}_v{cache_ver}.webp'
     deriv_path = derivatives_dir / deriv_name
@@ -1124,7 +1127,8 @@ def _record_delivery_log(*, image_id: int | None = None,
                           card_key: str | None = None, tenant_id: int | None = None,
                           api_key_id: int | None = None, requested_size: str | None = None,
                           policy_decision: str, response_status: int,
-                          response_outcome: str, request_id: str | None = None) -> None:
+                          response_outcome: str, request_id: str | None = None,
+                          db_path: str | None = None) -> None:
     """Append a delivery log entry using a dedicated connection.
 
     Opens its own short-lived connection so that logging is never blocked
@@ -1132,8 +1136,9 @@ def _record_delivery_log(*, image_id: int | None = None,
     """
     log_conn = None
     try:
-        db_path = str(app.state.db)
-        log_conn = sqlite3.connect(db_path, timeout=10)
+        if db_path is None:
+            db_path = str(app.state.db)
+        log_conn = sqlite3.connect(str(db_path), timeout=10)
         log_conn.execute("PRAGMA journal_mode=WAL")
         log_conn.execute("PRAGMA busy_timeout=10000")
         log_conn.execute("PRAGMA foreign_keys=ON")
@@ -1450,8 +1455,23 @@ def resolve_card_local_path(card_key: str, conn: sqlite3.Connection) -> Path | N
     return Path(image_info['image_path'])
 
 
+async def get_settings(request: Request) -> PokemonDBSettings:
+    """FastAPI dependency to inject PokemonDBSettings into endpoints.
+
+    Usage:
+        async def my_route(settings: PokemonDBSettings = Depends(get_settings)):
+            ...
+
+    This allows tests to override via:
+        app.dependency_overrides[get_settings] = lambda: test_settings
+    """
+    return request.app.state.settings
+
+
 def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
-    settings = validate_settings(settings or DEFAULT_SETTINGS, require_ui=False)
+    if settings is None:
+        settings = settings_from_env()
+    settings = validate_settings(settings, require_ui=False)
     app = FastAPI(
         title='SaveRoom Pokémon Card Database v2 API',
         version='0.2.0',
@@ -1459,7 +1479,10 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.db = settings.db
-    app.state.support_status = ensure_search_support(settings.db, reports_dir=settings.reports_dir)
+    if not settings.skip_search_setup:
+        app.state.support_status = ensure_search_support(settings.db, reports_dir=settings.reports_dir)
+    else:
+        app.state.support_status = {'refreshed': False, 'database': str(settings.db), 'fts_table': 'v2_card_search_fts', 'api_cache_table': 'v2_card_detail_api_cache', 'fts_rows': 0, 'api_cache_rows': 0, 'v2_card_search_rows': 0, 'row_count_matches': True}
 
     # Invalidate stale price cache entries with non-Latin query terms
     # (e.g., Japanese text in queries that return 0 eBay results)
@@ -1499,10 +1522,13 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
         ensure_v1_api_support(conn)
 
     async def require_v1_api_key(request: Request) -> dict[str, Any]:
-        require_key = os.environ.get('POKEMON_DB_REQUIRE_API_KEY', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+        require_key = settings.require_api_key or os.environ.get('POKEMON_DB_REQUIRE_API_KEY', '').strip().lower() in {'1', 'true', 'yes', 'on'}
         if not require_key:
             request.state.api_key_id = None
-            return {'api_key_id': None, 'scopes': ['cards:read'], 'auth_required': False, 'membership_id': None}
+            request.state.api_scopes = ['cards:read', 'images:read']
+            auth_result = {'api_key_id': None, 'scopes': ['cards:read', 'images:read'], 'auth_required': False, 'membership_id': None}
+            request.state.auth_dict = auth_result
+            return auth_result
         raw_key = request.headers.get('x-api-key') or ''
         auth = request.headers.get('authorization') or ''
         if not raw_key and auth.lower().startswith('bearer '):
@@ -1568,7 +1594,7 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
     @app.get('/api/v1/health', response_model=HealthResponseV1)
     def v1_health(_: dict[str, Any] = Depends(require_v1_api_key)) -> dict[str, Any]:
         counts = db_counts(app.state.db)
-        return {'data': {'ok': counts['support_ready'], 'service': 'saveroom-pokemon-api', 'version': 'v1', 'started_at': STARTED_AT, 'checked_at': now_utc(), 'counts': counts, 'support_status': _public_support_status(app.state.support_status), 'auth': {'api_key_required': os.environ.get('POKEMON_DB_REQUIRE_API_KEY', '').strip().lower() in {'1', 'true', 'yes', 'on'}}}}
+        return {'data': {'ok': counts['support_ready'], 'service': 'saveroom-pokemon-api', 'version': 'v1', 'started_at': STARTED_AT, 'checked_at': now_utc(), 'counts': counts, 'support_status': _public_support_status(app.state.support_status), 'auth': {'api_key_required': settings.require_api_key or os.environ.get('POKEMON_DB_REQUIRE_API_KEY', '').strip().lower() in {'1', 'true', 'yes', 'on'}}}}
 
     @app.get('/api/v1/search/cards', response_model=CardSearchResponseV1)
     def v1_search_cards(
@@ -2406,7 +2432,7 @@ LIMIT ? OFFSET ?
                     local_path TEXT NOT NULL,
                     source_hash TEXT,
                     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                    UNIQUE(card_key, source_type, COALESCE(source_language_code, language_code))
+                    UNIQUE(card_key, source_type, source_language_code, language_code)
                 )
             """, 'Stable catalogue image identity — explicit PK, not rowid.'),
             ('v54b', """
@@ -2447,11 +2473,12 @@ LIMIT ? OFFSET ?
         conn.commit()
         return ran
 
-    # Run migrations at startup
-    with connect(app.state.db) as conn:
-        ran = apply_migrations(conn)
-        if ran:
-            print(f'DB migrations applied: {ran}')
+    # Run migrations at startup (skipped when skip_search_setup=True — for tests)
+    if not settings.skip_search_setup:
+        with connect(app.state.db) as conn:
+            ran = apply_migrations(conn)
+            if ran:
+                print(f'DB migrations applied: {ran}')
 
     # ── Translation coverage endpoint ───────────────────────────────────
 
@@ -2489,7 +2516,12 @@ LIMIT ? OFFSET ?
 
     @app.middleware('http')
     async def v1_quota_enforcer(request: Request, call_next):
-        if request.url.path.startswith('/api/v1') and not request.url.path.startswith('/api/v1/admin'):
+        token = request.query_params.get('token')
+        token_image_request = token and (
+            request.url.path.startswith('/api/v1/images/assets/')
+            or request.url.path.startswith('/api/v1/images/card/')
+        )
+        if request.url.path.startswith('/api/v1') and not request.url.path.startswith('/api/v1/admin') and not token_image_request:
             try:
                 auth = await require_v1_api_key(request)
                 request.state._v1_auth = auth
@@ -4930,7 +4962,6 @@ LIMIT ? OFFSET ?
         size: str = Query('medium', pattern='^(thumbnail|small|medium|large)$'),
         token: str | None = Query(None, description='Signed URL token (alternative to API key)'),
         request: Request = None,
-        _: dict[str, Any] = Depends(require_v1_api_key),
     ) -> Response:
         """Deliver a card image through the controlled gateway."""
         # Auth info is stored on request.state by require_v1_api_key
@@ -4943,10 +4974,14 @@ LIMIT ? OFFSET ?
         # Verify access
         access_identity = None
         if token:
-            secret = _get_signed_url_secret()
+            if len(token.split(':')) < 5:
+                raise v1_error(403, 'invalid_token', 'Invalid or expired signed URL token.', {})
+            secret = _get_signed_url_secret(settings.signed_url_secret)
             verified = _verify_signed_url(token, secret)
             if not verified:
                 raise v1_error(403, 'invalid_token', 'Invalid or expired signed URL token.', {})
+            if verified.get('image_id') != image_id or verified.get('size') != size:
+                raise v1_error(403, 'invalid_token', 'Signed URL token does not match requested image.', {})
             access_identity = f'signed:{verified["image_id"]}'
         else:
             if 'images:read' not in api_scopes:
@@ -4981,7 +5016,7 @@ LIMIT ? OFFSET ?
                            f'Daily: {quota["daily_count"]}/{quota["daily_limit"]}.', {})
 
         # Resolve image from DB — never from client-supplied paths
-        image_root = _image_root_dir()
+        image_root = _image_root_dir(settings.image_root, fallback_root=settings.db.parent)
         if not image_root or not image_root.exists():
             _record_delivery_log(image_id=image_id, card_key=None,
                                  api_key_id=api_key_id,
@@ -5028,6 +5063,7 @@ LIMIT ? OFFSET ?
             _record_delivery_log(image_id=image_id, card_key=card_key,
                                  api_key_id=api_key_id,
                                  requested_size=size, policy_decision='not_found',
+                                 db_path=str(settings.db),
                                  response_status=404, response_outcome='no_image')
             raise v1_error(404, 'image_not_found', 'No image found for the given identifier.', {'image_id': image_id})
 
@@ -5037,6 +5073,7 @@ LIMIT ? OFFSET ?
             _record_delivery_log(image_id=image_id, card_key=card_key,
                                  api_key_id=api_key_id,
                                  requested_size=size, policy_decision=policy['matched_scope'] or 'blocked',
+                                 db_path=str(settings.db),
                                  response_status=403, response_outcome='policy_blocked',
                                  request_id=getattr(request.state, 'request_id', None))
             raise v1_error(403, 'image_disabled',
@@ -5058,7 +5095,8 @@ LIMIT ? OFFSET ?
                              api_key_id=api_key_id,
                              requested_size=size, policy_decision='delivered',
                              response_status=200, response_outcome='ok',
-                             request_id=getattr(request.state, 'request_id', None))
+                             request_id=getattr(request.state, 'request_id', None),
+                             db_path=str(settings.db))
 
         return Response(
             content=open(deriv_path, 'rb').read(),
@@ -5082,7 +5120,6 @@ LIMIT ? OFFSET ?
         size: str = Query('medium', pattern='^(thumbnail|small|medium|large)$'),
         token: str | None = Query(None, description='Signed URL token (alternative to API key)'),
         request: Request = None,
-        _: dict[str, Any] = Depends(require_v1_api_key),
     ) -> Response:
         """Controlled card image delivery by card_key — same gateway semantics."""
         # Auth info from request.state
@@ -5095,10 +5132,14 @@ LIMIT ? OFFSET ?
         # Verify access
         access_identity = None
         if token:
-            secret = _get_signed_url_secret()
+            if len(token.split(':')) < 5:
+                raise v1_error(403, 'invalid_token', 'Invalid or expired signed URL token.', {})
+            secret = _get_signed_url_secret(settings.signed_url_secret)
             verified = _verify_signed_url(token, secret)
             if not verified:
                 raise v1_error(403, 'invalid_token', 'Invalid or expired signed URL token.', {})
+            if verified.get('size') != size:
+                raise v1_error(403, 'invalid_token', 'Signed URL token does not match requested size.', {})
             access_identity = f'signed:{verified["image_id"]}'
         else:
             if 'images:read' not in api_scopes:
@@ -5112,7 +5153,7 @@ LIMIT ? OFFSET ?
             raise v1_error(429, quota['reason'], f'Image delivery quota exceeded.', {})
 
         # Resolve card image
-        image_root = _image_root_dir()
+        image_root = _image_root_dir(settings.image_root, fallback_root=settings.db.parent)
         if not image_root or not image_root.exists():
             raise v1_error(500, 'image_root_missing', 'Image storage not available.', {})
         info = resolve_preferred_card_image(conn, card_key)
@@ -5123,10 +5164,12 @@ LIMIT ? OFFSET ?
             raise v1_error(404, 'image_not_found', 'Image file not found.', {'card_key': card_key})
 
         # Policy check
-        policy = _eval_image_policy(conn, card_key, info.get('set_id'), info.get('language_code', ''), info.get('source_type'), image_id)
+        resolved_image_id = int(info.get('image_id') or 0)
+        policy = _eval_image_policy(conn, card_key, info.get('set_id'), info.get('language_code', ''), info.get('source_type'), resolved_image_id)
         if not policy['allowed']:
             _record_delivery_log(image_id=0, card_key=card_key, api_key_id=api_key_id,
                                  requested_size=size, policy_decision=policy['matched_scope'] or 'blocked',
+                                 db_path=str(settings.db),
                                  response_status=403, response_outcome='policy_blocked')
             raise v1_error(403, 'image_disabled', 'Image delivery blocked by policy.',
                            {'reason': policy['reason'], 'scope': policy['matched_scope']})
@@ -5141,6 +5184,7 @@ LIMIT ? OFFSET ?
 
         _record_delivery_log(image_id=0, card_key=card_key, api_key_id=api_key_id,
                              requested_size=size, policy_decision='delivered',
+                             db_path=str(settings.db),
                              response_status=200, response_outcome='ok')
 
         return Response(content=open(deriv_path, 'rb').read(), media_type=mime_type,
@@ -5165,7 +5209,7 @@ LIMIT ? OFFSET ?
         asset = resolve_image_asset(conn, image_id)
         if not asset:
             raise v1_error(404, 'image_not_found', 'No image found for the given image_id.', {'image_id': image_id})
-        secret = _get_signed_url_secret()
+        secret = _get_signed_url_secret(settings.signed_url_secret)
         token, expires_at = _generate_signed_url(image_id, size, secret, expires_in=expires_in, api_key_id=getattr(request.state, 'api_key_id', None))
         url = f'/api/v1/images/assets/{image_id}/content?size={size}&token={token}'
         return {
@@ -5389,8 +5433,8 @@ LIMIT ? OFFSET ?
         """Image gateway health check."""
         conn = connect(app.state.db)
         cur = conn.cursor()
-        root = _image_root_dir()
-        deriv_dir = _ensure_derivatives_dir()
+        root = _image_root_dir(settings.image_root, fallback_root=settings.db.parent)
+        deriv_dir = _ensure_derivatives_dir(settings.image_root or settings.db.parent)
         policy_count = cur.execute('SELECT COUNT(*) FROM image_delivery_policies').fetchone()[0]
         log_count_24h = cur.execute(
             "SELECT COUNT(*) FROM image_delivery_policy_records WHERE created_at >= datetime('now', '-1 day')"
@@ -5454,7 +5498,7 @@ LIMIT ? OFFSET ?
         import uuid
         ext = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp'}.get(file.content_type, '.bin')
         stored_name = f'{uuid.uuid4()}{ext}'
-        photo_dir = _ensure_physical_photos_dir()
+        photo_dir = _ensure_physical_photos_dir(settings.image_root or settings.db.parent)
         tenant_dir = photo_dir / str(tenant_id)
         tenant_dir.mkdir(parents=True, exist_ok=True)
         storage_path = tenant_dir / stored_name
@@ -5561,7 +5605,7 @@ LIMIT ? OFFSET ?
     return app
 
 
-app = create_app(DEFAULT_SETTINGS)
+app = create_app(settings_from_env())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -5571,7 +5615,7 @@ def main(argv: list[str] | None = None) -> int:
     import uvicorn
 
     settings = validate_settings(settings_from_args(args), require_ui=False)
-    selected_app = app if settings == DEFAULT_SETTINGS else create_app(settings)
+    selected_app = create_app(settings)
     for line in startup_lines(settings, selected_app.state.support_status):
         print(f'[pokemon-db-api] {line}', flush=True)
     uvicorn.run(selected_app, host=settings.host, port=settings.port)

@@ -140,7 +140,13 @@ def test_upload_malformed():
 def test_upload_oversized():
     _provision()
     class _Fk:
-        def read(self):
+        def __init__(self):
+            self._sent = False
+
+        def read(self, size=-1):
+            if self._sent:
+                return b''
+            self._sent = True
             return b'x' * (11 * 1024 * 1024)
     resp = client.post(f'/api/v1/inventory/items/{_item(1)}/photos',
                        files={'file': ('t.jpg', _Fk(), 'image/jpeg')},
