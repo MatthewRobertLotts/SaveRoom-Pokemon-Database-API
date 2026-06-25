@@ -626,6 +626,9 @@ class TakedownCaseCreate(BaseModel):
     requester_identity: str = Field(..., description="Name or email of the requester")
     requester_contact: str = Field(..., description="Contact email or phone")
     rights_description: str | None = None
+    # v9.1 — scope that this takedown targets
+    scope_type: str = Field(..., description="Policy scope type: image, card, set, language, source, global")
+    scope_value: str = Field(..., description="Policy scope value (e.g. a real image_id, card_key, set_id)")
 
 
 class TakedownCaseResolve(BaseModel):
@@ -653,6 +656,9 @@ class TakedownCaseResponse(BaseModel):
     opened_at: str
     resolved_at: str | None = None
     resolution_summary: str | None = None
+    scope_type: str | None = None    # v9.1
+    scope_value: str | None = None   # v9.1
+    previous_policy_state: str | None = None  # v9.1
     events: list[TakedownEventResponse] = []
 
 

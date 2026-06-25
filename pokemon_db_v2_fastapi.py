@@ -1170,17 +1170,30 @@ def _takedown_atomic(conn: sqlite3.Connection, *, case_id: int, action_type: str
                       actor_membership_id: int | None, reason: str | None,
                       policy_enabled: bool | None = None,
                       policy_scope_type: str | None = None,
-                      policy_scope_value: str | None = None) -> dict[str, Any]:
+                      policy_scope_value: str | None = None,
+                      previous_policy_json: str | None = None) -> dict[str, Any]:
     """Execute an atomic takedown operation: event + policy update + audit.
 
-    All in one transaction. Returns result dict.
+    All in one transaction with BEGIN IMMEDIATE.
+    When ``previous_policy_json`` is provided, the case row is updated with
+    the snapshot so that restore can reconstruct the exact prior state.
+    Returns dict with ``success`` and ``event_id``.
     """
     cur = conn.cursor()
+    cur.execute("BEGIN IMMEDIATE")
     try:
-        # Verify case exists before proceeding
-        case_row = cur.execute('SELECT 1 FROM takedown_cases WHERE case_id=?', (case_id,)).fetchone()
+        # Verify case is still open
+        case_row = cur.execute(
+            "SELECT status FROM takedown_cases WHERE case_id=?",
+            (case_id,)
+        ).fetchone()
         if not case_row:
+            conn.rollback()
             return {'success': False, 'error': f'Takedown case {case_id} not found'}
+        if previous_policy_json is not None and case_row['status'] != 'open':
+            conn.rollback()
+            return {'success': False, 'error': f'Case {case_id} is already {case_row["status"]}'}
+
         # Append event
         cur.execute(
             'INSERT INTO takedown_events(case_id, action_type, scope_type, scope_value, '
@@ -1188,6 +1201,13 @@ def _takedown_atomic(conn: sqlite3.Connection, *, case_id: int, action_type: str
             (case_id, action_type, scope_type, scope_value, actor_membership_id, reason)
         )
         event_id = cur.lastrowid
+
+        # Store previous policy snapshot if provided
+        if previous_policy_json is not None:
+            cur.execute(
+                "UPDATE takedown_cases SET previous_policy_state=? WHERE case_id=?",
+                (previous_policy_json, case_id)
+            )
 
         # Create/update policy if applicable
         if policy_enabled is not None and policy_scope_type and policy_scope_value:
@@ -2538,6 +2558,16 @@ LIMIT ? OFFSET ?
                 CREATE INDEX IF NOT EXISTS idx_quota_windows_lookup
                 ON image_delivery_quota_windows (access_identity, identity_type, window_kind, window_start)
             ''', 'Index for quota window lookup.'),
+
+            ('v56', '''
+                ALTER TABLE takedown_cases ADD COLUMN scope_type TEXT
+            ''', 'Add scope_type to takedown_cases (v9.1).'),
+            ('v56b', '''
+                ALTER TABLE takedown_cases ADD COLUMN scope_value TEXT
+            ''', 'Add scope_value to takedown_cases (v9.1).'),
+            ('v56c', '''
+                ALTER TABLE takedown_cases ADD COLUMN previous_policy_state TEXT
+            ''', 'Add previous_policy_state JSON snapshot to takedown_cases (v9.1).'),
         ]
         ran: list[str] = []
         for version, sql, desc in migrations:
@@ -5420,23 +5450,84 @@ LIMIT ? OFFSET ?
     ) -> dict[str, Any]:
         conn = connect(app.state.db)
         cur = conn.cursor()
-        now_val = now_utc()
-        cur.execute(
-            'INSERT INTO takedown_cases(requester_identity, requester_contact, rights_description, status, opened_at) VALUES (?, ?, ?, ?, ?)',
-            (body.requester_identity, body.requester_contact, body.rights_description, 'open', now_val)
-        )
-        case_id = cur.lastrowid
-        # Append opening event
-        cur.execute(
-            'INSERT INTO takedown_events(case_id, action_type, created_at) VALUES (?, ?, ?)',
-            (case_id, 'case_opened', now_val)
-        )
-        cur.execute(
-            "INSERT INTO admin_audit_log(action, target_resource, details_json, created_at) VALUES (?, ?, ?, ?)",
-            ('create_takedown_case', f'takedown_cases/{case_id}',
-             json.dumps({'requester': body.requester_identity, 'contact': body.requester_contact}),
-             now_val))
-        conn.commit()
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            now_val = now_utc()
+
+            # Duplicate guard: reject if open/under_review case exists for same scope
+            existing = cur.execute(
+                "SELECT case_id, status FROM takedown_cases "
+                "WHERE scope_type=? AND scope_value=? AND status IN ('open', 'under_review') "
+                "LIMIT 1",
+                (body.scope_type, body.scope_value)
+            ).fetchone()
+            if existing:
+                conn.rollback()
+                raise v1_error(409, 'duplicate_takedown',
+                               f'An active takedown case already exists for this scope.',
+                               {'existing_case_id': existing['case_id'], 'status': existing['status']})
+
+            # Capture previous policy state
+            prev_row = cur.execute(
+                "SELECT external_display_enabled, reason, attribution_text "
+                "FROM image_delivery_policies WHERE scope_type=? AND scope_value=?",
+                (body.scope_type, body.scope_value)
+            ).fetchone()
+            prev_policy_state = None
+            if prev_row:
+                prev_policy_state = json.dumps({
+                    'external_display_enabled': int(prev_row[0]),
+                    'reason': prev_row[1],
+                    'attribution_text': prev_row[2],
+                })
+
+            # Create case
+            cur.execute(
+                'INSERT INTO takedown_cases'
+                '(requester_identity, requester_contact, rights_description, status, opened_at,'
+                ' scope_type, scope_value, previous_policy_state) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                (body.requester_identity, body.requester_contact,
+                 body.rights_description, 'open', now_val,
+                 body.scope_type, body.scope_value, prev_policy_state)
+            )
+            case_id = cur.lastrowid
+
+            # Apply disabled policy
+            cur.execute(
+                "INSERT OR REPLACE INTO image_delivery_policies"
+                "(scope_type, scope_value, external_display_enabled, reason, created_at, updated_at) "
+                "VALUES (?, ?, 0, ?, ?, ?)",
+                (body.scope_type, body.scope_value,
+                 f'Takedown case #{case_id}: {body.rights_description or body.requester_identity}',
+                 now_val, now_val)
+            )
+
+            # Append opening event
+            cur.execute(
+                'INSERT INTO takedown_events(case_id, action_type, scope_type, scope_value, reason, created_at) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                (case_id, 'case_opened', body.scope_type, body.scope_value,
+                 body.rights_description or 'Takedown request', now_val)
+            )
+
+            # Admin audit
+            cur.execute(
+                "INSERT INTO admin_audit_log(action, target_resource, details_json, created_at) VALUES (?, ?, ?, ?)",
+                ('create_takedown_case', f'takedown_cases/{case_id}',
+                 json.dumps({'requester': body.requester_identity, 'contact': body.requester_contact,
+                             'scope_type': body.scope_type, 'scope_value': body.scope_value,
+                             'previous_policy_state': prev_policy_state}),
+                 now_val))
+
+            conn.commit()
+        except HTTPException:
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise v1_error(500, 'takedown_create_failed', str(e))
+
+        # Read result
         row = cur.execute('SELECT * FROM takedown_cases WHERE case_id=?', (case_id,)).fetchone()
         events = conn.execute(
             'SELECT * FROM takedown_events WHERE case_id=? ORDER BY created_at', (case_id,)
@@ -5454,70 +5545,116 @@ LIMIT ? OFFSET ?
     ) -> dict[str, Any]:
         conn = connect(app.state.db)
         cur = conn.cursor()
-        case = cur.execute('SELECT * FROM takedown_cases WHERE case_id=?', (case_id,)).fetchone()
-        if not case:
-            raise v1_error(404, 'case_not_found', 'Takedown case not found.', {'case_id': case_id})
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            case = cur.execute(
+                'SELECT * FROM takedown_cases WHERE case_id=?', (case_id,)
+            ).fetchone()
+            if not case:
+                conn.rollback()
+                raise v1_error(404, 'case_not_found', 'Takedown case not found.', {'case_id': case_id})
 
-        now_val = now_utc()
-        membership_id = _auth.get('membership_id')
+            case_dict = dict(case)
+            now_val = now_utc()
+            membership_id = _auth.get('membership_id')
 
-        if body.resolution == 'restore':
-            # Restore: update case status + append events + enable policy
-            cur.execute(
-                "UPDATE takedown_cases SET status='resolved', resolved_at=?, resolution_summary=? WHERE case_id=?",
-                (now_val, body.resolution_summary, case_id)
-            )
-            # Append restore event for each scope that was disabled in this case
-            events = cur.execute(
-                "SELECT scope_type, scope_value FROM takedown_events WHERE case_id=? AND action_type='disabled' AND scope_type IS NOT NULL",
-                (case_id,)
-            ).fetchall()
-            for evt in events:
-                _takedown_atomic(conn, case_id=case_id, action_type='restored',
-                                 scope_type=evt['scope_type'], scope_value=evt['scope_value'],
-                                 actor_membership_id=membership_id, reason=body.resolution_summary,
-                                 policy_enabled=True,
-                                 policy_scope_type=evt['scope_type'], policy_scope_value=evt['scope_value'])
-            # Also append case_resolved event
-            cur.execute(
-                'INSERT INTO takedown_events(case_id, action_type, reason, actor_membership_id, created_at) VALUES (?, ?, ?, ?, ?)',
-                (case_id, 'case_resolved', body.resolution_summary, membership_id, now_val)
-            )
-            conn.commit()
+            if body.resolution == 'restore':
+                # Already-resolved guard
+                if case_dict['status'] != 'open':
+                    conn.rollback()
+                    raise v1_error(409, 'case_not_open',
+                                   f'Case {case_id} is already {case_dict["status"]}.',
+                                   {'case_id': case_id, 'current_status': case_dict['status']})
 
-        elif body.resolution == 'remove':
-            # Remove / takedown: disable images at case scope
-            scope_type = case.get('scope_type') or 'source'
-            scope_value = case.get('scope_value')
-            if not scope_value:
-                # If no specific scope was set on the case, use the events to determine scope
-                events = cur.execute(
-                    "SELECT scope_type, scope_value FROM takedown_events WHERE case_id=? AND action_type IN ('disabled', 'case_opened') AND scope_type IS NOT NULL LIMIT 1",
-                    (case_id,)
-                ).fetchone()
-                if events:
-                    scope_type = events['scope_type']
-                    scope_value = events['scope_value']
+                # Restore exact previous policy from snapshot
+                prev_state_json = case_dict.get('previous_policy_state')
+                if prev_state_json:
+                    prev = json.loads(prev_state_json)
+                    cur.execute(
+                        "UPDATE image_delivery_policies SET external_display_enabled=?, reason=?, attribution_text=?, updated_at=? "
+                        "WHERE scope_type=? AND scope_value=?",
+                        (prev['external_display_enabled'], prev['reason'],
+                         prev.get('attribution_text'), now_val,
+                         case_dict['scope_type'], case_dict['scope_value'])
+                    )
+                else:
+                    # No previous policy existed — remove the temporary override
+                    cur.execute(
+                        "DELETE FROM image_delivery_policies WHERE scope_type=? AND scope_value=? "
+                        "AND reason LIKE 'Takedown case #%'",
+                        (case_dict['scope_type'], case_dict['scope_value'])
+                    )
 
-            _takedown_atomic(conn, case_id=case_id, action_type='disabled',
-                             scope_type=scope_type, scope_value=scope_value,
-                             actor_membership_id=membership_id, reason=body.resolution_summary or 'Takedown',
-                             policy_enabled=False,
-                             policy_scope_type=scope_type, policy_scope_value=scope_value)
-            cur.execute(
-                "UPDATE takedown_cases SET status='resolved', resolved_at=?, resolution_summary=? WHERE case_id=?",
-                (now_val, body.resolution_summary, case_id)
-            )
-            cur.execute(
-                'INSERT INTO takedown_events(case_id, action_type, reason, actor_membership_id, created_at) VALUES (?, ?, ?, ?, ?)',
-                (case_id, 'case_resolved', body.resolution_summary, membership_id, now_val)
-            )
-            conn.commit()
-        else:
-            raise v1_error(400, 'invalid_resolution', 'Resolution must be "restore" or "remove".', {})
+                # Update case status
+                cur.execute(
+                    "UPDATE takedown_cases SET status='resolved', resolved_at=?, resolution_summary=? WHERE case_id=?",
+                    (now_val, body.resolution_summary, case_id)
+                )
+
+                # Append restore event
+                cur.execute(
+                    'INSERT INTO takedown_events(case_id, action_type, scope_type, scope_value, '
+                    'actor_membership_id, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    (case_id, 'restored', case_dict['scope_type'], case_dict['scope_value'],
+                     membership_id, body.resolution_summary, now_val)
+                )
+
+                # Admin audit
+                cur.execute(
+                    "INSERT INTO admin_audit_log(action, target_resource, details_json, created_at) VALUES (?, ?, ?, ?)",
+                    ('restore_takedown_case', f'takedown_cases/{case_id}',
+                     json.dumps({'resolution': 'restore', 'previous_policy_state': prev_state_json}), now_val))
+
+                conn.commit()
+
+            elif body.resolution == 'remove':
+                scope_type = case_dict.get('scope_type') or 'source'
+                scope_value = case_dict.get('scope_value')
+                if not scope_value:
+                    events = cur.execute(
+                        "SELECT scope_type, scope_value FROM takedown_events "
+                        "WHERE case_id=? AND action_type IN ('disabled', 'case_opened') AND scope_type IS NOT NULL LIMIT 1",
+                        (case_id,)
+                    ).fetchone()
+                    if events:
+                        scope_type = events[0]
+                        scope_value = events[1]
+
+                # Disable policy via _takedown_atomic (which does its own BEGIN IMMEDIATE)
+                # Rollback this outer transaction first
+                conn.commit()  # complete the empty outer
+                # Let _takedown_atomic manage its own transaction
+                conn2 = connect(app.state.db)
+                _takedown_atomic(conn2, case_id=case_id, action_type='disabled',
+                                 scope_type=scope_type, scope_value=scope_value,
+                                 actor_membership_id=membership_id,
+                                 reason=body.resolution_summary or 'Takedown',
+                                 policy_enabled=False,
+                                 policy_scope_type=scope_type, policy_scope_value=scope_value)
+                conn2.close()
+                # Now update case status in the original connection
+                cur2 = conn.cursor()
+                cur2.execute(
+                    "UPDATE takedown_cases SET status='resolved', resolved_at=?, resolution_summary=? WHERE case_id=?",
+                    (now_val, body.resolution_summary, case_id)
+                )
+                cur2.execute(
+                    'INSERT INTO takedown_events(case_id, action_type, reason, actor_membership_id, created_at) VALUES (?, ?, ?, ?, ?)',
+                    (case_id, 'case_resolved', body.resolution_summary, membership_id, now_val)
+                )
+                conn.commit()
+            else:
+                conn.rollback()
+                raise v1_error(400, 'invalid_resolution', 'Resolution must be "restore" or "remove".', {})
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise v1_error(500, 'takedown_resolve_failed', str(e))
 
         row = cur.execute('SELECT * FROM takedown_cases WHERE case_id=?', (case_id,)).fetchone()
-        events_list = cur.execute(
+        events_list = conn.execute(
             'SELECT * FROM takedown_events WHERE case_id=? ORDER BY created_at', (case_id,)
         ).fetchall()
         result = dict(row)

@@ -467,7 +467,8 @@ def test_takedown_case_create_and_list():
         '/api/v1/admin/images/takedown/cases',
         headers=HEADERS_ADMIN,
         json={'requester_identity': 'Test Requester', 'requester_contact': 'test@example.com',
-              'rights_description': 'Test rights claim'}
+              'rights_description': 'Test rights claim',
+              'scope_type': 'image', 'scope_value': '42'}
     )
     assert resp.status_code == 200, f'Expected 200, got {resp.status_code}'
     body = resp.json()
