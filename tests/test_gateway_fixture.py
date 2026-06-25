@@ -216,6 +216,18 @@ def _seed_database(db_path: Path, image_root: Path):
         "updated_at TEXT DEFAULT CURRENT_TIMESTAMP, "
         "UNIQUE(access_identity, window_start))"
     )
+    # v9.1 — atomic quota windows (separate hour/day rows)
+    cur.execute(
+        "CREATE TABLE IF NOT EXISTS image_delivery_quota_windows("
+        "quota_window_id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "access_identity TEXT NOT NULL, identity_type TEXT NOT NULL, "
+        "window_kind TEXT NOT NULL CHECK (window_kind IN ('hour', 'day')), "
+        "window_start TEXT NOT NULL, window_end TEXT NOT NULL, "
+        "successful_delivery_count INTEGER NOT NULL DEFAULT 0, "
+        "created_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+        "updated_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+        "UNIQUE (access_identity, identity_type, window_kind, window_start))"
+    )
 
     # ── Real WebP images ─────────────────────────────────────────────────
     from PIL import Image

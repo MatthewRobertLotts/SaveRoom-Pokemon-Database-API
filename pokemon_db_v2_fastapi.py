@@ -1369,70 +1369,137 @@ _QUOTA_HOURLY_LIMIT = 1000   # max successful deliveries per hour per identity
 _QUOTA_DAILY_LIMIT = 5000    # max successful deliveries per day per identity
 
 
-def _get_quota_window() -> tuple[str, str]:
-    """Get current hourly and daily window boundaries as ISO strings."""
-    now_val = dt.datetime.now(dt.UTC)
-    hour_start = now_val.replace(minute=0, second=0, microsecond=0).isoformat()
-    hour_end = (now_val.replace(minute=0, second=0, microsecond=0) + dt.timedelta(hours=1)).isoformat()
-    day_start = now_val.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-    day_end = (now_val.replace(hour=0, minute=0, second=0, microsecond=0) + dt.timedelta(days=1)).isoformat()
-    return hour_start, hour_end, day_start, day_end
+from dataclasses import dataclass
 
 
-def _check_and_increment_quota(conn: sqlite3.Connection, access_identity: str, identity_type: str) -> dict[str, Any]:
-    """Check and increment persistent image delivery quota.
+@dataclass(frozen=True)
+class _QuotaWindow:
+    """A single quota window row."""
+    window_kind: str          # 'hour' or 'day'
+    window_start: str         # ISO datetime, inclusive
+    window_end: str           # ISO datetime, exclusive
 
-    Returns dict with allowed, hourly_count, daily_count, hourly_limit, daily_limit.
-    If over quota, returns {'allowed': False, 'reason': 'hourly' or 'daily', ...}.
+
+def quota_windows(now_val: dt.datetime | None = None, *, hourly_limit: int = 1000, daily_limit: int = 5000) -> tuple[_QuotaWindow, _QuotaWindow]:
+    """Compute the current hourly and daily quota windows.
+
+    Accepts an injected ``now_val`` for deterministic testing.
+    Both windows are derived from the same timestamp so that a request
+    crossing a boundary still gets consistent hour/day windows.
     """
-    cur = conn.cursor()
-    hour_start, hour_end, day_start, day_end = _get_quota_window()
-
-    # Try to get or create hourly window row
-    row = cur.execute(
-        "SELECT hourly_count, daily_count FROM image_delivery_quotas "
-        "WHERE access_identity=? AND window_start=?",
-        (access_identity, hour_start)
-    ).fetchone()
-
-    if row:
-        hourly_count = row[0]
-        daily_count = row[1]
-    else:
-        hourly_count = 0
-        daily_count = 0
-        # Insert hourly window
-        try:
-            cur.execute(
-                "INSERT INTO image_delivery_quotas(access_identity, identity_type, window_start, window_end, hourly_count, daily_count) "
-                "VALUES (?, ?, ?, ?, 0, 0)",
-                (access_identity, identity_type, hour_start, hour_end)
-            )
-        except sqlite3.IntegrityError:
-            # Race condition — row was just inserted by another request
-            row = cur.execute(
-                "SELECT hourly_count, daily_count FROM image_delivery_quotas WHERE access_identity=? AND window_start=?",
-                (access_identity, hour_start)
-            ).fetchone()
-            if row:
-                hourly_count = row[0]
-                daily_count = row[1]
-
-    if hourly_count >= _QUOTA_HOURLY_LIMIT:
-        return {'allowed': False, 'reason': 'hourly_quota_exceeded', 'hourly_count': hourly_count, 'daily_count': daily_count, 'hourly_limit': _QUOTA_HOURLY_LIMIT, 'daily_limit': _QUOTA_DAILY_LIMIT}
-    if daily_count >= _QUOTA_DAILY_LIMIT:
-        return {'allowed': False, 'reason': 'daily_quota_exceeded', 'hourly_count': hourly_count, 'daily_count': daily_count, 'hourly_limit': _QUOTA_HOURLY_LIMIT, 'daily_limit': _QUOTA_DAILY_LIMIT}
-
-    # Increment both hourly and daily counters
-    # Use atomic UPDATE — SQLite handles locking internally
-    cur.execute(
-        "UPDATE image_delivery_quotas SET hourly_count=hourly_count+1, daily_count=daily_count+1, updated_at=? "
-        "WHERE access_identity=? AND window_start=?",
-        (now_utc(), access_identity, hour_start)
+    if now_val is None:
+        now_val = dt.datetime.now(dt.UTC)
+    hour_start = now_val.replace(minute=0, second=0, microsecond=0)
+    hour_end = hour_start + dt.timedelta(hours=1)
+    day_start = now_val.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + dt.timedelta(days=1)
+    return (
+        _QuotaWindow('hour', hour_start.isoformat(), hour_end.isoformat()),
+        _QuotaWindow('day', day_start.isoformat(), day_end.isoformat()),
     )
-    conn.commit()
 
-    return {'allowed': True, 'hourly_count': hourly_count + 1, 'daily_count': daily_count + 1, 'hourly_limit': _QUOTA_HOURLY_LIMIT, 'daily_limit': _QUOTA_DAILY_LIMIT}
+
+def quota_identity_for_access(access_identity: str, identity_type: str) -> str:
+    """Return a deterministic quota identity string.
+
+    API-key requests and signed-token requests issued by the same key
+    share one quota pool when the identity encodes the same issuer.
+    Currently the identity is the access_identity token itself; this
+    can be refined when multi-key issuer tracking is added.
+    """
+    return access_identity
+
+
+def _check_and_increment_quota(conn: sqlite3.Connection, access_identity: str,
+                               identity_type: str, *,
+                               hourly_limit: int, daily_limit: int,
+                               now_val: dt.datetime | None = None) -> dict[str, Any]:
+    """Atomically check and increment persistent image delivery quota.
+
+    Returns dict with ``allowed``, ``hourly_count``, ``daily_count``,
+    ``hourly_limit``, ``daily_limit``.
+
+    If over quota returns ``{'allowed': False, 'reason': ...}``.
+    The call is performed inside a single ``BEGIN IMMEDIATE``
+    transaction -- two concurrent requests share the same lock and
+    cannot both pass when only one slot remains.
+    """
+    hour_win, day_win = quota_windows(now_val)
+    cur = conn.cursor()
+
+    # BEGIN IMMEDIATE -- acquire the write lock immediately
+    cur.execute("BEGIN IMMEDIATE")
+    try:
+        # -- Hourly window -------------------------------------------------
+        row = cur.execute(
+            "SELECT successful_delivery_count FROM image_delivery_quota_windows "
+            "WHERE access_identity=? AND identity_type=? AND window_kind='hour' AND window_start=?",
+            (access_identity, identity_type, hour_win.window_start)
+        ).fetchone()
+        if row:
+            hourly_count = row[0]
+        else:
+            hourly_count = 0
+            cur.execute(
+                "INSERT INTO image_delivery_quota_windows"
+                "(access_identity, identity_type, window_kind, window_start, window_end,"
+                " successful_delivery_count, created_at, updated_at) "
+                "VALUES (?, ?, 'hour', ?, ?, 0, ?, ?)",
+                (access_identity, identity_type, hour_win.window_start, hour_win.window_end,
+                 now_utc(), now_utc())
+            )
+
+        # -- Daily window --------------------------------------------------
+        row = cur.execute(
+            "SELECT successful_delivery_count FROM image_delivery_quota_windows "
+            "WHERE access_identity=? AND identity_type=? AND window_kind='day' AND window_start=?",
+            (access_identity, identity_type, day_win.window_start)
+        ).fetchone()
+        if row:
+            daily_count = row[0]
+        else:
+            daily_count = 0
+            cur.execute(
+                "INSERT INTO image_delivery_quota_windows"
+                "(access_identity, identity_type, window_kind, window_start, window_end,"
+                " successful_delivery_count, created_at, updated_at) "
+                "VALUES (?, ?, 'day', ?, ?, 0, ?, ?)",
+                (access_identity, identity_type, day_win.window_start, day_win.window_end,
+                 now_utc(), now_utc())
+            )
+
+        # -- Threshold check (inside the lock) -----------------------------
+        if hourly_count >= hourly_limit:
+            conn.commit()
+            return {'allowed': False, 'reason': 'hourly_quota_exceeded',
+                    'hourly_count': hourly_count, 'daily_count': daily_count,
+                    'hourly_limit': hourly_limit, 'daily_limit': daily_limit}
+        if daily_count >= daily_limit:
+            conn.commit()
+            return {'allowed': False, 'reason': 'daily_quota_exceeded',
+                    'hourly_count': hourly_count, 'daily_count': daily_count,
+                    'hourly_limit': hourly_limit, 'daily_limit': daily_limit}
+
+        # -- Increment both in one transaction -----------------------------
+        cur.execute(
+            "UPDATE image_delivery_quota_windows "
+            "SET successful_delivery_count = successful_delivery_count + 1, updated_at=? "
+            "WHERE access_identity=? AND identity_type=? AND window_kind='hour' AND window_start=?",
+            (now_utc(), access_identity, identity_type, hour_win.window_start)
+        )
+        cur.execute(
+            "UPDATE image_delivery_quota_windows "
+            "SET successful_delivery_count = successful_delivery_count + 1, updated_at=? "
+            "WHERE access_identity=? AND identity_type=? AND window_kind='day' AND window_start=?",
+            (now_utc(), access_identity, identity_type, day_win.window_start)
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    return {'allowed': True, 'hourly_count': hourly_count + 1, 'daily_count': daily_count + 1,
+            'hourly_limit': hourly_limit, 'daily_limit': daily_limit}
 
 
 def _quota_cleanup(conn: sqlite3.Connection, *, retention_days: int = 7) -> int:
@@ -2451,6 +2518,26 @@ LIMIT ? OFFSET ?
                   AND trim(local_display_image_url) != ''
                 ORDER BY language_code, card_id
             """, 'Backfill catalogue_image_assets from existing card cache.'),
+
+            ('v55', '''
+                CREATE TABLE IF NOT EXISTS image_delivery_quota_windows (
+                    quota_window_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    access_identity TEXT NOT NULL,
+                    identity_type TEXT NOT NULL,
+                    window_kind TEXT NOT NULL
+                        CHECK (window_kind IN ('hour', 'day')),
+                    window_start TEXT NOT NULL,
+                    window_end TEXT NOT NULL,
+                    successful_delivery_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    UNIQUE (access_identity, identity_type, window_kind, window_start)
+                )
+            ''', 'Create corrected image delivery quota windows table (separate hour/day rows).'),
+            ('v55b', '''
+                CREATE INDEX IF NOT EXISTS idx_quota_windows_lookup
+                ON image_delivery_quota_windows (access_identity, identity_type, window_kind, window_start)
+            ''', 'Index for quota window lookup.'),
         ]
         ran: list[str] = []
         for version, sql, desc in migrations:
@@ -5001,20 +5088,6 @@ LIMIT ? OFFSET ?
                                  request_id=getattr(request.state, 'request_id', None))
             raise v1_error(429, 'rate_limited', 'Image request rate limit exceeded. Try again shortly.', {})
 
-        # Persistent quota check (per-hour/per-day limits)
-        identity_type = 'api_key' if api_key_id else 'signed_url'
-        quota = _check_and_increment_quota(conn, access_identity, identity_type)
-        if not quota['allowed']:
-            _record_delivery_log(image_id=image_id, card_key=None,
-                                 api_key_id=api_key_id,
-                                 requested_size=size, policy_decision=quota['reason'],
-                                 response_status=429, response_outcome='quota_exceeded',
-                                 request_id=getattr(request.state, 'request_id', None))
-            raise v1_error(429, quota['reason'],
-                           f'Image delivery quota exceeded: {quota["reason"].replace("_", " ")}. '
-                           f'Hourly: {quota["hourly_count"]}/{quota["hourly_limit"]}, '
-                           f'Daily: {quota["daily_count"]}/{quota["daily_limit"]}.', {})
-
         # Resolve image from DB — never from client-supplied paths
         image_root = _image_root_dir(settings.image_root, fallback_root=settings.db.parent)
         if not image_root or not image_root.exists():
@@ -5091,6 +5164,25 @@ LIMIT ? OFFSET ?
 
         etag = hashlib.md5(open(deriv_path, 'rb').read()).hexdigest()[:16]
 
+        # Persistent quota check (per-hour/per-day limits)
+        # NOTE: executed AFTER bytes are ready, so failed resolutions/policies don't consume quota
+        identity_type = 'api_key' if api_key_id else 'signed_url'
+        qid = quota_identity_for_access(access_identity, identity_type)
+        quota = _check_and_increment_quota(conn, qid, identity_type,
+                                           hourly_limit=settings.image_hourly_delivery_limit,
+                                           daily_limit=settings.image_daily_delivery_limit)
+        if not quota['allowed']:
+            _record_delivery_log(image_id=image_id, card_key=None,
+                                 api_key_id=api_key_id,
+                                 requested_size=size, policy_decision=quota['reason'],
+                                 response_status=429, response_outcome='quota_exceeded',
+                                 request_id=getattr(request.state, 'request_id', None),
+                                 db_path=str(settings.db))
+            raise v1_error(429, quota['reason'],
+                           f'Image delivery quota exceeded: {quota["reason"].replace("_", " ")}. '
+                           f'Hourly: {quota["hourly_count"]}/{quota["hourly_limit"]}, '
+                           f'Daily: {quota["daily_count"]}/{quota["daily_limit"]}.', {})
+
         _record_delivery_log(image_id=image_id, card_key=card_key,
                              api_key_id=api_key_id,
                              requested_size=size, policy_decision='delivered',
@@ -5146,12 +5238,6 @@ LIMIT ? OFFSET ?
                 raise v1_error(403, 'insufficient_scope', 'Requires images:read scope.', {})
             access_identity = f'key:{api_key_id}'
 
-        # Quota check
-        identity_type = 'api_key' if api_key_id else 'signed_url'
-        quota = _check_and_increment_quota(conn, access_identity, identity_type)
-        if not quota['allowed']:
-            raise v1_error(429, quota['reason'], f'Image delivery quota exceeded.', {})
-
         # Resolve card image
         image_root = _image_root_dir(settings.image_root, fallback_root=settings.db.parent)
         if not image_root or not image_root.exists():
@@ -5181,6 +5267,20 @@ LIMIT ? OFFSET ?
 
         mime_type = 'image/webp' if deriv_path.suffix.lower() in ('.webp',) else 'image/jpeg'
         file_bytes = deriv_path.stat().st_size
+
+        # Quota check (after bytes ready — failed policy/resolution doesn't consume)
+        identity_type = 'api_key' if api_key_id else 'signed_url'
+        qid = quota_identity_for_access(access_identity, identity_type)
+        quota = _check_and_increment_quota(conn, qid, identity_type,
+                                           hourly_limit=settings.image_hourly_delivery_limit,
+                                           daily_limit=settings.image_daily_delivery_limit)
+        if not quota['allowed']:
+            _record_delivery_log(image_id=0, card_key=card_key,
+                                 api_key_id=api_key_id,
+                                 requested_size=size, policy_decision=quota['reason'],
+                                 response_status=429, response_outcome='quota_exceeded',
+                                 db_path=str(settings.db))
+            raise v1_error(429, quota['reason'], f'Image delivery quota exceeded.', {})
 
         _record_delivery_log(image_id=0, card_key=card_key, api_key_id=api_key_id,
                              requested_size=size, policy_decision='delivered',

@@ -53,6 +53,9 @@ class PokemonDBSettings:
     signed_url_secret: str | None = None
     skip_search_setup: bool = False
     require_api_key: bool = False
+    # v9.1 — quota limits
+    image_hourly_delivery_limit: int = 1000
+    image_daily_delivery_limit: int = 5000
 
     @property
     def image_cache_mounted(self) -> bool:
@@ -159,6 +162,11 @@ def validate_settings(settings: PokemonDBSettings, *, require_ui: bool = True) -
         errors.append(f'Image cache path exists but is not a directory: {settings.image_cache_dir}')
     if errors:
         raise ValueError('; '.join(errors))
+    # Validate quota limits are positive
+    if settings.image_hourly_delivery_limit <= 0:
+        raise ValueError(f'image_hourly_delivery_limit must be positive, got {settings.image_hourly_delivery_limit}')
+    if settings.image_daily_delivery_limit <= 0:
+        raise ValueError(f'image_daily_delivery_limit must be positive, got {settings.image_daily_delivery_limit}')
     settings.reports_dir.mkdir(parents=True, exist_ok=True)
     return settings
 
