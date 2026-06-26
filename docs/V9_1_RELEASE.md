@@ -127,5 +127,8 @@ The pricing code is complete, but live requests require `RAPIDAPI_KEY` in the ac
 ## Release
 
 - **Final release commit:** `8b4569d`
-- **Tag:** `v9.1.0`
+- **Documentation commit:** `c695612`
+- **Pre-merge safety tag:** `v9.1-premerge-c695612`
+- **Merge commit on main:** `80fb8cd`
+- **Release tag:** `v9.1.0`
 - **Branch:** `v9.1-image-gateway`
