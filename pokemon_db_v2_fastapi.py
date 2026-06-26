@@ -2789,6 +2789,14 @@ LIMIT ? OFFSET ?
                     if p and p['sold_n']:
                         r['price'] = {'sold_listings': p['sold_n'], 'sold_avg': p['sold_avg']}
 
+        # Inject signed_image_url into each result's images dict
+        for r in results:
+            imgs = r.get('images') or {}
+            card_key = r.get('language_code', '') + ':' + r.get('card_id', '')
+            signed = _generate_card_signed_url(conn, card_key, app.state.settings) if app.state.settings else None
+            imgs['signed_image_url'] = signed
+            r['images'] = imgs
+
         return {
             'query': q,
             'filters': {
