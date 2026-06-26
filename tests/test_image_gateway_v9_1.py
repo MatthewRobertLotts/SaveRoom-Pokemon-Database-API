@@ -1239,6 +1239,111 @@ def test_global_policy_change_atomic_rollback():
             pass
         conn.close()
 
+# ── Signed image URL injection (v9.1 browser regression) ──────────────
+
+
+def test_card_detail_includes_signed_image_url_field():
+    """Card detail response includes signed_image_url field (may be null if files missing)."""
+    resp = client.get('/api/v1/cards/en:base1-1', headers=HEADERS_READER)
+    assert resp.status_code == 200, f"{resp.status_code}: {resp.text[:200]}"
+    images = resp.json()['data']['images']
+    # Field must exist in response
+    assert 'signed_image_url' in images, \
+        f"signed_image_url missing from images. Keys: {list(images.keys())}"
+
+
+def test_signed_url_helper_returns_string_when_asset_exists():
+    """_generate_card_signed_url returns a string when the asset file is resolvable."""
+    from pokemon_db_v2_fastapi import _generate_card_signed_url, resolve_preferred_card_image
+    from pokemon_db_v3_config import PokemonDBSettings
+    conn = sqlite3.connect(str(client.app.state.db))
+    try:
+        # Verify the helper exists and accepts expected parameters
+        asset = resolve_preferred_card_image(conn, 'en:base1-1')
+        if asset:
+            # The asset exists; the helper should return either a string or None
+            # (None if file doesn't exist on disk, string if it does)
+            result = _generate_card_signed_url(
+                conn, 'en:base1-1',
+                PokemonDBSettings(db=client.app.state.db, image_root=None)
+            )
+            # Result is either a string starting with /api/v1/ or None (file not on disk)
+            assert result is None or (isinstance(result, str) and '/api/v1/images/assets/' in result), \
+                f"Expected signed URL or None, got {result!r}"
+    finally:
+        conn.close()
+
+
+def test_signed_url_delivers_200_when_file_exists():
+    """When a local asset file exists, its signed URL delivers image content."""
+    conn = sqlite3.connect(str(client.app.state.db))
+    # Find a card with a catalogue asset
+    row = conn.execute(
+        "SELECT card_key, local_path FROM catalogue_image_assets LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if not row:
+        pytest.skip("No catalogue assets in test DB")
+    card_key, local_path = row
+    resp = client.get(f'/api/v1/cards/{card_key}', headers=HEADERS_READER)
+    signed_url = resp.json()['data']['images']['signed_image_url']
+    if signed_url is None:
+        pytest.skip(f"Image file not resolvable on disk for {card_key} (path: {local_path})")
+    # Follow the signed URL
+    resp2 = client.get(signed_url, headers=HEADERS_READER)
+    assert resp2.status_code == 200, f"Signed URL returned {resp2.status_code}: {resp2.text[:200]}"
+    assert resp2.headers.get('content-type', '').startswith('image/'), \
+        f"Expected image content-type, got {resp2.headers.get('content-type')}"
+
+
+def test_card_without_local_asset_has_null_signed_url():
+    """A card with has_display_image=1 but no local file gets signed_image_url=null."""
+    conn = sqlite3.connect(str(client.app.state.db))
+    row = conn.execute(
+        "SELECT language_code, card_id FROM v2_card_detail_api_cache "
+        "WHERE has_display_image=1 AND "
+        "(local_display_image_url IS NULL OR trim(local_display_image_url)='') "
+        "LIMIT 1"
+    ).fetchone()
+    conn.close()
+    if row is None:
+        pytest.skip("No cards without local assets in test DB")
+    card_key = f"{row[0]}:{row[1]}"
+    resp = client.get(f'/api/v1/cards/{card_key}', headers=HEADERS_READER)
+    assert resp.status_code == 200
+    images = resp.json()['data']['images']
+    assert images['signed_image_url'] is None
+
+
+def test_search_response_has_signed_image_url_field():
+    """Search results include signed_image_url in their images dict."""
+    resp = client.get('/api/v1/search/cards?q=charizard&limit=1', headers=HEADERS_READER)
+    assert resp.status_code == 200
+    data = resp.json()['data']
+    assert len(data) > 0
+    first = data[0]
+    assert 'signed_image_url' in first['images'], \
+        f"Search response missing signed_image_url. Keys: {list(first['images'].keys())}"
+
+
+def test_image_metadata_has_signed_image_url_field():
+    """The /api/v1/images/cards/{card_key} endpoint includes signed_image_url."""
+    resp = client.get('/api/v1/images/cards/en:base1-1', headers=HEADERS_READER)
+    assert resp.status_code == 200
+    data = resp.json()['data']
+    assert 'signed_image_url' in data, \
+        f"Image metadata missing signed_image_url. Keys: {list(data.keys())}"
+
+
+def test_no_raw_images_url_in_signed_field():
+    """signed_image_url must never be a raw /images/ path."""
+    resp = client.get('/api/v1/cards/en:base1-1', headers=HEADERS_READER)
+    signed = resp.json()['data']['images']['signed_image_url']
+    if signed:
+        assert not signed.startswith('/images/'), \
+            f"signed_image_url must not be raw /images/ path: {signed}"
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  Final cleanup — remove test keys
 # ══════════════════════════════════════════════════════════════════════

@@ -84,9 +84,10 @@ function displayImageUrl(card) {
   if (card.signed_image_url) {
     return card.signed_image_url.startsWith('http') ? card.signed_image_url : apiBase() + card.signed_image_url;
   }
-  const local = images.local_display_image_url;
-  if (local) return local.startsWith('http') ? local : apiBase() + local;
-  return images.display_image_url || images.exact_image_url || null;
+  // Only permit publicly accessible external URLs (never protected local paths)
+  if (images.display_image_url) return images.display_image_url;
+  if (images.exact_image_url) return images.exact_image_url;
+  return null;
 }
 
 function priceBadgeHtml(price) {
@@ -272,7 +273,8 @@ async function loadPriceHistory(card) {
       priceSec.innerHTML = renderPriceFetchResult(liveData);
       await loadPricingDashboard();
     } catch (e) {
-      priceSec.innerHTML = '<p class="muted">Price fetch failed: ' + escapeHtml(e.message) + '</p>';
+      const msg = e.message || 'Unknown error';
+      priceSec.innerHTML = '<p class="price-error">Price fetch unavailable: ' + escapeHtml(msg) + '</p>';
     }
   });
 }

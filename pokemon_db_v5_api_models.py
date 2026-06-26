@@ -50,6 +50,7 @@ class ImageInfoV1(BaseModel):
     exact_image_url: str | None = None
     display_image_url: str | None = None
     local_display_image_url: str | None = None
+    signed_image_url: str | None = Field(default=None, description="Controlled gateway URL for browser image delivery. Null when no stable eligible asset exists.")
     local_display_image_cache_profile: str | None = None
     local_display_image_bytes: int | None = None
     display_image_source_type: str | None = None
@@ -728,3 +729,26 @@ class PhysicalPhotoUploadResponseArticle(BaseModel):
 class PhysicalPhotoDetailResponse(BaseModel):
     data: PhysicalPhotoItem
 
+
+
+# ── Scanner v7 response models ─────────────────────────────────────────
+
+class ScannerMatch(BaseModel):
+    """A single card match from image hash lookup."""
+    card_key: str
+    language_code: str
+    card_id: str
+    distance: int  # Hamming distance (lower = better match)
+    confidence: str  # 'high', 'medium', 'low'
+
+
+class ScannerScanResponse(BaseModel):
+    """Response for POST /api/v1/scanner/scan."""
+    data: list[ScannerMatch]
+    query_image_size: int
+    hash_computed: str  # The query image hash in hex
+
+
+class ScannerScanRequest(BaseModel):
+    """Request body for scanner scan (optional, typically uses multipart upload)."""
+    pass  # Image data comes via multipart/form-data

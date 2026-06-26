@@ -115,6 +115,7 @@ from pokemon_db_v5_api_models import (  # noqa: E402
     PhysicalPhotoUploadResponseArticle,
     PhysicalPhotoDetailResponse,
     PhysicalPhotoItem,
+    ScannerScanResponse,  # v7 scanner
 )
 
 # DEFAULT_SETTINGS removed in v9.1 — call settings_from_env() directly
@@ -492,7 +493,7 @@ def get_en_name(conn: sqlite3.Connection, language_code: str, card_id: str, loca
     return row[0] if row else None
 
 
-def v1_card_from_detail(detail: dict[str, Any], conn: sqlite3.Connection, *, include_detail: bool = False) -> dict[str, Any]:
+def v1_card_from_detail(detail: dict[str, Any], conn: sqlite3.Connection, *, include_detail: bool = False, settings: Any = None) -> dict[str, Any]:
     language_code = detail.get('language_code')
     card_id = detail.get('card_id')
     images = detail.get('images') or {}
@@ -523,6 +524,7 @@ def v1_card_from_detail(detail: dict[str, Any], conn: sqlite3.Connection, *, inc
             'exact_image_url': images.get('exact_image_url'),
             'display_image_url': images.get('display_image_url'),
             'local_display_image_url': images.get('local_display_image_url'),
+            'signed_image_url': _generate_card_signed_url(conn, canonical_card_key(language_code, card_id), settings) if settings else None,
             'local_display_image_cache_profile': images.get('local_display_image_cache_profile'),
             'local_display_image_bytes': images.get('local_display_image_bytes'),
             'display_image_source_type': images.get('display_image_source_type'),
@@ -856,7 +858,7 @@ def _ensure_physical_photos_dir(custom_root: Path | None = None) -> Path | None:
     r = _image_root_dir(custom_root)
     if r is None:
         return None
-    d = r.parent / 'physical_photos'
+    d = r / 'physical_photos'
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -916,6 +918,37 @@ def resolve_preferred_card_image(conn: sqlite3.Connection, card_key: str) -> dic
         'image_path': str(row[6]).lstrip('/'),
         'source_hash': row[7],
     }
+
+
+def _generate_card_signed_url(
+    conn: sqlite3.Connection,
+    card_key: str,
+    settings: Any,
+    *,
+    size: str = "medium",
+) -> str | None:
+    """Generate a controlled signed URL for browser image delivery.
+
+    Returns None when no stable eligible asset exists or the source file
+    is not resolvable.  Raises on unexpected signing/configuration errors
+    so they surface in logs rather than being silently swallowed.
+    """
+    asset = resolve_preferred_card_image(conn, card_key)
+    if not asset or not asset.get('image_id') or asset['image_id'] <= 0:
+        return None
+
+    image_id = asset['image_id']
+    image_root = _image_root_dir(settings.image_root, fallback_root=settings.db.parent)
+    if not image_root or not image_root.exists():
+        return None
+
+    safe_path = _safe_image_path(asset['image_path'], image_root)
+    if not safe_path:
+        return None
+
+    secret = _get_signed_url_secret(settings.signed_url_secret)
+    token, _expires_at = _generate_signed_url(image_id, size, secret)
+    return f'/api/v1/images/assets/{image_id}/content?size={size}&token={token}'
 
 
 def _eval_image_policy(conn: sqlite3.Connection, card_key: str, set_id: str | None,
@@ -1765,7 +1798,7 @@ LIMIT ? OFFSET ?
 '''
         params.extend([limit, offset])
         detail_rows = [normalize_row(dict(r)) for r in cur.execute(data_sql, params).fetchall()]
-        data = [v1_card_from_detail(r, conn) for r in detail_rows]
+        data = [v1_card_from_detail(r, conn, settings=app.state.settings) for r in detail_rows]
         return {'data': data, 'pagination': {'limit': limit, 'offset': offset, 'count': len(data), 'total': total, 'has_more': offset + len(data) < total}}
 
     # ── /api/v1/search/autocomplete ────────────────────────────────────
@@ -1811,7 +1844,7 @@ LIMIT ? OFFSET ?
         detail, _elapsed_ms = get_card_detail(conn, language_code, card_id)
         if detail is None:
             raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': canonical_card_key(language_code, card_id)})
-        return {'data': v1_card_from_detail(detail, conn, include_detail=True)}
+        return {'data': v1_card_from_detail(detail, conn, include_detail=True, settings=app.state.settings)}
 
     # ── /api/v1/sets ─────────────────────────────────────────────────
 
@@ -1926,6 +1959,7 @@ LIMIT ? OFFSET ?
         card_k = canonical_card_key(language_code, card_id)
         # Gateway URL — controlled card-key compatibility route
         gateway_url = f'/api/v1/images/card/{card_k}/content?size=medium'
+        signed_url = _generate_card_signed_url(conn, card_k, app.state.settings) if app.state.settings else None
         return {
             'data': {
                 'has_exact_image': bool(images.get('has_exact_image')),
@@ -1933,6 +1967,7 @@ LIMIT ? OFFSET ?
                 'exact_image_url': images.get('exact_image_url'),
                 'display_image_url': images.get('display_image_url'),
                 'local_display_image_url': gateway_url,  # gateway, not raw path
+                'signed_image_url': signed_url,
                 'local_display_image_cache_profile': images.get('local_display_image_cache_profile'),
                 'local_display_image_bytes': images.get('local_display_image_bytes'),
                 'display_image_source_type': images.get('display_image_source_type'),
@@ -2568,6 +2603,17 @@ LIMIT ? OFFSET ?
             ('v56c', '''
                 ALTER TABLE takedown_cases ADD COLUMN previous_policy_state TEXT
             ''', 'Add previous_policy_state JSON snapshot to takedown_cases (v9.1).'),
+            ('v57', '''
+                CREATE TABLE IF NOT EXISTS card_image_hashes (
+                    card_key TEXT PRIMARY KEY,
+                    language_code TEXT NOT NULL,
+                    card_id TEXT NOT NULL,
+                    image_hash TEXT NOT NULL,
+                    cache_path TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''', 'Create image hash table for Phase 1 scanner.'),
+            ('v57b', 'CREATE INDEX IF NOT EXISTS idx_card_image_hashes_hash ON card_image_hashes(image_hash)', 'Index for image hash lookup.'),
         ]
         ran: list[str] = []
         for version, sql, desc in migrations:
@@ -2774,6 +2820,13 @@ LIMIT ? OFFSET ?
             has_display_image=has_display_image,
             limit=limit,
         )
+        # Inject signed_image_url into each result's images dict
+        for r in results:
+            imgs = r.get('images') or {}
+            card_key = imgs.get('card_key') or (r.get('language_code', '') + ':' + r.get('card_id', ''))
+            signed = _generate_card_signed_url(conn, card_key, app.state.settings) if app.state.settings else None
+            imgs['signed_image_url'] = signed
+            r['images'] = imgs
         return {
             'core_set_id': core_set_id,
             'query': q,
@@ -3554,7 +3607,10 @@ LIMIT ? OFFSET ?
                 except FileNotFoundError:
                     continue
         if not key:
-            raise HTTPException(status_code=400, detail='RAPIDAPI_KEY not configured')
+            raise HTTPException(status_code=503, detail={
+                'code': 'pricing_provider_not_configured',
+                'message': 'Live pricing is unavailable because the pricing provider is not configured.',
+            })
 
         def do_rapidapi_fetch(search_query: str, request_label: str) -> dict[str, Any] | None:
             """Execute a single RapidAPI fetch."""
@@ -5838,6 +5894,82 @@ LIMIT ? OFFSET ?
             except OSError:
                 pass  # File deletion failure is non-fatal
         return {'data': {'deleted': True, 'photo_id': photo_id, 'item_id': item_id}}
+
+    # ── /api/v1/scanner/scan ─────────────────────────────────────────────
+
+    def _compute_average_hash(image_bytes: bytes, hash_size: int = 8) -> int:
+        """Compute average hash from raw image bytes using PIL."""
+        from PIL import Image
+        import io
+        img = Image.open(io.BytesIO(image_bytes))
+        img = img.convert('L').resize((hash_size, hash_size), Image.Resampling.BILINEAR)
+        pixels = list(img.getdata())
+        mean = sum(pixels) / len(pixels)
+        bits = 0
+        for i, p in enumerate(pixels):
+            if p > mean:
+                bits |= (1 << i)
+        return bits
+
+    @app.post('/api/v1/scanner/scan')
+    async def v1_scanner_scan(
+        file: UploadFile = File(..., description='Image file to scan'),
+        limit: int = Query(5, ge=1, le=20, description='Max matches to return'),
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        """Scan a card image and find matches via perceptual hash.
+
+        Phase 1 implementation: hash-based matching only.
+        Returns card_key matches sorted by hash distance (lower = better match).
+        """
+        # Read image bytes
+        image_bytes = await file.read()
+        if len(image_bytes) == 0:
+            raise v1_error(400, 'empty_image', 'No image data provided.', {})
+
+        # Compute hash
+        try:
+            query_hash = _compute_average_hash(image_bytes)
+        except Exception as e:
+            raise v1_error(422, 'invalid_image', f'Could not process image: {str(e)}', {})
+
+        # Find matches via hash distance
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        cur.execute('SELECT card_key, language_code, card_id, image_hash FROM card_image_hashes')
+
+        matches = []
+        for row in cur.fetchall():
+            try:
+                stored_hash = int(row['image_hash'], 16)
+                dist = (query_hash ^ stored_hash).bit_count()
+                if dist <= 10:  # Only include reasonably close matches
+                    matches.append({
+                        'card_key': row['card_key'],
+                        'language_code': row['language_code'],
+                        'card_id': row['card_id'],
+                        'distance': dist,
+                    })
+            except (ValueError, TypeError):
+                continue
+
+        matches.sort(key=lambda x: x['distance'])
+        result_matches = matches[:limit]
+
+        # Add confidence labels
+        for m in result_matches:
+            if m['distance'] <= 5:
+                m['confidence'] = 'high'
+            elif m['distance'] <= 10:
+                m['confidence'] = 'medium'
+            else:
+                m['confidence'] = 'low'
+
+        return {
+            'data': result_matches,
+            'query_image_size': len(image_bytes),
+            'hash_computed': format(query_hash, '016x'),
+        }
 
     return app
 
