@@ -1137,11 +1137,45 @@ Generated derivatives (resized images) use deterministic cache keys:
 
 Derivatives are stored outside the public web root. They are regenerated when the source changes (hash mismatch). The original file is never overwritten or modified.
 
-#### Physical-Item Photos (Schema Only)
+#### Physical-Item Photos (Implemented in current v9.2 baseline)
 
-The `physical_item_photos` table provides a tenant-isolated foundation for user-uploaded photos of physical inventory items. Upload endpoints are not yet implemented. Key properties:
+The `physical_item_photos` table and public v1 routes provide tenant-isolated user photos for physical inventory items. These are operational inventory artefacts, not global catalogue images.
 
-- Each photo belongs to exactly one tenant (`tenant_id` FK)
-- Photos are linked to a `physical_items` record
-- Photos are never automatically promoted to the global catalogue
-- Published/unpublished flag controls visibility
+| Route | Description | Auth Scope | Notes |
+|-------|-------------|------------|-------|
+| `POST /api/v1/inventory/items/{item_id}/photos` | Upload a JPEG, PNG or WebP photo for a physical item | `write:inventory` or `admin` | 10 MB max; validates MIME type and decodes image bytes with Pillow before storing. |
+| `GET /api/v1/inventory/items/{item_id}/photos` | List photos for a tenant-owned item | `read:inventory` or `cards:read` | Cross-tenant reads return an empty list rather than leaking another tenant's photo metadata. |
+| `GET /api/v1/inventory/items/{item_id}/photos/{photo_id}` | Retrieve a stored photo binary | `read:inventory` or `cards:read` | Returns the stored content type and `X-Content-Type-Options: nosniff`; does not expose internal storage paths in the response body. |
+| `DELETE /api/v1/inventory/items/{item_id}/photos/{photo_id}` | Soft-unpublish the row and remove the stored file when possible | `write:inventory` or `admin` | Tenant mismatch returns `404`. File deletion failure is non-fatal after the DB record is unpublished. |
+
+Key properties:
+
+- Each photo belongs to exactly one tenant (`tenant_id`).
+- Photos are linked to a `physical_items` record.
+- Photos are never automatically promoted to the global catalogue.
+- API responses intentionally omit `storage_path`; internal paths are not part of the public contract.
+- Uploads use UUID-based storage names, not client filenames.
+- Missing same-tenant item/photo state remains explicit via structured v1 errors (`item_not_found`, `photo_not_found`, `photo_file_missing`).
+
+#### Scanner Endpoint (Early Foundation Only)
+
+`POST /api/v1/scanner/scan` exists as a narrow foundation endpoint. It accepts an uploaded image and compares a simple average hash against rows in `card_image_hashes`.
+
+| Route | Description | Auth Scope | Status |
+|-------|-------------|------------|--------|
+| `POST /api/v1/scanner/scan` | Return nearest hash matches for an uploaded image | v1 API key when auth is required | Prototype/foundation only |
+
+This endpoint is **not** a production-grade recognition service. It does not yet provide robust crop detection, OCR, perspective correction, CLIP/SIFT/ML matching, full `card_image_hashes` population, confidence calibration or mobile scanner UX. Future scanner products must treat it as a tested service boundary, not as completed scanner intelligence.
+
+#### Current v9.2 Configuration Requirements
+
+Commercial deployment must set configuration explicitly rather than relying on development defaults:
+
+- `POKEMON_DB_ENV=production`
+- `POKEMON_DB_DB=/absolute/path/to/authoritative.sqlite`
+- `POKEMON_DB_REQUIRE_API_KEY=1`
+- `POKEMON_DB_SIGNED_URL_SECRET=<non-placeholder 32+ character secret>`
+- `POKEMON_DB_IMAGE_ROOT=/absolute/path/to/image/root`
+- `POKEMON_DB_PUBLIC_BASE_URL=https://api.example.invalid` when binding publicly
+
+Production validation rejects missing explicit database paths, placeholder or short signing secrets, disabled API-key auth and debug mode. Sensitive values are not printed in startup logs.
