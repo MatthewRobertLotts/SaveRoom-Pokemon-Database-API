@@ -15,6 +15,7 @@ those support objects from the v2 views; it does not mutate raw card facts.
 """
 from __future__ import annotations
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -27,9 +28,10 @@ import time
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response, StreamingResponse
+import warnings
 from fastapi.staticfiles import StaticFiles
 
 HERE = Path(__file__).resolve().parent
@@ -99,9 +101,24 @@ from pokemon_db_v5_api_models import (  # noqa: E402
     UserCreate,
     UserListResponse,
     UserResponse,
+    DeliveryPolicyArticle,
+    DeliveryPolicyCreate,
+    DeliveryPolicyListResponse,
+    DeliveryPolicyArticleResponse,
+    TakedownCaseCreate,
+    TakedownCaseListResponse,
+    TakedownCaseResolve,
+    SignedUrlResponse,
+    SignedUrlResponseArticle,
+    PhysicalPhotoUploadResponse,
+    PhysicalPhotoListResponse,
+    PhysicalPhotoUploadResponseArticle,
+    PhysicalPhotoDetailResponse,
+    PhysicalPhotoItem,
+    ScannerScanResponse,  # v7 scanner
 )
 
-DEFAULT_SETTINGS = settings_from_env()
+# DEFAULT_SETTINGS removed in v9.1 — call settings_from_env() directly
 STARTED_AT = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
 
 
@@ -476,7 +493,7 @@ def get_en_name(conn: sqlite3.Connection, language_code: str, card_id: str, loca
     return row[0] if row else None
 
 
-def v1_card_from_detail(detail: dict[str, Any], conn: sqlite3.Connection, *, include_detail: bool = False) -> dict[str, Any]:
+def v1_card_from_detail(detail: dict[str, Any], conn: sqlite3.Connection, *, include_detail: bool = False, settings: Any = None) -> dict[str, Any]:
     language_code = detail.get('language_code')
     card_id = detail.get('card_id')
     images = detail.get('images') or {}
@@ -507,6 +524,7 @@ def v1_card_from_detail(detail: dict[str, Any], conn: sqlite3.Connection, *, inc
             'exact_image_url': images.get('exact_image_url'),
             'display_image_url': images.get('display_image_url'),
             'local_display_image_url': images.get('local_display_image_url'),
+            'signed_image_url': _generate_card_signed_url(conn, canonical_card_key(language_code, card_id), settings) if settings else None,
             'local_display_image_cache_profile': images.get('local_display_image_cache_profile'),
             'local_display_image_bytes': images.get('local_display_image_bytes'),
             'display_image_source_type': images.get('display_image_source_type'),
@@ -775,8 +793,805 @@ def _public_support_status(status: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in status.items() if k != 'database'}
 
 
+# ── v9.1 Image Gateway Helpers ──────────────────────────────────────
+
+ALLOWED_IMAGE_SIZES = frozenset({'thumbnail', 'small', 'medium', 'large'})
+# v9.1: SIGNED_URL_SECRET moved into PokemonDBSettings
+# DERIVATIVES_DIR moved into PokemonDBSettings
+# PHYSICAL_PHOTOS_DIR moved into PokemonDBSettings
+
+
+def _get_signed_url_secret(custom_secret: str | None = None) -> str:
+    """Return signed URL HMAC secret.
+
+    Resolution order:
+      1. custom_secret argument (from settings.signed_url_secret)
+      2. POKEMON_DB_SIGNED_URL_SECRET env var
+      3. Ephemeral 64-char secret (development mode only)
+      4. RuntimeError in production
+    """
+    import secrets as _sec
+    secret = custom_secret
+    if not secret:
+        secret = os.environ.get('POKEMON_DB_SIGNED_URL_SECRET', '')
+    if not secret:
+        env_mode = os.environ.get('POKEMON_DB_ENV', 'production')
+        if env_mode == 'development':
+            secret = _sec.token_hex(32)
+            import sys as _sys
+            print('[v9.1] WARNING: Using ephemeral signed URL secret (POKEMON_DB_ENV=development) — URLs invalidated on restart', file=_sys.stderr)
+        else:
+            raise RuntimeError('POKEMON_DB_SIGNED_URL_SECRET must be set (min 32 chars). Generate: python -c "import secrets; print(secrets.token_hex(32))"')
+    elif len(secret) < 32:
+        raise RuntimeError('POKEMON_DB_SIGNED_URL_SECRET too short (got %d chars, need >=32 for 128-bit entropy)' % len(secret))
+    return secret
+
+def _image_root_dir(custom_root: Path | None = None, fallback_root: Path | None = None) -> Path | None:
+    """Return the canonical image root directory.
+
+    Resolution order:
+      1. custom_root argument (from settings.image_root)
+      2. POKEMON_DB_IMAGE_ROOT env var
+      3. fallback_root argument
+      4. None (no image_root configured)
+    """
+    if custom_root is not None:
+        if custom_root.exists():
+            return custom_root
+        return None
+    env = os.environ.get('POKEMON_DB_IMAGE_ROOT', '')
+    if env:
+        return Path(env)
+    if fallback_root is not None:
+        return fallback_root
+    return None
+
+def _ensure_derivatives_dir(custom_root: Path | None = None) -> Path | None:
+    r = _image_root_dir(custom_root)
+    if r is None:
+        return None
+    d = r.parent / 'derivatives'
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def _ensure_physical_photos_dir(custom_root: Path | None = None) -> Path | None:
+    r = _image_root_dir(custom_root)
+    if r is None:
+        return None
+    d = r / 'physical_photos'
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+def resolve_image_asset(conn: sqlite3.Connection, image_id: int) -> dict[str, Any] | None:
+    """Resolve a stable image_id from catalogue_image_assets.
+
+    Returns dict with image_id, card_key, set_id, language_code, source_type,
+    source_language_code, image_path, source_hash, or None if not found.
+    """
+    if image_id <= 0:
+        return None
+    cur = conn.cursor()
+    row = cur.execute(
+        "SELECT image_id, card_key, set_id, language_code, source_type,"
+        " source_language_code, local_path, source_hash"
+        " FROM catalogue_image_assets WHERE image_id = ?",
+        (image_id,)
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        'image_id': row[0],
+        'card_key': row[1],
+        'set_id': row[2],
+        'language_code': row[3],
+        'source_type': row[4],
+        'source_language_code': row[5],
+        'image_path': str(row[6]).lstrip('/'),
+        'source_hash': row[7],
+    }
+
+
+
+
+def resolve_preferred_card_image(conn: sqlite3.Connection, card_key: str) -> dict[str, Any] | None:
+    """Resolve the preferred image for a card key from catalogue_image_assets.
+
+    Returns the same dict as resolve_image_asset, or None if no image exists.
+    """
+    cur = conn.cursor()
+    row = cur.execute(
+        "SELECT image_id, card_key, set_id, language_code, source_type,"
+        " source_language_code, local_path, source_hash"
+        " FROM catalogue_image_assets WHERE card_key = ?"
+        " ORDER BY image_id LIMIT 1",
+        (card_key,)
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        'image_id': row[0],
+        'card_key': row[1],
+        'set_id': row[2],
+        'language_code': row[3],
+        'source_type': row[4],
+        'source_language_code': row[5],
+        'image_path': str(row[6]).lstrip('/'),
+        'source_hash': row[7],
+    }
+
+
+def _generate_card_signed_url(
+    conn: sqlite3.Connection,
+    card_key: str,
+    settings: Any,
+    *,
+    size: str = "medium",
+) -> str | None:
+    """Generate a controlled signed URL for browser image delivery.
+
+    Returns None when no stable eligible asset exists or the source file
+    is not resolvable.  Raises on unexpected signing/configuration errors
+    so they surface in logs rather than being silently swallowed.
+    """
+    asset = resolve_preferred_card_image(conn, card_key)
+    if not asset or not asset.get('image_id') or asset['image_id'] <= 0:
+        return None
+
+    image_id = asset['image_id']
+    image_root = _image_root_dir(settings.image_root, fallback_root=settings.db.parent)
+    if not image_root or not image_root.exists():
+        return None
+
+    safe_path = _safe_image_path(asset['image_path'], image_root)
+    if not safe_path:
+        return None
+
+    secret = _get_signed_url_secret(settings.signed_url_secret)
+    token, _expires_at = _generate_signed_url(image_id, size, secret)
+    return f'/api/v1/images/assets/{image_id}/content?size={size}&token={token}'
+
+
+def _eval_image_policy(conn: sqlite3.Connection, card_key: str, set_id: str | None,
+                       language_code: str, source_type: str | None,
+                       image_id: int = 0) -> dict[str, Any]:
+    """Evaluate delivery policy for a card image. Most-specific scope wins.
+
+    Precedence: image > card > set > language > source > global
+    Returns dict with allowed, reason, attribution.
+    """
+    cur = conn.cursor()
+    # 0) Check image-level policy (highest precedence)
+    if image_id:
+        row = cur.execute(
+            "SELECT external_display_enabled, reason, attribution_text FROM image_delivery_policies WHERE scope_type='image' AND scope_value=?",
+            (str(image_id),)
+        ).fetchone()
+        if row:
+            return {'allowed': bool(row[0]), 'reason': row[1], 'attribution': row[2], 'matched_scope': 'image', 'scope_value': str(image_id)}
+    # 1) Check card-level policy
+    row = cur.execute(
+        "SELECT external_display_enabled, reason, attribution_text FROM image_delivery_policies WHERE scope_type='card' AND scope_value=?",
+        (card_key,)
+    ).fetchone()
+    if row:
+        return {'allowed': bool(row[0]), 'reason': row[1], 'attribution': row[2], 'matched_scope': 'card', 'scope_value': card_key}
+
+    # 2) Set-level policy
+    if set_id:
+        row = cur.execute(
+            "SELECT external_display_enabled, reason, attribution_text FROM image_delivery_policies WHERE scope_type='set' AND scope_value=?",
+            (set_id,)
+        ).fetchone()
+        if row:
+            return {'allowed': bool(row[0]), 'reason': row[1], 'attribution': row[2], 'matched_scope': 'set', 'scope_value': set_id}
+
+    # 3) Language-level policy
+    row = cur.execute(
+        "SELECT external_display_enabled, reason, attribution_text FROM image_delivery_policies WHERE scope_type='language' AND scope_value=?",
+        (language_code,)
+    ).fetchone()
+    if row:
+        return {'allowed': bool(row[0]), 'reason': row[1], 'attribution': row[2], 'matched_scope': 'language', 'scope_value': language_code}
+
+    # 4) Source-level policy
+    if source_type:
+        row = cur.execute(
+            "SELECT external_display_enabled, reason, attribution_text FROM image_delivery_policies WHERE scope_type='source' AND scope_value=?",
+            (source_type,)
+        ).fetchone()
+        if row:
+            return {'allowed': bool(row[0]), 'reason': row[1], 'attribution': row[2], 'matched_scope': 'source', 'scope_value': source_type}
+        # No explicit policy for this source — check if it's a known/registered source
+        known = cur.execute(
+            "SELECT 1 FROM v2_card_detail_api_cache WHERE display_image_source_type=? LIMIT 1",
+            (source_type,)
+        ).fetchone()
+        if known:
+            # Known source with no explicit policy — falls through to global
+            pass
+        else:
+            # Unregistered/nonexistent source — blocked
+            return {'allowed': False, 'reason': f'Unregistered image source: "{source_type}" — no delivery policy',
+                    'attribution': None, 'matched_scope': None, 'scope_value': None}
+    else:
+        # Unknown/null source — blocked.
+        return {'allowed': False, 'reason': 'Unknown image source — no delivery policy',
+                'attribution': None, 'matched_scope': None, 'scope_value': None}
+
+    # 5) Global default policy
+    row = cur.execute(
+        "SELECT external_display_enabled, reason, attribution_text FROM image_delivery_policies WHERE scope_type='global' AND scope_value='global'"
+    ).fetchone()
+    if row:
+        return {'allowed': bool(row[0]), 'reason': row[1], 'attribution': row[2], 'matched_scope': 'global', 'scope_value': 'global'}
+
+    # No policy at all — default to disabled
+    return {'allowed': False, 'reason': 'No delivery policy configured', 'attribution': None, 'matched_scope': None, 'scope_value': None}
+
+
+def _safe_image_path(storage_path: str, image_root: Path) -> Path | None:
+    """Resolve a storage path securely within the image root.
+
+    Returns None if path escapes or doesn't exist.
+    """
+    resolved = (image_root / storage_path).resolve()
+    try:
+        resolved.relative_to(image_root.resolve())
+    except ValueError:
+        return None
+    if not resolved.exists() or not resolved.is_file():
+        return None
+    return resolved
+
+
+def _generate_image_hash(filepath: Path) -> str:
+    """Generate a deterministic hash from file content."""
+    h = hashlib.sha256()
+    with open(filepath, 'rb') as f:
+        for chunk in iter(lambda: f.read(65536), b''):
+            h.update(chunk)
+    return h.hexdigest()[:32]
+
+
+def _resolve_card_image(conn: sqlite3.Connection, card_key: str) -> dict[str, Any] | None:
+    """Resolve a card_key to its canonical local image path.
+
+    Returns dict with image_path, card_key, set_id, language_code, source_type,
+    or None if no local image exists.
+    """
+    lang, cid = parse_card_key(card_key)
+    detail, _ = get_card_detail(conn, lang, cid)
+    if not detail:
+        return None
+    images = detail.get('images', {})
+    local_url = images.get('local_display_image_url')
+    if not local_url:
+        return None
+    set_info = detail.get('set', {})
+    source_type = images.get('display_image_source_type')
+    return {
+        'image_path': str(local_url).lstrip('/'),
+        'card_key': canonical_card_key(lang, cid),
+        'set_id': set_info.get('resolved_set_id') or set_info.get('core_set_id'),
+        'language_code': lang,
+        'source_type': source_type,
+    }
+
+
+def _generate_signed_url(image_id: int, size: str, secret: str, *, expires_in: int = 3600, api_key_id: int | None = None) -> tuple[str, str]:
+    """Generate a signed URL for image delivery.
+
+    Returns (signed_token, expires_at_iso).
+    Binds: image_id:size:expires:api_key_id
+    """
+    expires = int(time.time()) + expires_in
+    kid = api_key_id or 0
+    message = f'{image_id}:{size}:{expires}:{kid}'
+    sig = hmac.new(secret.encode(), message.encode(), hashlib.sha256).hexdigest()
+    token = f'{expires}:{sig}:{image_id}:{size}:{kid}'
+    expires_at = dt.datetime.fromtimestamp(expires, tz=dt.UTC).isoformat()
+    return token, expires_at
+
+
+def _verify_signed_url(token: str, secret: str) -> dict[str, Any] | None:
+    """Verify a signed URL token. Returns dict with image_id, size, api_key_id, or None."""
+    try:
+        parts = token.split(':')
+        if len(parts) < 5:
+            return None
+        expires_str, sig, image_id_str, size = parts[0:4]
+        kid = parts[4] if len(parts) >= 5 else '0'
+        expires = int(expires_str)
+        if int(time.time()) > expires:
+            return None
+        expected_sig = hmac.new(secret.encode(), f'{image_id_str}:{size}:{expires_str}:{kid}'.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, expected_sig):
+            return None
+        if size not in ALLOWED_IMAGE_SIZES:
+            return None
+        return {'image_id': int(image_id_str), 'size': size, 'api_key_id': int(kid) if kid != '0' else None}
+    except (ValueError, IndexError):
+        return None
+
+
+def _derive_image(source_path: Path, size: str, image_root: Path) -> Path | None:
+    """Generate or retrieve a derivative from the canonical original.
+
+    Uses deterministic cache keys: {hash_of_source}_{size}_{cache_version}
+    """
+    if size not in ALLOWED_IMAGE_SIZES:
+        return None
+    source_hash = _generate_image_hash(source_path)
+    derivatives_dir = _ensure_derivatives_dir(image_root)
+    cache_ver = 1
+    deriv_name = f'{source_hash}_{size}_v{cache_ver}.webp'
+    deriv_path = derivatives_dir / deriv_name
+
+    if deriv_path.exists():
+        return deriv_path
+
+    # Generate derivative
+    target_sizes = {
+        'thumbnail': (150, 210),
+        'small': (245, 342),
+        'medium': (350, 489),
+        'large': (510, 712),
+    }
+    tw, th = target_sizes[size]
+    try:
+        from PIL import Image
+        img = Image.open(source_path)
+        orig_w, orig_h = img.size
+        # Never enlarge beyond original
+        tw = min(tw, orig_w)
+        th = min(th, orig_h)
+        img.thumbnail((tw, th), Image.LANCZOS)
+        # Strip metadata
+        img_info = img.info
+        clean_img = Image.new(img.mode, img.size)
+        clean_img.putdata(list(img.getdata()))
+        clean_img.save(deriv_path, 'WEBP', quality=82, method=6)
+        return deriv_path
+    except Exception:
+        return None
+
+
+def _record_delivery_log(*, image_id: int | None = None,
+                          card_key: str | None = None, tenant_id: int | None = None,
+                          api_key_id: int | None = None, requested_size: str | None = None,
+                          policy_decision: str, response_status: int,
+                          response_outcome: str, request_id: str | None = None,
+                          db_path: str | None = None) -> None:
+    """Append a delivery log entry using a dedicated connection.
+
+    Opens its own short-lived connection so that logging is never blocked
+    by uncommitted transactions from the caller's connection.
+    """
+    log_conn = None
+    try:
+        if db_path is None:
+            db_path = str(app.state.db)
+        log_conn = sqlite3.connect(str(db_path), timeout=10)
+        log_conn.execute("PRAGMA journal_mode=WAL")
+        log_conn.execute("PRAGMA busy_timeout=10000")
+        log_conn.execute("PRAGMA foreign_keys=ON")
+        cur = log_conn.cursor()
+        cur.execute(
+            'INSERT INTO image_delivery_policy_records'
+            '(image_id, card_key, tenant_id, api_key_id, requested_size, '
+            'policy_decision, response_status, response_outcome, request_id) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            (image_id, card_key, tenant_id, api_key_id, requested_size,
+             policy_decision, response_status, response_outcome, request_id)
+        )
+        log_conn.commit()
+    except Exception as e:
+        import logging
+        logger = logging.getLogger('pokemon_db_v2_fastapi')
+        logger.error('Delivery log write failed: %s (decision=%s, status=%s)',
+                     e, policy_decision, response_status, exc_info=True)
+    finally:
+        if log_conn is not None:
+            try:
+                log_conn.close()
+            except Exception:
+                pass
+
+
+def _takedown_atomic(conn: sqlite3.Connection, *, case_id: int, action_type: str,
+                      scope_type: str | None, scope_value: str | None,
+                      actor_membership_id: int | None, reason: str | None,
+                      policy_enabled: bool | None = None,
+                      policy_scope_type: str | None = None,
+                      policy_scope_value: str | None = None,
+                      previous_policy_json: str | None = None) -> dict[str, Any]:
+    """Execute an atomic takedown operation: event + policy update + audit.
+
+    All in one transaction with BEGIN IMMEDIATE.
+    When ``previous_policy_json`` is provided, the case row is updated with
+    the snapshot so that restore can reconstruct the exact prior state.
+    Returns dict with ``success`` and ``event_id``.
+    """
+    cur = conn.cursor()
+    cur.execute("BEGIN IMMEDIATE")
+    try:
+        # Verify case is still open
+        case_row = cur.execute(
+            "SELECT status FROM takedown_cases WHERE case_id=?",
+            (case_id,)
+        ).fetchone()
+        if not case_row:
+            conn.rollback()
+            return {'success': False, 'error': f'Takedown case {case_id} not found'}
+        if previous_policy_json is not None and case_row['status'] != 'open':
+            conn.rollback()
+            return {'success': False, 'error': f'Case {case_id} is already {case_row["status"]}'}
+
+        # Append event
+        cur.execute(
+            'INSERT INTO takedown_events(case_id, action_type, scope_type, scope_value, '
+            'actor_membership_id, reason) VALUES (?, ?, ?, ?, ?, ?)',
+            (case_id, action_type, scope_type, scope_value, actor_membership_id, reason)
+        )
+        event_id = cur.lastrowid
+
+        # Store previous policy snapshot if provided
+        if previous_policy_json is not None:
+            cur.execute(
+                "UPDATE takedown_cases SET previous_policy_state=? WHERE case_id=?",
+                (previous_policy_json, case_id)
+            )
+
+        # Create/update policy if applicable
+        if policy_enabled is not None and policy_scope_type and policy_scope_value:
+            now_val = now_utc()
+            existing = cur.execute(
+                "SELECT policy_id FROM image_delivery_policies WHERE scope_type=? AND scope_value=?",
+                (policy_scope_type, policy_scope_value)
+            ).fetchone()
+            if existing:
+                cur.execute(
+                    "UPDATE image_delivery_policies SET external_display_enabled=?, reason=?, updated_at=? WHERE policy_id=?",
+                    (1 if policy_enabled else 0, reason, now_val, existing[0])
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO image_delivery_policies(scope_type, scope_value, external_display_enabled, reason, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (policy_scope_type, policy_scope_value, 1 if policy_enabled else 0, reason, now_val, now_val)
+                )
+
+        # Append admin audit
+        cur.execute(
+            'INSERT INTO admin_audit_log(action, target_resource, details_json, created_at) '
+            'VALUES (?, ?, ?, ?)',
+            (action_type, f'takedown_event/{event_id}',
+             json.dumps({'case_id': case_id, 'scope_type': scope_type, 'scope_value': scope_value,
+                         'policy_enabled': policy_enabled}),
+             now_utc())
+        )
+        conn.commit()
+        return {'success': True, 'event_id': event_id}
+    except Exception as e:
+        conn.rollback()
+        return {'success': False, 'error': str(e)}
+
+
+def _get_safe_image_path(card_key: str, image_root: Path, conn: sqlite3.Connection) -> Path | None:
+    """Resolve a card's local image safely, preventing path traversal."""
+    resolved = resolve_card_local_path(card_key, conn)
+    if not resolved:
+        return None
+    return _safe_image_path(str(resolved), image_root)
+
+
+CACHE_VERSION = 1
+CACHE_CLEANUP_RUNNING = False
+
+
+def _get_derivative_cache_key(source_path: Path, size: str) -> str:
+    source_hash = _generate_image_hash(source_path)
+    return f'{source_hash}_{size}_v{CACHE_VERSION}'
+
+
+def _aggregate_delivery_log(conn: sqlite3.Connection, *, target_date: str | None = None) -> dict[str, Any]:
+    """Aggregate delivery log entries into daily summary rows.
+
+    Aggregates by tenant_id, api_key_id, card_key, policy_decision.
+    Deletes raw aggregated rows only after successful insert.
+    Idempotent: repeated calls with the same date are safe.
+    Failed aggregation preserves raw records.
+    Returns dict with rows_aggregated, rows_deleted.
+    """
+    cur = conn.cursor()
+    if target_date is None:
+        target_date = (dt.datetime.now(dt.UTC) - dt.timedelta(days=1)).strftime('%Y-%m-%d')
+
+    # Count raw rows for target date
+    cur.execute(
+        "SELECT COUNT(*) FROM image_delivery_policy_records WHERE date(created_at) = ?",
+        (target_date,)
+    )
+    rows_found = cur.fetchone()[0]
+    if rows_found == 0:
+        return {'rows_aggregated': 0, 'rows_deleted': 0, 'target_date': target_date}
+
+    try:
+        # First, compute the aggregation from raw records
+        cur.execute("""
+            SELECT
+                date(created_at) AS agg_date,
+                COALESCE(tenant_id, 0) AS tenant_id,
+                COALESCE(api_key_id, 0) AS api_key_id,
+                COALESCE(card_key, '') AS card_key,
+                policy_decision,
+                COUNT(*) AS new_count
+            FROM image_delivery_policy_records
+            WHERE date(created_at) = ?
+            GROUP BY date(created_at), COALESCE(tenant_id, 0), COALESCE(api_key_id, 0),
+                     COALESCE(card_key, ''), policy_decision
+        """, (target_date,))
+        groups = cur.fetchall()
+        rows_aggregated = 0
+        for g in groups:
+            agg_date, tenant_id, api_key_id, card_key, policy_decision, new_count = g
+            # Upsert: add to existing count or insert new
+            cur.execute("""
+                INSERT INTO image_delivery_daily_aggregation
+                    (agg_date, tenant_id, api_key_id, card_key, policy_decision, count, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(agg_date, tenant_id, api_key_id, card_key, policy_decision)
+                DO UPDATE SET count = count + excluded.count
+            """, (agg_date, tenant_id, api_key_id, card_key, policy_decision, new_count))
+            rows_aggregated += 1
+        conn.commit()
+
+        # Delete raw rows only after successful aggregation
+        cur.execute(
+            "DELETE FROM image_delivery_policy_records WHERE date(created_at) = ?",
+            (target_date,)
+        )
+        rows_deleted = cur.rowcount
+        conn.commit()
+
+        return {'rows_aggregated': rows_aggregated, 'rows_deleted': rows_deleted, 'target_date': target_date}
+    except Exception:
+        conn.rollback()
+        return {'rows_aggregated': 0, 'rows_deleted': 0, 'target_date': target_date, 'error': 'aggregation_failed'}
+
+
+def _delivery_log_cleanup(conn: sqlite3.Connection, *, retention_days: int = 30) -> dict[str, Any]:
+    """Aggregate and clean up expired delivery log entries.
+
+    1. Aggregates raw entries older than retention_days into daily summary.
+    2. Deletes raw entries only after successful aggregation.
+    Returns dict with aggregate and cleanup stats.
+    """
+    cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=retention_days)
+    target_dates = set()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT DISTINCT date(created_at) FROM image_delivery_policy_records WHERE date(created_at) < ?",
+        (cutoff.strftime('%Y-%m-%d'),)
+    )
+    for row in cur.fetchall():
+        target_dates.add(row[0])
+
+    total_agg = 0
+    total_del = 0
+    for d in sorted(target_dates):
+        result = _aggregate_delivery_log(conn, target_date=d)
+        total_agg += result['rows_aggregated']
+        total_del += result['rows_deleted']
+
+    return {'rows_aggregated': total_agg, 'rows_deleted': total_del, 'retention_days': retention_days}
+
+
+# ── Rate limiting helpers ───────────────────────────────────────────
+
+class _RateLimitBucket:
+    def __init__(self, max_burst: int = 60, window_sec: int = 60):
+        self.max_burst = max_burst
+        self.window_sec = window_sec
+        self._buckets: dict[str, list[float]] = {}
+
+    def check(self, key: str) -> bool:
+        now_val = time.time()
+        bucket = self._buckets.get(key, [])
+        bucket = [t for t in bucket if now_val - t < self.window_sec]
+        if len(bucket) >= self.max_burst:
+            self._buckets[key] = bucket
+            return False
+        bucket.append(now_val)
+        self._buckets[key] = bucket
+        return True
+
+    def remaining(self, key: str) -> int:
+        now_val = time.time()
+        bucket = self._buckets.get(key, [])
+        bucket = [t for t in bucket if now_val - t < self.window_sec]
+        return max(0, self.max_burst - len(bucket))
+
+
+_IMAGE_RATE_LIMITER = _RateLimitBucket(max_burst=120, window_sec=60)
+_KEY_RATE_LIMITER = _RateLimitBucket(max_burst=200, window_sec=60)
+
+
+# ── Persistent quota tracking (per-hour/per-day) ────────────────────
+
+_QUOTA_HOURLY_LIMIT = 1000   # max successful deliveries per hour per identity
+_QUOTA_DAILY_LIMIT = 5000    # max successful deliveries per day per identity
+
+
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class _QuotaWindow:
+    """A single quota window row."""
+    window_kind: str          # 'hour' or 'day'
+    window_start: str         # ISO datetime, inclusive
+    window_end: str           # ISO datetime, exclusive
+
+
+def quota_windows(now_val: dt.datetime | None = None, *, hourly_limit: int = 1000, daily_limit: int = 5000) -> tuple[_QuotaWindow, _QuotaWindow]:
+    """Compute the current hourly and daily quota windows.
+
+    Accepts an injected ``now_val`` for deterministic testing.
+    Both windows are derived from the same timestamp so that a request
+    crossing a boundary still gets consistent hour/day windows.
+    """
+    if now_val is None:
+        now_val = dt.datetime.now(dt.UTC)
+    hour_start = now_val.replace(minute=0, second=0, microsecond=0)
+    hour_end = hour_start + dt.timedelta(hours=1)
+    day_start = now_val.replace(hour=0, minute=0, second=0, microsecond=0)
+    day_end = day_start + dt.timedelta(days=1)
+    return (
+        _QuotaWindow('hour', hour_start.isoformat(), hour_end.isoformat()),
+        _QuotaWindow('day', day_start.isoformat(), day_end.isoformat()),
+    )
+
+
+def quota_identity_for_access(access_identity: str, identity_type: str) -> str:
+    """Return a deterministic quota identity string.
+
+    API-key requests and signed-token requests issued by the same key
+    share one quota pool when the identity encodes the same issuer.
+    Currently the identity is the access_identity token itself; this
+    can be refined when multi-key issuer tracking is added.
+    """
+    return access_identity
+
+
+def _check_and_increment_quota(conn: sqlite3.Connection, access_identity: str,
+                               identity_type: str, *,
+                               hourly_limit: int, daily_limit: int,
+                               now_val: dt.datetime | None = None) -> dict[str, Any]:
+    """Atomically check and increment persistent image delivery quota.
+
+    Returns dict with ``allowed``, ``hourly_count``, ``daily_count``,
+    ``hourly_limit``, ``daily_limit``.
+
+    If over quota returns ``{'allowed': False, 'reason': ...}``.
+    The call is performed inside a single ``BEGIN IMMEDIATE``
+    transaction -- two concurrent requests share the same lock and
+    cannot both pass when only one slot remains.
+    """
+    hour_win, day_win = quota_windows(now_val)
+    cur = conn.cursor()
+
+    # BEGIN IMMEDIATE -- acquire the write lock immediately
+    cur.execute("BEGIN IMMEDIATE")
+    try:
+        # -- Hourly window -------------------------------------------------
+        row = cur.execute(
+            "SELECT successful_delivery_count FROM image_delivery_quota_windows "
+            "WHERE access_identity=? AND identity_type=? AND window_kind='hour' AND window_start=?",
+            (access_identity, identity_type, hour_win.window_start)
+        ).fetchone()
+        if row:
+            hourly_count = row[0]
+        else:
+            hourly_count = 0
+            cur.execute(
+                "INSERT INTO image_delivery_quota_windows"
+                "(access_identity, identity_type, window_kind, window_start, window_end,"
+                " successful_delivery_count, created_at, updated_at) "
+                "VALUES (?, ?, 'hour', ?, ?, 0, ?, ?)",
+                (access_identity, identity_type, hour_win.window_start, hour_win.window_end,
+                 now_utc(), now_utc())
+            )
+
+        # -- Daily window --------------------------------------------------
+        row = cur.execute(
+            "SELECT successful_delivery_count FROM image_delivery_quota_windows "
+            "WHERE access_identity=? AND identity_type=? AND window_kind='day' AND window_start=?",
+            (access_identity, identity_type, day_win.window_start)
+        ).fetchone()
+        if row:
+            daily_count = row[0]
+        else:
+            daily_count = 0
+            cur.execute(
+                "INSERT INTO image_delivery_quota_windows"
+                "(access_identity, identity_type, window_kind, window_start, window_end,"
+                " successful_delivery_count, created_at, updated_at) "
+                "VALUES (?, ?, 'day', ?, ?, 0, ?, ?)",
+                (access_identity, identity_type, day_win.window_start, day_win.window_end,
+                 now_utc(), now_utc())
+            )
+
+        # -- Threshold check (inside the lock) -----------------------------
+        if hourly_count >= hourly_limit:
+            conn.commit()
+            return {'allowed': False, 'reason': 'hourly_quota_exceeded',
+                    'hourly_count': hourly_count, 'daily_count': daily_count,
+                    'hourly_limit': hourly_limit, 'daily_limit': daily_limit}
+        if daily_count >= daily_limit:
+            conn.commit()
+            return {'allowed': False, 'reason': 'daily_quota_exceeded',
+                    'hourly_count': hourly_count, 'daily_count': daily_count,
+                    'hourly_limit': hourly_limit, 'daily_limit': daily_limit}
+
+        # -- Increment both in one transaction -----------------------------
+        cur.execute(
+            "UPDATE image_delivery_quota_windows "
+            "SET successful_delivery_count = successful_delivery_count + 1, updated_at=? "
+            "WHERE access_identity=? AND identity_type=? AND window_kind='hour' AND window_start=?",
+            (now_utc(), access_identity, identity_type, hour_win.window_start)
+        )
+        cur.execute(
+            "UPDATE image_delivery_quota_windows "
+            "SET successful_delivery_count = successful_delivery_count + 1, updated_at=? "
+            "WHERE access_identity=? AND identity_type=? AND window_kind='day' AND window_start=?",
+            (now_utc(), access_identity, identity_type, day_win.window_start)
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    return {'allowed': True, 'hourly_count': hourly_count + 1, 'daily_count': daily_count + 1,
+            'hourly_limit': hourly_limit, 'daily_limit': daily_limit}
+
+
+def _quota_cleanup(conn: sqlite3.Connection, *, retention_days: int = 7) -> int:
+    """Remove quota window rows older than retention_days."""
+    cur = conn.cursor()
+    cutoff = (dt.datetime.now(dt.UTC) - dt.timedelta(days=retention_days)).isoformat()
+    cur.execute("DELETE FROM image_delivery_quotas WHERE window_start < ?", (cutoff,))
+    conn.commit()
+    return cur.rowcount
+
+
+def resolve_card_local_path(card_key: str, conn: sqlite3.Connection) -> Path | None:
+    """Resolve a card key to its local filesystem image path.
+
+    Returns a Path relative to the image root, or None if not found.
+    """
+    image_info = resolve_preferred_card_image(conn, card_key)
+    if not image_info or not image_info.get('image_path'):
+        return None
+    return Path(image_info['image_path'])
+
+
+async def get_settings(request: Request) -> PokemonDBSettings:
+    """FastAPI dependency to inject PokemonDBSettings into endpoints.
+
+    Usage:
+        async def my_route(settings: PokemonDBSettings = Depends(get_settings)):
+            ...
+
+    This allows tests to override via:
+        app.dependency_overrides[get_settings] = lambda: test_settings
+    """
+    return request.app.state.settings
+
+
 def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
-    settings = validate_settings(settings or DEFAULT_SETTINGS, require_ui=False)
+    if settings is None:
+        settings = settings_from_env()
+    settings = validate_settings(settings, require_ui=False)
     app = FastAPI(
         title='SaveRoom Pokémon Card Database v2 API',
         version='0.2.0',
@@ -784,7 +1599,10 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
     )
     app.state.settings = settings
     app.state.db = settings.db
-    app.state.support_status = ensure_search_support(settings.db, reports_dir=settings.reports_dir)
+    if not settings.skip_search_setup:
+        app.state.support_status = ensure_search_support(settings.db, reports_dir=settings.reports_dir)
+    else:
+        app.state.support_status = {'refreshed': False, 'database': str(settings.db), 'fts_table': 'v2_card_search_fts', 'api_cache_table': 'v2_card_detail_api_cache', 'fts_rows': 0, 'api_cache_rows': 0, 'v2_card_search_rows': 0, 'row_count_matches': True}
 
     # Invalidate stale price cache entries with non-Latin query terms
     # (e.g., Japanese text in queries that return 0 eBay results)
@@ -816,7 +1634,7 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
     if settings.ui_dir.exists():
         app.mount('/ui', StaticFiles(directory=str(settings.ui_dir), html=True), name='ui')
     if settings.image_cache_mounted:
-        app.mount('/images', StaticFiles(directory=str(settings.image_cache_dir)), name='images')
+        print(f'[v9.1] Raw static /images mount removed. All image delivery now goes through GET /api/v1/images/assets/{{image_id}}/content (authenticated, policy-gated).')
 
 
     # v1 API foundation: optional API key auth + request logging.
@@ -824,10 +1642,13 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
         ensure_v1_api_support(conn)
 
     async def require_v1_api_key(request: Request) -> dict[str, Any]:
-        require_key = os.environ.get('POKEMON_DB_REQUIRE_API_KEY', '').strip().lower() in {'1', 'true', 'yes', 'on'}
+        require_key = settings.require_api_key or os.environ.get('POKEMON_DB_REQUIRE_API_KEY', '').strip().lower() in {'1', 'true', 'yes', 'on'}
         if not require_key:
             request.state.api_key_id = None
-            return {'api_key_id': None, 'scopes': ['cards:read'], 'auth_required': False, 'membership_id': None}
+            request.state.api_scopes = ['cards:read', 'images:read']
+            auth_result = {'api_key_id': None, 'scopes': ['cards:read', 'images:read'], 'auth_required': False, 'membership_id': None}
+            request.state.auth_dict = auth_result
+            return auth_result
         raw_key = request.headers.get('x-api-key') or ''
         auth = request.headers.get('authorization') or ''
         if not raw_key and auth.lower().startswith('bearer '):
@@ -855,8 +1676,11 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
         cur.execute('UPDATE developer_api_keys SET last_used_at=CURRENT_TIMESTAMP WHERE id=?', (row['id'],))
         conn.commit()
         request.state.api_key_id = row['id']
-        return {'api_key_id': row['id'], 'scopes': list(normalized_scopes),
-                'auth_required': True, 'membership_id': membership_id}
+        request.state.api_scopes = list(normalized_scopes)
+        auth_result = {'api_key_id': row['id'], 'scopes': list(normalized_scopes),
+                       'auth_required': True, 'membership_id': membership_id}
+        request.state.auth_dict = auth_result
+        return auth_result
 
     @app.middleware('http')
     async def v1_request_logger(request: Request, call_next):
@@ -890,7 +1714,7 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
     @app.get('/api/v1/health', response_model=HealthResponseV1)
     def v1_health(_: dict[str, Any] = Depends(require_v1_api_key)) -> dict[str, Any]:
         counts = db_counts(app.state.db)
-        return {'data': {'ok': counts['support_ready'], 'service': 'saveroom-pokemon-api', 'version': 'v1', 'started_at': STARTED_AT, 'checked_at': now_utc(), 'counts': counts, 'support_status': _public_support_status(app.state.support_status), 'auth': {'api_key_required': os.environ.get('POKEMON_DB_REQUIRE_API_KEY', '').strip().lower() in {'1', 'true', 'yes', 'on'}}}}
+        return {'data': {'ok': counts['support_ready'], 'service': 'saveroom-pokemon-api', 'version': 'v1', 'started_at': STARTED_AT, 'checked_at': now_utc(), 'counts': counts, 'support_status': _public_support_status(app.state.support_status), 'auth': {'api_key_required': settings.require_api_key or os.environ.get('POKEMON_DB_REQUIRE_API_KEY', '').strip().lower() in {'1', 'true', 'yes', 'on'}}}}
 
     @app.get('/api/v1/search/cards', response_model=CardSearchResponseV1)
     def v1_search_cards(
@@ -974,7 +1798,7 @@ LIMIT ? OFFSET ?
 '''
         params.extend([limit, offset])
         detail_rows = [normalize_row(dict(r)) for r in cur.execute(data_sql, params).fetchall()]
-        data = [v1_card_from_detail(r, conn) for r in detail_rows]
+        data = [v1_card_from_detail(r, conn, settings=app.state.settings) for r in detail_rows]
         return {'data': data, 'pagination': {'limit': limit, 'offset': offset, 'count': len(data), 'total': total, 'has_more': offset + len(data) < total}}
 
     # ── /api/v1/search/autocomplete ────────────────────────────────────
@@ -1020,7 +1844,7 @@ LIMIT ? OFFSET ?
         detail, _elapsed_ms = get_card_detail(conn, language_code, card_id)
         if detail is None:
             raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': canonical_card_key(language_code, card_id)})
-        return {'data': v1_card_from_detail(detail, conn, include_detail=True)}
+        return {'data': v1_card_from_detail(detail, conn, include_detail=True, settings=app.state.settings)}
 
     # ── /api/v1/sets ─────────────────────────────────────────────────
 
@@ -1132,20 +1956,25 @@ LIMIT ? OFFSET ?
             raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': canonical_card_key(language_code, card_id)})
         images = detail.get('images') or {}
         display_lang = images.get('display_image_source_language_code')
+        card_k = canonical_card_key(language_code, card_id)
+        # Gateway URL — controlled card-key compatibility route
+        gateway_url = f'/api/v1/images/card/{card_k}/content?size=medium'
+        signed_url = _generate_card_signed_url(conn, card_k, app.state.settings) if app.state.settings else None
         return {
             'data': {
                 'has_exact_image': bool(images.get('has_exact_image')),
                 'has_display_image': bool(images.get('has_display_image')),
                 'exact_image_url': images.get('exact_image_url'),
                 'display_image_url': images.get('display_image_url'),
-                'local_display_image_url': images.get('local_display_image_url'),
+                'local_display_image_url': gateway_url,  # gateway, not raw path
+                'signed_image_url': signed_url,
                 'local_display_image_cache_profile': images.get('local_display_image_cache_profile'),
                 'local_display_image_bytes': images.get('local_display_image_bytes'),
                 'display_image_source_type': images.get('display_image_source_type'),
                 'display_image_source_language_code': display_lang,
                 'language_matches_card': (display_lang in (None, '', language_code)),
             },
-            'card_key': canonical_card_key(language_code, card_id),
+            'card_key': card_k,
             'language_code': language_code,
             'card_id': card_id,
         }
@@ -1690,6 +2519,101 @@ LIMIT ? OFFSET ?
             BEGIN
                 SELECT RAISE(ABORT, 'DELETEs are not allowed on admin_audit_log');
             END""", 'Add immutability trigger: reject DELETEs on admin_audit_log.'),
+            ('v46', "CREATE TABLE IF NOT EXISTS image_delivery_policies (policy_id INTEGER PRIMARY KEY AUTOINCREMENT, scope_type TEXT NOT NULL CHECK (scope_type IN ('global', 'source', 'language', 'set', 'card', 'image')), scope_value TEXT NOT NULL, external_display_enabled INTEGER NOT NULL CHECK (external_display_enabled IN (0, 1)), reason TEXT, attribution_text TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), UNIQUE(scope_type, scope_value), CHECK ((scope_type = 'global' AND scope_value = 'global') OR (scope_type <> 'global' AND length(trim(scope_value)) > 0)))", 'Create image delivery policy table.'),
+            ('v46b', "INSERT OR IGNORE INTO image_delivery_policies(scope_type, scope_value, external_display_enabled, reason) VALUES ('global', 'global', 1, 'Default: catalogue images enabled by design')",
+                         'Seed explicit global default policy.'),
+            ('v47', "CREATE TABLE IF NOT EXISTS takedown_cases (case_id INTEGER PRIMARY KEY AUTOINCREMENT, requester_identity TEXT NOT NULL, requester_contact TEXT NOT NULL, rights_description TEXT, status TEXT NOT NULL CHECK (status IN ('open', 'under_review', 'resolved', 'rejected')), opened_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), resolved_at TEXT, resolution_summary TEXT)",
+                     'Create append-only takedown case registry.'),
+            ('v48', "CREATE TABLE IF NOT EXISTS takedown_events (event_id INTEGER PRIMARY KEY AUTOINCREMENT, case_id INTEGER NOT NULL, action_type TEXT NOT NULL CHECK (action_type IN ('case_opened', 'disabled', 'restored', 'replaced', 'case_resolved', 'case_rejected')), scope_type TEXT CHECK (scope_type IS NULL OR scope_type IN ('global', 'source', 'language', 'set', 'card', 'image')), scope_value TEXT, actor_membership_id INTEGER, reason TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), FOREIGN KEY(case_id) REFERENCES takedown_cases(case_id) ON DELETE RESTRICT, FOREIGN KEY(actor_membership_id) REFERENCES tenant_memberships(membership_id) ON DELETE RESTRICT, CHECK ((scope_type IS NULL AND scope_value IS NULL) OR (scope_type IS NOT NULL AND scope_value IS NOT NULL AND length(trim(scope_value)) > 0)))", 'Create immutable takedown event audit log.'),
+            ('v48b', "CREATE TRIGGER IF NOT EXISTS reject_update_takedown_events BEFORE UPDATE ON takedown_events BEGIN SELECT RAISE(ABORT, 'Cannot update takedown events'); END", 'Reject UPDATEs on takedown_events.'),
+            ('v48c', "CREATE TRIGGER IF NOT EXISTS reject_delete_takedown_events BEFORE DELETE ON takedown_events BEGIN SELECT RAISE(ABORT, 'Cannot delete takedown events'); END", 'Reject DELETEs on takedown_events.'),
+            ('v49', "CREATE TABLE IF NOT EXISTS image_delivery_policy_records (record_id INTEGER PRIMARY KEY AUTOINCREMENT, image_id INTEGER, card_key TEXT, tenant_id INTEGER, api_key_id INTEGER, requested_size TEXT, policy_decision TEXT NOT NULL, response_status INTEGER NOT NULL, response_outcome TEXT NOT NULL, request_id TEXT, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))", 'Create image delivery log for abuse monitoring.'),
+            ('v49b', "CREATE INDEX IF NOT EXISTS idx_delivery_log_created ON image_delivery_policy_records(created_at)", 'Index for time-based delivery log queries.'),
+            ('v49c', "CREATE INDEX IF NOT EXISTS idx_delivery_log_card ON image_delivery_policy_records(card_key)", 'Index for card-based delivery log queries.'),
+            ('v49d', "CREATE INDEX IF NOT EXISTS idx_delivery_log_tenant ON image_delivery_policy_records(tenant_id)", 'Index for tenant-based delivery log queries.'),
+            ('v50', "CREATE TABLE IF NOT EXISTS derivative_cache (cache_id INTEGER PRIMARY KEY AUTOINCREMENT, source_image_id INTEGER, source_hash TEXT NOT NULL, size TEXT NOT NULL CHECK (size IN ('thumbnail', 'small', 'medium', 'large')), cache_version INTEGER NOT NULL DEFAULT 1, local_path TEXT NOT NULL, file_bytes INTEGER NOT NULL DEFAULT 0, mime_type TEXT NOT NULL DEFAULT 'image/webp', created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), UNIQUE(source_hash, size, cache_version))", 'Create deterministic derivative cache table.'),
+            ('v50b', "CREATE INDEX IF NOT EXISTS idx_derivative_cache_source ON derivative_cache(source_image_id)", 'Index for derivative lookup by source image.'),
+            ('v51', "CREATE TABLE IF NOT EXISTS physical_item_photos (photo_id INTEGER PRIMARY KEY AUTOINCREMENT, item_id TEXT NOT NULL, tenant_id INTEGER NOT NULL, uploaded_by TEXT, original_filename TEXT, storage_path TEXT NOT NULL, mime_type TEXT NOT NULL DEFAULT 'image/jpeg', file_bytes INTEGER, is_published INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), FOREIGN KEY (item_id) REFERENCES physical_items(item_id) ON DELETE CASCADE)", 'Create tenant-isolated physical item photo table.'),
+            ('v51b', "CREATE INDEX IF NOT EXISTS idx_physical_item_photos_item ON physical_item_photos(item_id)", 'Index for photo lookup by item.'),
+            ('v51c', "CREATE INDEX IF NOT EXISTS idx_physical_item_photos_tenant ON physical_item_photos(tenant_id)", 'Index for tenant isolation on photos.'),
+            ('v52', "CREATE TABLE IF NOT EXISTS image_delivery_quotas (quota_id INTEGER PRIMARY KEY AUTOINCREMENT, access_identity TEXT NOT NULL, identity_type TEXT NOT NULL CHECK (identity_type IN ('api_key', 'signed_url', 'tenant')), window_start TEXT NOT NULL, window_end TEXT NOT NULL, hourly_count INTEGER NOT NULL DEFAULT 0, daily_count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), UNIQUE(access_identity, window_start))",
+             'Create per-identity image delivery quota table.'),
+            ('v52b', "CREATE INDEX IF NOT EXISTS idx_image_delivery_quotas_identity ON image_delivery_quotas(access_identity)", 'Index for quota lookup by identity.'),
+            ('v52c', "CREATE INDEX IF NOT EXISTS idx_image_delivery_quotas_window ON image_delivery_quotas(window_start, window_end)", 'Index for quota cleanup by time window.'),
+            ('v53', "CREATE TABLE IF NOT EXISTS image_delivery_daily_aggregation (agg_id INTEGER PRIMARY KEY AUTOINCREMENT, agg_date TEXT NOT NULL, tenant_id INTEGER, api_key_id INTEGER, card_key TEXT, policy_decision TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')), UNIQUE(agg_date, tenant_id, api_key_id, card_key, policy_decision))",
+             'Create daily delivery log aggregation table.'),
+            ('v53b', "CREATE INDEX IF NOT EXISTS idx_delivery_agg_date ON image_delivery_daily_aggregation(agg_date)", 'Index for date-based aggregation queries.'),
+            ('v54', """
+                CREATE TABLE IF NOT EXISTS catalogue_image_assets (
+                    image_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    card_key TEXT NOT NULL,
+                    set_id TEXT,
+                    language_code TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    source_language_code TEXT,
+                    local_path TEXT NOT NULL,
+                    source_hash TEXT,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    UNIQUE(card_key, source_type, source_language_code, language_code)
+                )
+            """, 'Stable catalogue image identity — explicit PK, not rowid.'),
+            ('v54b', """
+                INSERT OR IGNORE INTO catalogue_image_assets
+                    (card_key, set_id, language_code, source_type, source_language_code, local_path)
+                SELECT
+                    language_code || ':' || card_id,
+                    resolved_set_id,
+                    language_code,
+                    COALESCE(display_image_source_type, 'unknown'),
+                    display_image_source_language_code,
+                    local_display_image_url
+                FROM v2_card_detail_api_cache
+                WHERE has_display_image = 1
+                  AND local_display_image_url IS NOT NULL
+                  AND trim(local_display_image_url) != ''
+                ORDER BY language_code, card_id
+            """, 'Backfill catalogue_image_assets from existing card cache.'),
+
+            ('v55', '''
+                CREATE TABLE IF NOT EXISTS image_delivery_quota_windows (
+                    quota_window_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    access_identity TEXT NOT NULL,
+                    identity_type TEXT NOT NULL,
+                    window_kind TEXT NOT NULL
+                        CHECK (window_kind IN ('hour', 'day')),
+                    window_start TEXT NOT NULL,
+                    window_end TEXT NOT NULL,
+                    successful_delivery_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                    UNIQUE (access_identity, identity_type, window_kind, window_start)
+                )
+            ''', 'Create corrected image delivery quota windows table (separate hour/day rows).'),
+            ('v55b', '''
+                CREATE INDEX IF NOT EXISTS idx_quota_windows_lookup
+                ON image_delivery_quota_windows (access_identity, identity_type, window_kind, window_start)
+            ''', 'Index for quota window lookup.'),
+
+            ('v56', '''
+                ALTER TABLE takedown_cases ADD COLUMN scope_type TEXT
+            ''', 'Add scope_type to takedown_cases (v9.1).'),
+            ('v56b', '''
+                ALTER TABLE takedown_cases ADD COLUMN scope_value TEXT
+            ''', 'Add scope_value to takedown_cases (v9.1).'),
+            ('v56c', '''
+                ALTER TABLE takedown_cases ADD COLUMN previous_policy_state TEXT
+            ''', 'Add previous_policy_state JSON snapshot to takedown_cases (v9.1).'),
+            ('v57', '''
+                CREATE TABLE IF NOT EXISTS card_image_hashes (
+                    card_key TEXT PRIMARY KEY,
+                    language_code TEXT NOT NULL,
+                    card_id TEXT NOT NULL,
+                    image_hash TEXT NOT NULL,
+                    cache_path TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''', 'Create image hash table for Phase 1 scanner.'),
+            ('v57b', 'CREATE INDEX IF NOT EXISTS idx_card_image_hashes_hash ON card_image_hashes(image_hash)', 'Index for image hash lookup.'),
         ]
         ran: list[str] = []
         for version, sql, desc in migrations:
@@ -1712,11 +2636,12 @@ LIMIT ? OFFSET ?
         conn.commit()
         return ran
 
-    # Run migrations at startup
-    with connect(app.state.db) as conn:
-        ran = apply_migrations(conn)
-        if ran:
-            print(f'DB migrations applied: {ran}')
+    # Run migrations at startup (skipped when skip_search_setup=True — for tests)
+    if not settings.skip_search_setup:
+        with connect(app.state.db) as conn:
+            ran = apply_migrations(conn)
+            if ran:
+                print(f'DB migrations applied: {ran}')
 
     # ── Translation coverage endpoint ───────────────────────────────────
 
@@ -1754,7 +2679,12 @@ LIMIT ? OFFSET ?
 
     @app.middleware('http')
     async def v1_quota_enforcer(request: Request, call_next):
-        if request.url.path.startswith('/api/v1') and not request.url.path.startswith('/api/v1/admin'):
+        token = request.query_params.get('token')
+        token_image_request = token and (
+            request.url.path.startswith('/api/v1/images/assets/')
+            or request.url.path.startswith('/api/v1/images/card/')
+        )
+        if request.url.path.startswith('/api/v1') and not request.url.path.startswith('/api/v1/admin') and not token_image_request:
             try:
                 auth = await require_v1_api_key(request)
                 request.state._v1_auth = auth
@@ -1812,8 +2742,9 @@ LIMIT ? OFFSET ?
             'runtime': public_settings(app.state.settings),
             'support_status': _public_support_status(app.state.support_status),
             'local_image_cache': {
-                'mounted': app.state.settings.image_cache_mounted,
-                'url_prefix': '/images' if app.state.settings.image_cache_mounted else None,
+                'mounted': False,
+                'url_prefix': None,
+                'gateway': '/api/v1/images/assets/{image_id}/content' if app.state.settings.image_cache_mounted else None,
             },
             'counts': counts,
             'elapsed_ms': round((time.perf_counter() - start) * 1000, 3),
@@ -1858,6 +2789,14 @@ LIMIT ? OFFSET ?
                     if p and p['sold_n']:
                         r['price'] = {'sold_listings': p['sold_n'], 'sold_avg': p['sold_avg']}
 
+        # Inject signed_image_url into each result's images dict
+        for r in results:
+            imgs = r.get('images') or {}
+            card_key = r.get('language_code', '') + ':' + r.get('card_id', '')
+            signed = _generate_card_signed_url(conn, card_key, app.state.settings) if app.state.settings else None
+            imgs['signed_image_url'] = signed
+            r['images'] = imgs
+
         return {
             'query': q,
             'filters': {
@@ -1889,6 +2828,13 @@ LIMIT ? OFFSET ?
             has_display_image=has_display_image,
             limit=limit,
         )
+        # Inject signed_image_url into each result's images dict
+        for r in results:
+            imgs = r.get('images') or {}
+            card_key = imgs.get('card_key') or (r.get('language_code', '') + ':' + r.get('card_id', ''))
+            signed = _generate_card_signed_url(conn, card_key, app.state.settings) if app.state.settings else None
+            imgs['signed_image_url'] = signed
+            r['images'] = imgs
         return {
             'core_set_id': core_set_id,
             'query': q,
@@ -2669,7 +3615,10 @@ LIMIT ? OFFSET ?
                 except FileNotFoundError:
                     continue
         if not key:
-            raise HTTPException(status_code=400, detail='RAPIDAPI_KEY not configured')
+            raise HTTPException(status_code=503, detail={
+                'code': 'pricing_provider_not_configured',
+                'message': 'Live pricing is unavailable because the pricing provider is not configured.',
+            })
 
         def do_rapidapi_fetch(search_query: str, request_label: str) -> dict[str, Any] | None:
             """Execute a single RapidAPI fetch."""
@@ -3115,14 +4064,8 @@ LIMIT ? OFFSET ?
         return _check
 
     def get_tenant_from_key(auth: dict[str, Any]) -> int:
-        """Resolve tenant_id from API key's membership_id.
-        
-        Returns the tenant_id derived from the API key's membership.
-        Falls back to tenant 1 only when:
-        - Auth is not required (POKEMON_DB_REQUIRE_API_KEY is off)
-        - The key has no membership_id but is an admin key (admin:all scope)
-        """
-        membership_id = auth.get('membership_id')
+        """Resolve tenant_id from API key's membership_id."""
+        membership_id = auth.get('membership_id') if isinstance(auth, dict) else getattr(auth, 'membership_id', None)
         if membership_id:
             conn = connect(app.state.db)
             cur = conn.cursor()
@@ -4192,10 +5135,854 @@ LIMIT ? OFFSET ?
             raise v1_error(404, 'user_not_found', 'User not found.', {'user_id': user_id, 'tenant_slug': slug})
         return {'data': {'deleted': True, 'user_id': user_id, 'tenant_slug': slug}}
 
+    # ── v9.1 Image Gateway ───────────────────────────────────────────
+
+    @app.get('/api/v1/images/assets/{image_id}/content')
+    def v1_image_content(
+        image_id: int,
+        size: str = Query('medium', pattern='^(thumbnail|small|medium|large)$'),
+        token: str | None = Query(None, description='Signed URL token (alternative to API key)'),
+        request: Request = None,
+    ) -> Response:
+        """Deliver a card image through the controlled gateway."""
+        # Auth info is stored on request.state by require_v1_api_key
+        api_key_id = getattr(request.state, 'api_key_id', None)
+        api_scopes = getattr(request.state, 'api_scopes', [])
+
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+
+        # Verify access
+        access_identity = None
+        if token:
+            if len(token.split(':')) < 5:
+                raise v1_error(403, 'invalid_token', 'Invalid or expired signed URL token.', {})
+            secret = _get_signed_url_secret(settings.signed_url_secret)
+            verified = _verify_signed_url(token, secret)
+            if not verified:
+                raise v1_error(403, 'invalid_token', 'Invalid or expired signed URL token.', {})
+            if verified.get('image_id') != image_id or verified.get('size') != size:
+                raise v1_error(403, 'invalid_token', 'Signed URL token does not match requested image.', {})
+            access_identity = f'signed:{verified["image_id"]}'
+        else:
+            if 'images:read' not in api_scopes:
+                _record_delivery_log(image_id=image_id, card_key=None,
+                                     api_key_id=api_key_id,
+                                     requested_size=size, policy_decision='insufficient_scope',
+                                     response_status=403, response_outcome='auth_failed')
+                raise v1_error(403, 'insufficient_scope', 'Requires images:read scope.', {})
+            access_identity = f'key:{api_key_id}'
+
+        # Rate limit
+        if not _IMAGE_RATE_LIMITER.check(f'img:{access_identity}'):
+            _record_delivery_log(image_id=image_id, card_key=None,
+                                 api_key_id=api_key_id,
+                                 requested_size=size, policy_decision='rate_limited',
+                                 response_status=429, response_outcome='rate_limited',
+                                 request_id=getattr(request.state, 'request_id', None))
+            raise v1_error(429, 'rate_limited', 'Image request rate limit exceeded. Try again shortly.', {})
+
+        # Resolve image from DB — never from client-supplied paths
+        image_root = _image_root_dir(settings.image_root, fallback_root=settings.db.parent)
+        if not image_root or not image_root.exists():
+            _record_delivery_log(image_id=image_id, card_key=None,
+                                 api_key_id=api_key_id,
+                                 policy_decision='no_image_root', response_status=500,
+                                 response_outcome='server_error')
+            raise v1_error(500, 'image_root_missing', 'Image storage not available.', {})
+
+        # Resolve image identity from the real database rowid
+        card_key = None
+        local_path = None
+        source_type = None
+        language_code = None
+        set_id = None
+
+        if image_id > 0:
+            # Deterministic lookup via stable image_id (rowid)
+            asset = resolve_image_asset(conn, image_id)
+            if asset:
+                safe = _safe_image_path(asset['image_path'], image_root)
+                if safe:
+                    local_path = safe
+                    card_key = asset['card_key']
+                    source_type = asset['source_type']
+                    language_code = asset['language_code']
+                    set_id = asset['set_id']
+
+        if not local_path:
+            # Fallback: resolve by card_key query param (compatibility)
+            card_key_param = request.query_params.get('card_key', '')
+            if card_key_param:
+                info = resolve_preferred_card_image(conn, card_key_param)
+                if info:
+                    card_key = info['card_key']
+                    safe = _safe_image_path(info['image_path'], image_root)
+                    if safe:
+                        local_path = safe
+                        source_type = info.get('source_type')
+                        language_code = info.get('language_code')
+                        set_id = info.get('set_id')
+
+
+
+        if not local_path:
+            _record_delivery_log(image_id=image_id, card_key=card_key,
+                                 api_key_id=api_key_id,
+                                 requested_size=size, policy_decision='not_found',
+                                 db_path=str(settings.db),
+                                 response_status=404, response_outcome='no_image')
+            raise v1_error(404, 'image_not_found', 'No image found for the given identifier.', {'image_id': image_id})
+
+        # Policy check
+        policy = _eval_image_policy(conn, card_key or '', set_id, language_code or '', source_type, image_id)
+        if not policy['allowed']:
+            _record_delivery_log(image_id=image_id, card_key=card_key,
+                                 api_key_id=api_key_id,
+                                 requested_size=size, policy_decision=policy['matched_scope'] or 'blocked',
+                                 db_path=str(settings.db),
+                                 response_status=403, response_outcome='policy_blocked',
+                                 request_id=getattr(request.state, 'request_id', None))
+            raise v1_error(403, 'image_disabled',
+                           'Image delivery blocked by policy.',
+                           {'reason': policy['reason'], 'scope': policy['matched_scope']})
+
+        # Generate or retrieve derivative
+        deriv_path = _derive_image(local_path, size, image_root)
+        if not deriv_path or not deriv_path.exists():
+            deriv_path = local_path
+
+        mime_type = 'image/webp' if deriv_path.suffix.lower() in ('.webp',) else 'image/jpeg'
+        file_bytes = deriv_path.stat().st_size
+        file_mod = dt.datetime.fromtimestamp(deriv_path.stat().st_mtime, tz=dt.UTC)
+
+        etag = hashlib.md5(open(deriv_path, 'rb').read()).hexdigest()[:16]
+
+        # Persistent quota check (per-hour/per-day limits)
+        # NOTE: executed AFTER bytes are ready, so failed resolutions/policies don't consume quota
+        identity_type = 'api_key' if api_key_id else 'signed_url'
+        qid = quota_identity_for_access(access_identity, identity_type)
+        quota = _check_and_increment_quota(conn, qid, identity_type,
+                                           hourly_limit=settings.image_hourly_delivery_limit,
+                                           daily_limit=settings.image_daily_delivery_limit)
+        if not quota['allowed']:
+            _record_delivery_log(image_id=image_id, card_key=None,
+                                 api_key_id=api_key_id,
+                                 requested_size=size, policy_decision=quota['reason'],
+                                 response_status=429, response_outcome='quota_exceeded',
+                                 request_id=getattr(request.state, 'request_id', None),
+                                 db_path=str(settings.db))
+            raise v1_error(429, quota['reason'],
+                           f'Image delivery quota exceeded: {quota["reason"].replace("_", " ")}. '
+                           f'Hourly: {quota["hourly_count"]}/{quota["hourly_limit"]}, '
+                           f'Daily: {quota["daily_count"]}/{quota["daily_limit"]}.', {})
+
+        _record_delivery_log(image_id=image_id, card_key=card_key,
+                             api_key_id=api_key_id,
+                             requested_size=size, policy_decision='delivered',
+                             response_status=200, response_outcome='ok',
+                             request_id=getattr(request.state, 'request_id', None),
+                             db_path=str(settings.db))
+
+        return Response(
+            content=open(deriv_path, 'rb').read(),
+            media_type=mime_type,
+            headers={
+                'Content-Type': mime_type,
+                'Content-Length': str(file_bytes),
+                'Content-Disposition': 'inline',
+                'ETag': f'"{etag}"',
+                'Last-Modified': file_mod.strftime('%a, %d %b %Y %H:%M:%S GMT'),
+                'Cache-Control': 'public, max-age=604800, immutable',
+                'X-Content-Type-Options': 'nosniff',
+            },
+        )
+
+    # ── Compatibility route: /cards/{card_key}/content ────────────────
+
+    @app.get('/api/v1/images/card/{card_key:path}/content')
+    def v1_card_image_content(
+        card_key: str,
+        size: str = Query('medium', pattern='^(thumbnail|small|medium|large)$'),
+        token: str | None = Query(None, description='Signed URL token (alternative to API key)'),
+        request: Request = None,
+    ) -> Response:
+        """Controlled card image delivery by card_key — same gateway semantics."""
+        # Auth info from request.state
+        api_key_id = getattr(request.state, 'api_key_id', None)
+        api_scopes = getattr(request.state, 'api_scopes', [])
+
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+
+        # Verify access
+        access_identity = None
+        if token:
+            if len(token.split(':')) < 5:
+                raise v1_error(403, 'invalid_token', 'Invalid or expired signed URL token.', {})
+            secret = _get_signed_url_secret(settings.signed_url_secret)
+            verified = _verify_signed_url(token, secret)
+            if not verified:
+                raise v1_error(403, 'invalid_token', 'Invalid or expired signed URL token.', {})
+            if verified.get('size') != size:
+                raise v1_error(403, 'invalid_token', 'Signed URL token does not match requested size.', {})
+            access_identity = f'signed:{verified["image_id"]}'
+        else:
+            if 'images:read' not in api_scopes:
+                raise v1_error(403, 'insufficient_scope', 'Requires images:read scope.', {})
+            access_identity = f'key:{api_key_id}'
+
+        # Resolve card image
+        image_root = _image_root_dir(settings.image_root, fallback_root=settings.db.parent)
+        if not image_root or not image_root.exists():
+            raise v1_error(500, 'image_root_missing', 'Image storage not available.', {})
+        info = resolve_preferred_card_image(conn, card_key)
+        if not info:
+            raise v1_error(404, 'image_not_found', 'No image found for card_key.', {'card_key': card_key})
+        local_path = _safe_image_path(info['image_path'], image_root)
+        if not local_path:
+            raise v1_error(404, 'image_not_found', 'Image file not found.', {'card_key': card_key})
+
+        # Policy check
+        resolved_image_id = int(info.get('image_id') or 0)
+        policy = _eval_image_policy(conn, card_key, info.get('set_id'), info.get('language_code', ''), info.get('source_type'), resolved_image_id)
+        if not policy['allowed']:
+            _record_delivery_log(image_id=0, card_key=card_key, api_key_id=api_key_id,
+                                 requested_size=size, policy_decision=policy['matched_scope'] or 'blocked',
+                                 db_path=str(settings.db),
+                                 response_status=403, response_outcome='policy_blocked')
+            raise v1_error(403, 'image_disabled', 'Image delivery blocked by policy.',
+                           {'reason': policy['reason'], 'scope': policy['matched_scope']})
+
+        # Derivative
+        deriv_path = _derive_image(local_path, size, image_root)
+        if not deriv_path or not deriv_path.exists():
+            deriv_path = local_path
+
+        mime_type = 'image/webp' if deriv_path.suffix.lower() in ('.webp',) else 'image/jpeg'
+        file_bytes = deriv_path.stat().st_size
+
+        # Quota check (after bytes ready — failed policy/resolution doesn't consume)
+        identity_type = 'api_key' if api_key_id else 'signed_url'
+        qid = quota_identity_for_access(access_identity, identity_type)
+        quota = _check_and_increment_quota(conn, qid, identity_type,
+                                           hourly_limit=settings.image_hourly_delivery_limit,
+                                           daily_limit=settings.image_daily_delivery_limit)
+        if not quota['allowed']:
+            _record_delivery_log(image_id=0, card_key=card_key,
+                                 api_key_id=api_key_id,
+                                 requested_size=size, policy_decision=quota['reason'],
+                                 response_status=429, response_outcome='quota_exceeded',
+                                 db_path=str(settings.db))
+            raise v1_error(429, quota['reason'], f'Image delivery quota exceeded.', {})
+
+        _record_delivery_log(image_id=0, card_key=card_key, api_key_id=api_key_id,
+                             requested_size=size, policy_decision='delivered',
+                             db_path=str(settings.db),
+                             response_status=200, response_outcome='ok')
+
+        return Response(content=open(deriv_path, 'rb').read(), media_type=mime_type,
+                        headers={'Content-Type': mime_type, 'Content-Length': str(file_bytes),
+                                 'Content-Disposition': 'inline', 'X-Content-Type-Options': 'nosniff'})
+
+# ── Signed URL endpoint ──────────────────────────────────────────
+
+    @app.post('/api/v1/images/assets/signed-url', response_model=SignedUrlResponseArticle)
+    def v1_image_signed_url(
+        image_id: int = Query(..., description='Image ID'),
+        size: str = Query('medium', pattern='^(thumbnail|small|medium|large)$'),
+        expires_in: int = Query(3600, ge=300, le=86400, description='Seconds until expiry (300-86400)'),
+        _auth: dict[str, Any] = Depends(require_scope('images:read', 'cards:read')),
+    ) -> dict[str, Any]:
+        """Generate a signed URL for browser/mobile image access.
+
+        Signed URLs are still subject to policy evaluation at delivery time.
+        """
+        # Validate image exists before signing
+        conn = connect(app.state.db)
+        asset = resolve_image_asset(conn, image_id)
+        if not asset:
+            raise v1_error(404, 'image_not_found', 'No image found for the given image_id.', {'image_id': image_id})
+        secret = _get_signed_url_secret(settings.signed_url_secret)
+        token, expires_at = _generate_signed_url(image_id, size, secret, expires_in=expires_in, api_key_id=getattr(request.state, 'api_key_id', None))
+        url = f'/api/v1/images/assets/{image_id}/content?size={size}&token={token}'
+        return {
+            'data': {
+                'url': url,
+                'expires_at': expires_at,
+                'image_id': image_id,
+                'size': size,
+            }
+        }
+
+    # ── Admin: image delivery policies ────────────────────────────────
+
+    @app.get('/api/v1/admin/images/policies', response_model=DeliveryPolicyListResponse)
+    def v1_admin_list_image_policies(
+        _auth: dict[str, Any] = Depends(require_scope('images:admin', 'admin:all', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        rows_result = conn.execute(
+            'SELECT * FROM image_delivery_policies ORDER BY scope_type, scope_value'
+        ).fetchall()
+        return {'data': [dict(r) for r in rows_result]}
+
+    @app.post('/api/v1/admin/images/policies', response_model=DeliveryPolicyArticleResponse)
+    def v1_admin_create_image_policy(
+        body: DeliveryPolicyCreate,
+        request: Request,
+        _auth: dict[str, Any] = Depends(require_scope('images:admin', 'admin:all', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        now_val = now_utc()
+        try:
+            cur.execute(
+                "INSERT INTO image_delivery_policies(scope_type, scope_value, external_display_enabled, reason, attribution_text, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (body.scope_type, body.scope_value, 1 if body.external_display_enabled else 0,
+                 body.reason, body.attribution_text, now_val, now_val)
+            )
+            policy_id = cur.lastrowid
+            # Audit
+            cur.execute(
+                "INSERT INTO admin_audit_log(action, target_resource, details_json, created_at) VALUES (?, ?, ?, ?)",
+                ('create_policy', f'image_delivery_policies/{policy_id}',
+                 json.dumps({'scope_type': body.scope_type, 'scope_value': body.scope_value,
+                             'external_display_enabled': body.external_display_enabled}),
+                 now_val))
+            conn.commit()
+            row = cur.execute('SELECT * FROM image_delivery_policies WHERE policy_id=?', (policy_id,)).fetchone()
+            return {'data': dict(row)}
+        except sqlite3.IntegrityError as e:
+            raise v1_error(409, 'policy_conflict', f'Policy already exists: {e}', {})
+
+    @app.put('/api/v1/admin/images/policies/global')
+    def v1_admin_set_global_policy(
+        body: DeliveryPolicyUpdate,
+        request: Request,
+        _auth: dict[str, Any] = Depends(require_scope('admin:all')),
+    ) -> dict[str, Any]:
+        """Set the global emergency image switch. Requires strongest admin scope."""
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        now_val = now_utc()
+        cur.execute(
+            "UPDATE image_delivery_policies SET external_display_enabled=?, reason=?, updated_at=? WHERE scope_type='global' AND scope_value='global'",
+            (1 if body.external_display_enabled else 0, body.reason, now_val)
+        )
+        if cur.rowcount == 0:
+            cur.execute(
+                "INSERT INTO image_delivery_policies(scope_type, scope_value, external_display_enabled, reason, attribution_text, created_at, updated_at) VALUES ('global', 'global', ?, ?, NULL, ?, ?)",
+                (1 if body.external_display_enabled else 0, body.reason, now_val, now_val)
+            )
+        cur.execute(
+            "INSERT INTO admin_audit_log(action, target_resource, details_json, created_at) VALUES (?, ?, ?, ?)",
+            ('set_global_policy', 'global',
+             json.dumps({'external_display_enabled': body.external_display_enabled, 'reason': body.reason}),
+             now_val))
+        conn.commit()
+        row = cur.execute("SELECT * FROM image_delivery_policies WHERE scope_type='global' AND scope_value='global'").fetchone()
+        return {'data': dict(row)}
+
+    # ── Admin: takedown cases ─────────────────────────────────────────
+
+    @app.get('/api/v1/admin/images/takedown/cases', response_model=TakedownCaseListResponse)
+    def v1_admin_list_takedown_cases(
+        include_events: bool = Query(False, description='Include events per case'),
+        _auth: dict[str, Any] = Depends(require_scope('images:admin', 'admin:all', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        rows_result = conn.execute(
+            'SELECT * FROM takedown_cases ORDER BY opened_at DESC'
+        ).fetchall()
+        cases = []
+        for r in rows_result:
+            case = dict(r)
+            if include_events:
+                events = conn.execute(
+                    'SELECT * FROM takedown_events WHERE case_id=? ORDER BY created_at', (r['case_id'],)
+                ).fetchall()
+                case['events'] = [dict(e) for e in events]
+            cases.append(case)
+        return {'data': cases}
+
+    @app.post('/api/v1/admin/images/takedown/cases')
+    def v1_admin_create_takedown_case(
+        body: TakedownCaseCreate,
+        request: Request,
+        _auth: dict[str, Any] = Depends(require_scope('images:admin', 'admin:all', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            now_val = now_utc()
+
+            # Duplicate guard: reject if open/under_review case exists for same scope
+            existing = cur.execute(
+                "SELECT case_id, status FROM takedown_cases "
+                "WHERE scope_type=? AND scope_value=? AND status IN ('open', 'under_review') "
+                "LIMIT 1",
+                (body.scope_type, body.scope_value)
+            ).fetchone()
+            if existing:
+                conn.rollback()
+                raise v1_error(409, 'duplicate_takedown',
+                               f'An active takedown case already exists for this scope.',
+                               {'existing_case_id': existing['case_id'], 'status': existing['status']})
+
+            # Capture previous policy state
+            prev_row = cur.execute(
+                "SELECT external_display_enabled, reason, attribution_text "
+                "FROM image_delivery_policies WHERE scope_type=? AND scope_value=?",
+                (body.scope_type, body.scope_value)
+            ).fetchone()
+            prev_policy_state = None
+            if prev_row:
+                prev_policy_state = json.dumps({
+                    'external_display_enabled': int(prev_row[0]),
+                    'reason': prev_row[1],
+                    'attribution_text': prev_row[2],
+                })
+
+            # Create case
+            cur.execute(
+                'INSERT INTO takedown_cases'
+                '(requester_identity, requester_contact, rights_description, status, opened_at,'
+                ' scope_type, scope_value, previous_policy_state) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                (body.requester_identity, body.requester_contact,
+                 body.rights_description, 'open', now_val,
+                 body.scope_type, body.scope_value, prev_policy_state)
+            )
+            case_id = cur.lastrowid
+
+            # Apply disabled policy
+            cur.execute(
+                "INSERT OR REPLACE INTO image_delivery_policies"
+                "(scope_type, scope_value, external_display_enabled, reason, created_at, updated_at) "
+                "VALUES (?, ?, 0, ?, ?, ?)",
+                (body.scope_type, body.scope_value,
+                 f'Takedown case #{case_id}: {body.rights_description or body.requester_identity}',
+                 now_val, now_val)
+            )
+
+            # Append opening event
+            cur.execute(
+                'INSERT INTO takedown_events(case_id, action_type, scope_type, scope_value, reason, created_at) '
+                'VALUES (?, ?, ?, ?, ?, ?)',
+                (case_id, 'case_opened', body.scope_type, body.scope_value,
+                 body.rights_description or 'Takedown request', now_val)
+            )
+
+            # Admin audit
+            cur.execute(
+                "INSERT INTO admin_audit_log(action, target_resource, details_json, created_at) VALUES (?, ?, ?, ?)",
+                ('create_takedown_case', f'takedown_cases/{case_id}',
+                 json.dumps({'requester': body.requester_identity, 'contact': body.requester_contact,
+                             'scope_type': body.scope_type, 'scope_value': body.scope_value,
+                             'previous_policy_state': prev_policy_state}),
+                 now_val))
+
+            conn.commit()
+        except HTTPException:
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise v1_error(500, 'takedown_create_failed', str(e))
+
+        # Read result
+        row = cur.execute('SELECT * FROM takedown_cases WHERE case_id=?', (case_id,)).fetchone()
+        events = conn.execute(
+            'SELECT * FROM takedown_events WHERE case_id=? ORDER BY created_at', (case_id,)
+        ).fetchall()
+        result = dict(row)
+        result['events'] = [dict(e) for e in events]
+        return {'data': result}
+
+    @app.put('/api/v1/admin/images/takedown/cases/{case_id}/resolve')
+    def v1_admin_resolve_takedown_case(
+        case_id: int,
+        body: TakedownCaseResolve,
+        request: Request,
+        _auth: dict[str, Any] = Depends(require_scope('images:admin', 'admin:all', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            case = cur.execute(
+                'SELECT * FROM takedown_cases WHERE case_id=?', (case_id,)
+            ).fetchone()
+            if not case:
+                conn.rollback()
+                raise v1_error(404, 'case_not_found', 'Takedown case not found.', {'case_id': case_id})
+
+            case_dict = dict(case)
+            now_val = now_utc()
+            membership_id = _auth.get('membership_id')
+
+            if body.resolution == 'restore':
+                # Already-resolved guard
+                if case_dict['status'] != 'open':
+                    conn.rollback()
+                    raise v1_error(409, 'case_not_open',
+                                   f'Case {case_id} is already {case_dict["status"]}.',
+                                   {'case_id': case_id, 'current_status': case_dict['status']})
+
+                # Restore exact previous policy from snapshot
+                prev_state_json = case_dict.get('previous_policy_state')
+                if prev_state_json:
+                    prev = json.loads(prev_state_json)
+                    cur.execute(
+                        "UPDATE image_delivery_policies SET external_display_enabled=?, reason=?, attribution_text=?, updated_at=? "
+                        "WHERE scope_type=? AND scope_value=?",
+                        (prev['external_display_enabled'], prev['reason'],
+                         prev.get('attribution_text'), now_val,
+                         case_dict['scope_type'], case_dict['scope_value'])
+                    )
+                else:
+                    # No previous policy existed — remove the temporary override
+                    cur.execute(
+                        "DELETE FROM image_delivery_policies WHERE scope_type=? AND scope_value=? "
+                        "AND reason LIKE 'Takedown case #%'",
+                        (case_dict['scope_type'], case_dict['scope_value'])
+                    )
+
+                # Update case status
+                cur.execute(
+                    "UPDATE takedown_cases SET status='resolved', resolved_at=?, resolution_summary=? WHERE case_id=?",
+                    (now_val, body.resolution_summary, case_id)
+                )
+
+                # Append restore event
+                cur.execute(
+                    'INSERT INTO takedown_events(case_id, action_type, scope_type, scope_value, '
+                    'actor_membership_id, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    (case_id, 'restored', case_dict['scope_type'], case_dict['scope_value'],
+                     membership_id, body.resolution_summary, now_val)
+                )
+
+                # Admin audit
+                cur.execute(
+                    "INSERT INTO admin_audit_log(action, target_resource, details_json, created_at) VALUES (?, ?, ?, ?)",
+                    ('restore_takedown_case', f'takedown_cases/{case_id}',
+                     json.dumps({'resolution': 'restore', 'previous_policy_state': prev_state_json}), now_val))
+
+                conn.commit()
+
+            elif body.resolution == 'remove':
+                scope_type = case_dict.get('scope_type') or 'source'
+                scope_value = case_dict.get('scope_value')
+                if not scope_value:
+                    events = cur.execute(
+                        "SELECT scope_type, scope_value FROM takedown_events "
+                        "WHERE case_id=? AND action_type IN ('disabled', 'case_opened') AND scope_type IS NOT NULL LIMIT 1",
+                        (case_id,)
+                    ).fetchone()
+                    if events:
+                        scope_type = events[0]
+                        scope_value = events[1]
+
+                # Disable policy via _takedown_atomic (which does its own BEGIN IMMEDIATE)
+                # Rollback this outer transaction first
+                conn.commit()  # complete the empty outer
+                # Let _takedown_atomic manage its own transaction
+                conn2 = connect(app.state.db)
+                _takedown_atomic(conn2, case_id=case_id, action_type='disabled',
+                                 scope_type=scope_type, scope_value=scope_value,
+                                 actor_membership_id=membership_id,
+                                 reason=body.resolution_summary or 'Takedown',
+                                 policy_enabled=False,
+                                 policy_scope_type=scope_type, policy_scope_value=scope_value)
+                conn2.close()
+                # Now update case status in the original connection
+                cur2 = conn.cursor()
+                cur2.execute(
+                    "UPDATE takedown_cases SET status='resolved', resolved_at=?, resolution_summary=? WHERE case_id=?",
+                    (now_val, body.resolution_summary, case_id)
+                )
+                cur2.execute(
+                    'INSERT INTO takedown_events(case_id, action_type, reason, actor_membership_id, created_at) VALUES (?, ?, ?, ?, ?)',
+                    (case_id, 'case_resolved', body.resolution_summary, membership_id, now_val)
+                )
+                conn.commit()
+            else:
+                conn.rollback()
+                raise v1_error(400, 'invalid_resolution', 'Resolution must be "restore" or "remove".', {})
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            conn.rollback()
+            raise v1_error(500, 'takedown_resolve_failed', str(e))
+
+        row = cur.execute('SELECT * FROM takedown_cases WHERE case_id=?', (case_id,)).fetchone()
+        events_list = conn.execute(
+            'SELECT * FROM takedown_events WHERE case_id=? ORDER BY created_at', (case_id,)
+        ).fetchall()
+        result = dict(row)
+        result['events'] = [dict(e) for e in events_list]
+        return {'data': result}
+
+    # ── Health/diagnostics endpoint for image gateway ─────────────────
+
+    @app.get('/api/v1/images/health')
+    def v1_image_gateway_health(
+        _auth: dict[str, Any] = Depends(require_scope('images:read', 'cards:read')),
+    ) -> dict[str, Any]:
+        """Image gateway health check."""
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        root = _image_root_dir(settings.image_root, fallback_root=settings.db.parent)
+        deriv_dir = _ensure_derivatives_dir(settings.image_root or settings.db.parent)
+        policy_count = cur.execute('SELECT COUNT(*) FROM image_delivery_policies').fetchone()[0]
+        log_count_24h = cur.execute(
+            "SELECT COUNT(*) FROM image_delivery_policy_records WHERE created_at >= datetime('now', '-1 day')"
+        ).fetchone()[0]
+        return {
+            'gateway_active': True,
+            'static_mount_removed': True,
+            'image_root_exists': root is not None and root.exists(),
+            'derivatives_dir_exists': deriv_dir.exists(),
+            'policy_count': policy_count,
+            'delivery_logs_24h': log_count_24h,
+            'allowed_sizes': list(ALLOWED_IMAGE_SIZES),
+        }
+
+    # ── Physical item photo upload/list/retrieve/delete ──────────────
+
+    @app.post('/api/v1/inventory/items/{item_id}/photos', response_model=PhysicalPhotoUploadResponseArticle)
+    def v1_upload_item_photo(
+        item_id: str,
+        file: UploadFile = File(..., description='Image file (JPEG, PNG, WebP)'),
+        publish: bool = Query(False, description='Mark photo as published'),
+        request: Request = None,
+        _: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        ensure_inventory_support(conn)
+        cur = conn.cursor()
+        _auth = getattr(request.state, 'auth_dict', None) or {}
+        tenant_id = get_tenant_from_key(_auth)
+
+        # Verify item exists and belongs to this tenant
+        item = cur.execute(
+            "SELECT 1 FROM physical_items WHERE item_id=? AND tenant_id=?",
+            (item_id, tenant_id)
+        ).fetchone()
+        if not item:
+            raise v1_error(404, 'item_not_found', 'Item not found in this tenant.', {})
+
+        # Validate file type
+        allowed_mime = {'image/jpeg', 'image/png', 'image/webp'}
+        if file.content_type not in allowed_mime:
+            raise v1_error(400, 'invalid_file_type',
+                           f'Invalid file type: {file.content_type}. Allowed: {", ".join(sorted(allowed_mime))}.', {})
+
+        # Read and validate file
+        contents = file.file.read()
+        file_size = len(contents)
+        if file_size > 10 * 1024 * 1024:  # 10MB limit
+            raise v1_error(400, 'file_too_large', 'File exceeds 10MB limit.', {'file_bytes': file_size})
+
+        # Validate image decoding
+        from PIL import Image
+        import io
+        try:
+            img = Image.open(io.BytesIO(contents))
+            img.verify()
+        except Exception:
+            raise v1_error(400, 'invalid_image', 'Uploaded file is not a valid image or is corrupted.', {})
+
+        # Store to physical photos directory
+        import uuid
+        ext = {'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp'}.get(file.content_type, '.bin')
+        stored_name = f'{uuid.uuid4()}{ext}'
+        photo_dir = _ensure_physical_photos_dir(settings.image_root or settings.db.parent)
+        tenant_dir = photo_dir / str(tenant_id)
+        tenant_dir.mkdir(parents=True, exist_ok=True)
+        storage_path = tenant_dir / stored_name
+        with open(storage_path, 'wb') as f:
+            f.write(contents)
+
+        now_val = now_utc()
+        cur.execute(
+            "INSERT INTO physical_item_photos(item_id, tenant_id, uploaded_by, original_filename, storage_path, mime_type, file_bytes, is_published, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (item_id, tenant_id, _auth.get('api_key_id') if _auth else None,
+             file.filename or stored_name, str(storage_path),
+             file.content_type, file_size, 1 if publish else 0, now_val)
+        )
+        conn.commit()
+        photo_id = cur.lastrowid
+        return {
+            'data': {
+                'photo_id': photo_id,
+                'item_id': item_id,
+                'tenant_id': tenant_id,
+                'original_filename': file.filename or stored_name,
+                'mime_type': file.content_type,
+                'file_bytes': file_size,
+                'created_at': now_val,
+            }
+        }
+
+    @app.get('/api/v1/inventory/items/{item_id}/photos', response_model=PhysicalPhotoListResponse)
+    def v1_list_item_photos(
+        item_id: str,
+        request: Request = None,
+        _: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(getattr(request.state, 'auth_dict', None) or {})
+        rows_result = cur.execute(
+            "SELECT * FROM physical_item_photos WHERE item_id=? AND tenant_id=? ORDER BY created_at DESC",
+            (item_id, tenant_id)
+        ).fetchall()
+        return {'data': [dict(r) for r in rows_result]}
+
+    @app.get('/api/v1/inventory/items/{item_id}/photos/{photo_id}')
+    def v1_get_item_photo(
+        item_id: str,
+        photo_id: int,
+        request: Request = None,
+        _: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
+    ) -> Response:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(getattr(request.state, 'auth_dict', None) or {})
+        row = cur.execute(
+            "SELECT * FROM physical_item_photos WHERE photo_id=? AND item_id=? AND tenant_id=?",
+            (photo_id, item_id, tenant_id)
+        ).fetchone()
+        if not row:
+            raise v1_error(404, 'photo_not_found', 'Photo not found.', {})
+        storage_path = row['storage_path']
+        if not os.path.exists(storage_path):
+            raise v1_error(404, 'photo_file_missing', 'Photo file not found on disk.', {})
+        mime = row['mime_type']
+        with open(storage_path, 'rb') as f:
+            content = f.read()
+        return Response(content=content, media_type=mime, headers={
+            'Content-Type': mime,
+            'Content-Disposition': 'inline',
+            'X-Content-Type-Options': 'nosniff',
+        })
+
+    @app.delete('/api/v1/inventory/items/{item_id}/photos/{photo_id}')
+    def v1_delete_item_photo(
+        item_id: str,
+        photo_id: int,
+        request: Request = None,
+        _: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        tenant_id = get_tenant_from_key(getattr(request.state, 'auth_dict', None) or {})
+        row = cur.execute(
+            "SELECT storage_path FROM physical_item_photos WHERE photo_id=? AND item_id=? AND tenant_id=?",
+            (photo_id, item_id, tenant_id)
+        ).fetchone()
+        if not row:
+            raise v1_error(404, 'photo_not_found', 'Photo not found.', {})
+        storage_path = row['storage_path']
+        # Archive the photo (soft delete — keep record)
+        now_val = now_utc()
+        cur.execute(
+            "UPDATE physical_item_photos SET is_published=0 WHERE photo_id=?",
+            (photo_id,)
+        )
+        conn.commit()
+        # Delete file from disk
+        if os.path.exists(storage_path):
+            try:
+                os.remove(storage_path)
+            except OSError:
+                pass  # File deletion failure is non-fatal
+        return {'data': {'deleted': True, 'photo_id': photo_id, 'item_id': item_id}}
+
+    # ── /api/v1/scanner/scan ─────────────────────────────────────────────
+
+    def _compute_average_hash(image_bytes: bytes, hash_size: int = 8) -> int:
+        """Compute average hash from raw image bytes using PIL."""
+        from PIL import Image
+        import io
+        img = Image.open(io.BytesIO(image_bytes))
+        img = img.convert('L').resize((hash_size, hash_size), Image.Resampling.BILINEAR)
+        pixels = list(img.getdata())
+        mean = sum(pixels) / len(pixels)
+        bits = 0
+        for i, p in enumerate(pixels):
+            if p > mean:
+                bits |= (1 << i)
+        return bits
+
+    @app.post('/api/v1/scanner/scan')
+    async def v1_scanner_scan(
+        file: UploadFile = File(..., description='Image file to scan'),
+        limit: int = Query(5, ge=1, le=20, description='Max matches to return'),
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        """Scan a card image and find matches via perceptual hash.
+
+        Phase 1 implementation: hash-based matching only.
+        Returns card_key matches sorted by hash distance (lower = better match).
+        """
+        # Read image bytes
+        image_bytes = await file.read()
+        if len(image_bytes) == 0:
+            raise v1_error(400, 'empty_image', 'No image data provided.', {})
+
+        # Compute hash
+        try:
+            query_hash = _compute_average_hash(image_bytes)
+        except Exception as e:
+            raise v1_error(422, 'invalid_image', f'Could not process image: {str(e)}', {})
+
+        # Find matches via hash distance
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        cur.execute('SELECT card_key, language_code, card_id, image_hash FROM card_image_hashes')
+
+        matches = []
+        for row in cur.fetchall():
+            try:
+                stored_hash = int(row['image_hash'], 16)
+                dist = (query_hash ^ stored_hash).bit_count()
+                if dist <= 10:  # Only include reasonably close matches
+                    matches.append({
+                        'card_key': row['card_key'],
+                        'language_code': row['language_code'],
+                        'card_id': row['card_id'],
+                        'distance': dist,
+                    })
+            except (ValueError, TypeError):
+                continue
+
+        matches.sort(key=lambda x: x['distance'])
+        result_matches = matches[:limit]
+
+        # Add confidence labels
+        for m in result_matches:
+            if m['distance'] <= 5:
+                m['confidence'] = 'high'
+            elif m['distance'] <= 10:
+                m['confidence'] = 'medium'
+            else:
+                m['confidence'] = 'low'
+
+        return {
+            'data': result_matches,
+            'query_image_size': len(image_bytes),
+            'hash_computed': format(query_hash, '016x'),
+        }
+
     return app
 
 
-app = create_app(DEFAULT_SETTINGS)
+app = create_app(settings_from_env())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -4205,7 +5992,7 @@ def main(argv: list[str] | None = None) -> int:
     import uvicorn
 
     settings = validate_settings(settings_from_args(args), require_ui=False)
-    selected_app = app if settings == DEFAULT_SETTINGS else create_app(settings)
+    selected_app = create_app(settings)
     for line in startup_lines(settings, selected_app.state.support_status):
         print(f'[pokemon-db-api] {line}', flush=True)
     uvicorn.run(selected_app, host=settings.host, port=settings.port)

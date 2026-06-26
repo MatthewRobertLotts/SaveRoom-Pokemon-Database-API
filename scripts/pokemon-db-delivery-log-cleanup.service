@@ -1,0 +1,15 @@
+[Unit]
+Description=Pokemon DB delivery log aggregation and cleanup
+After=network.target
+
+[Service]
+Type=oneshot
+User=<SERVICE_USER>
+WorkingDirectory=<PROJECT_DIR>
+ExecStart=<PYTHON_BIN> scripts/delivery_log_cleanup.py cleanup --retention-days 30
+Environment=POKEMON_DB_DB=<PROJECT_DIR>/full_tcgdex/pokemon_tcg_set_knowledge_base.sqlite
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
