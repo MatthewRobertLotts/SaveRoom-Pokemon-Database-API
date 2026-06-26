@@ -463,6 +463,11 @@ def test_takedown_tables_exist():
 
 def test_takedown_case_create_and_list():
     """Admin can create and list takedown cases."""
+    # Clean up any pre-existing takedown for this scope (from prior tests)
+    conn = sqlite3.connect(str(client.app.state.db))
+    conn.execute("DELETE FROM takedown_cases WHERE scope_type='image' AND scope_value='42'")
+    conn.commit()
+    conn.close()
     resp = client.post(
         '/api/v1/admin/images/takedown/cases',
         headers=HEADERS_ADMIN,
