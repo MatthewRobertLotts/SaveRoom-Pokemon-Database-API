@@ -25,6 +25,8 @@ import datetime as dt
 import sqlite3
 import sys
 import time
+import threading
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -189,6 +191,30 @@ PRICE_HISTORY_V5_COLUMNS = {
 }
 
 PRICING_ALGORITHM_VERSION = 'pricing-v8.0'
+_PRICE_SCHEMA_LOCK = threading.Lock()
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    """Return SQLite column names for an internal trusted table name."""
+    return {row[1] for row in conn.execute(f'PRAGMA table_info({table})').fetchall()}
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl: str) -> bool:
+    """Add an internal trusted column definition if it is not already present.
+
+    The table/column/DDL values are constants defined in this module, not user
+    input. The duplicate-column guard handles a narrow race where another
+    connection migrates the same column between our check and ALTER TABLE.
+    """
+    if column in _table_columns(conn, table):
+        return False
+    try:
+        conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {ddl}')
+        return True
+    except sqlite3.OperationalError as exc:
+        if 'duplicate column name' in str(exc).lower() and column in _table_columns(conn, table):
+            return False
+        raise
 
 # eBay condition → standard TCG condition mapping
 # Standard scale: Mint, Near Mint, Excellent, Played, Poor
@@ -247,70 +273,65 @@ HIGH_VALUE_RARITY_TERMS = [
 
 def ensure_price_support(conn: sqlite3.Connection) -> None:
     """Create/upgrade local-only price tables without destroying existing data."""
-    cur = conn.cursor()
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS uk_price_history (
-            id INTEGER PRIMARY KEY,
-            card_id TEXT NOT NULL,
-            language_code TEXT,
-            condition TEXT,
-            price_gbp REAL NOT NULL,
-            sold_date TEXT NOT NULL,
-            listing_url TEXT,
-            source TEXT DEFAULT 'ebay_uk',
-            confidence_score REAL,
-            imported_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    existing = {r[1] for r in cur.execute('PRAGMA table_info(uk_price_history)').fetchall()}
-    for column, ddl in PRICE_HISTORY_V4_COLUMNS.items():
-        if column not in existing:
-            cur.execute(f'ALTER TABLE uk_price_history ADD COLUMN {column} {ddl}')
-    for column, ddl in PRICE_HISTORY_V5_COLUMNS.items():
-        if column not in existing:
-            cur.execute(f'ALTER TABLE uk_price_history ADD COLUMN {column} {ddl}')
-    # v8: Add algorithm_version to cache table
-    existing_cache = {r[1] for r in cur.execute('PRAGMA table_info(uk_price_fetch_cache)').fetchall()}
-    if 'algorithm_version' not in existing_cache:
-        cur.execute('ALTER TABLE uk_price_fetch_cache ADD COLUMN algorithm_version TEXT')
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS uk_price_fetch_cache (
-            cache_key TEXT PRIMARY KEY,
-            query TEXT NOT NULL,
-            language_code TEXT,
-            card_id TEXT,
-            response_json TEXT NOT NULL,
-            fetched_at TEXT NOT NULL,
-            source TEXT DEFAULT 'rapidapi_ebay_average_selling_price',
-            algorithm_version TEXT
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS uk_price_fetch_usage (
-            id INTEGER PRIMARY KEY,
-            query TEXT NOT NULL,
-            language_code TEXT,
-            card_id TEXT,
-            status TEXT NOT NULL,
-            requested_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS uk_price_scrape_failures (
-            id INTEGER PRIMARY KEY,
-            card_id TEXT,
-            language_code TEXT,
-            query TEXT,
-            reason TEXT,
-            raw_title TEXT,
-            listing_url TEXT,
-            imported_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_uk_price_history_card ON uk_price_history(card_id, language_code)')
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_uk_price_history_bucket ON uk_price_history(bucket, is_recommended_input)')
-    cur.execute('CREATE INDEX IF NOT EXISTS idx_uk_price_fetch_usage_requested ON uk_price_fetch_usage(requested_at, status)')
-    conn.commit()
+    with _PRICE_SCHEMA_LOCK:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS uk_price_history (
+                id INTEGER PRIMARY KEY,
+                card_id TEXT NOT NULL,
+                language_code TEXT,
+                condition TEXT,
+                price_gbp REAL NOT NULL,
+                sold_date TEXT NOT NULL,
+                listing_url TEXT,
+                source TEXT DEFAULT 'ebay_uk',
+                confidence_score REAL,
+                imported_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        for column, ddl in PRICE_HISTORY_V4_COLUMNS.items():
+            _add_column_if_missing(conn, 'uk_price_history', column, ddl)
+        for column, ddl in PRICE_HISTORY_V5_COLUMNS.items():
+            _add_column_if_missing(conn, 'uk_price_history', column, ddl)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS uk_price_fetch_cache (
+                cache_key TEXT PRIMARY KEY,
+                query TEXT NOT NULL,
+                language_code TEXT,
+                card_id TEXT,
+                response_json TEXT NOT NULL,
+                fetched_at TEXT NOT NULL,
+                source TEXT DEFAULT 'rapidapi_ebay_average_selling_price',
+                algorithm_version TEXT
+            )
+        """)
+        _add_column_if_missing(conn, 'uk_price_fetch_cache', 'algorithm_version', 'TEXT')
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS uk_price_fetch_usage (
+                id INTEGER PRIMARY KEY,
+                query TEXT NOT NULL,
+                language_code TEXT,
+                card_id TEXT,
+                status TEXT NOT NULL,
+                requested_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS uk_price_scrape_failures (
+                id INTEGER PRIMARY KEY,
+                card_id TEXT,
+                language_code TEXT,
+                query TEXT,
+                reason TEXT,
+                raw_title TEXT,
+                listing_url TEXT,
+                imported_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_uk_price_history_card ON uk_price_history(card_id, language_code)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_uk_price_history_bucket ON uk_price_history(bucket, is_recommended_input)')
+        cur.execute('CREATE INDEX IF NOT EXISTS idx_uk_price_fetch_usage_requested ON uk_price_fetch_usage(requested_at, status)')
+        conn.commit()
 
 
 def current_price_usage(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -815,7 +836,7 @@ def _get_signed_url_secret(custom_secret: str | None = None) -> str:
     if not secret:
         secret = os.environ.get('POKEMON_DB_SIGNED_URL_SECRET', '')
     if not secret:
-        env_mode = os.environ.get('POKEMON_DB_ENV', 'production')
+        env_mode = os.environ.get('POKEMON_DB_ENV', 'development')
         if env_mode == 'development':
             secret = _sec.token_hex(32)
             import sys as _sys
@@ -1604,22 +1625,26 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
     else:
         app.state.support_status = {'refreshed': False, 'database': str(settings.db), 'fts_table': 'v2_card_search_fts', 'api_cache_table': 'v2_card_detail_api_cache', 'fts_rows': 0, 'api_cache_rows': 0, 'v2_card_search_rows': 0, 'row_count_matches': True}
 
+    # Price schema is prepared at startup so normal read paths do not need to
+    # perform first-use ALTER TABLE work under concurrent request load.
+    with closing(connect(str(settings.db))) as price_conn:
+        ensure_price_support(price_conn)
+
     # Invalidate stale price cache entries with non-Latin query terms
     # (e.g., Japanese text in queries that return 0 eBay results)
     try:
-        check_conn = connect(str(settings.db))
-        check_cur = check_conn.cursor()
-        check_cur.execute("SELECT rowid, cache_key FROM uk_price_fetch_cache")
-        cleaned = 0
-        for check_row in check_cur.fetchall():
-            q = check_row[1].split('|')[0]
-            if any(0x3040 <= ord(c) <= 0x309F or 0x30A0 <= ord(c) <= 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF for c in q):
-                check_cur.execute("DELETE FROM uk_price_fetch_cache WHERE rowid = ?", (check_row[0],))
-                cleaned += 1
-        if cleaned:
-            check_conn.commit()
-            print(f'[pokemon-db-api] Cleaned {cleaned} stale cache entries with non-Latin queries')
-        check_conn.close()
+        with closing(connect(str(settings.db))) as check_conn:
+            check_cur = check_conn.cursor()
+            check_cur.execute("SELECT rowid, cache_key FROM uk_price_fetch_cache")
+            cleaned = 0
+            for check_row in check_cur.fetchall():
+                q = check_row[1].split('|')[0]
+                if any(0x3040 <= ord(c) <= 0x309F or 0x30A0 <= ord(c) <= 0x30FF or 0x4E00 <= ord(c) <= 0x9FFF for c in q):
+                    check_cur.execute("DELETE FROM uk_price_fetch_cache WHERE rowid = ?", (check_row[0],))
+                    cleaned += 1
+            if cleaned:
+                check_conn.commit()
+                print(f'[pokemon-db-api] Cleaned {cleaned} stale cache entries with non-Latin queries')
     except Exception as exc:
         print(f'[pokemon-db-api] Cache cleanup skipped: {exc}')
 
@@ -1638,7 +1663,7 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
 
 
     # v1 API foundation: optional API key auth + request logging.
-    with connect(app.state.db) as conn:
+    with closing(connect(app.state.db)) as conn:
         ensure_v1_api_support(conn)
 
     async def require_v1_api_key(request: Request) -> dict[str, Any]:
@@ -1656,31 +1681,31 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
         if not raw_key:
             raise v1_error(401, 'api_key_required', 'API key required for /api/v1 routes.', {'header': 'X-API-Key'})
         key_hash = sha256_text(raw_key)
-        conn = connect(app.state.db)
-        ensure_v1_api_support(conn)
-        ensure_inventory_support(conn)
-        cur = conn.cursor()
-        row = cur.execute('SELECT id, scopes, is_active, membership_id FROM developer_api_keys WHERE key_hash=? LIMIT 1', (key_hash,)).fetchone()
-        if not row or not row['is_active']:
-            raise v1_error(401, 'invalid_api_key', 'Invalid or inactive API key.', None)
-        scopes = json.loads(row['scopes'] or '[]') if row['scopes'] else []
-        membership_id = row['membership_id']
-        # Also fetch scopes from api_key_scopes table
-        scope_rows = cur.execute('SELECT scope FROM api_key_scopes WHERE key_id=?', (row['id'],)).fetchall()
-        normalized_scopes = set(scopes) | {sr[0] for sr in scope_rows}
-        # A key with membership_id=NULL must have admin:all to access anything
-        if not membership_id and 'admin:all' not in normalized_scopes and 'admin' not in normalized_scopes:
-            raise v1_error(403, 'insufficient_scope',
-                           'API key without tenant membership requires admin:all scope.',
-                           {'required_scope': 'admin:all'})
-        cur.execute('UPDATE developer_api_keys SET last_used_at=CURRENT_TIMESTAMP WHERE id=?', (row['id'],))
-        conn.commit()
-        request.state.api_key_id = row['id']
-        request.state.api_scopes = list(normalized_scopes)
-        auth_result = {'api_key_id': row['id'], 'scopes': list(normalized_scopes),
-                       'auth_required': True, 'membership_id': membership_id}
-        request.state.auth_dict = auth_result
-        return auth_result
+        with closing(connect(app.state.db)) as conn:
+            ensure_v1_api_support(conn)
+            ensure_inventory_support(conn)
+            cur = conn.cursor()
+            row = cur.execute('SELECT id, scopes, is_active, membership_id FROM developer_api_keys WHERE key_hash=? LIMIT 1', (key_hash,)).fetchone()
+            if not row or not row['is_active']:
+                raise v1_error(401, 'invalid_api_key', 'Invalid or inactive API key.', None)
+            scopes = json.loads(row['scopes'] or '[]') if row['scopes'] else []
+            membership_id = row['membership_id']
+            # Also fetch scopes from api_key_scopes table
+            scope_rows = cur.execute('SELECT scope FROM api_key_scopes WHERE key_id=?', (row['id'],)).fetchall()
+            normalized_scopes = set(scopes) | {sr[0] for sr in scope_rows}
+            # A key with membership_id=NULL must have admin:all to access anything
+            if not membership_id and 'admin:all' not in normalized_scopes and 'admin' not in normalized_scopes:
+                raise v1_error(403, 'insufficient_scope',
+                               'API key without tenant membership requires admin:all scope.',
+                               {'required_scope': 'admin:all'})
+            cur.execute('UPDATE developer_api_keys SET last_used_at=CURRENT_TIMESTAMP WHERE id=?', (row['id'],))
+            conn.commit()
+            request.state.api_key_id = row['id']
+            request.state.api_scopes = list(normalized_scopes)
+            auth_result = {'api_key_id': row['id'], 'scopes': list(normalized_scopes),
+                           'auth_required': True, 'membership_id': membership_id}
+            request.state.auth_dict = auth_result
+            return auth_result
 
     @app.middleware('http')
     async def v1_request_logger(request: Request, call_next):
@@ -1688,15 +1713,15 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
         response = await call_next(request)
         if request.url.path.startswith('/api/v1'):
             try:
-                conn = connect(app.state.db)
-                ensure_v1_api_support(conn)
-                client_host = request.client.host if request.client else None
-                client_hash = sha256_text(client_host) if client_host else None
-                conn.execute(
-                    'INSERT INTO api_request_log(api_key_id, route, method, status_code, elapsed_ms, client_host_hash) VALUES (?, ?, ?, ?, ?, ?)',
-                    (getattr(request.state, 'api_key_id', None), request.url.path, request.method, response.status_code, round((time.perf_counter() - start) * 1000, 3), client_hash),
-                )
-                conn.commit()
+                with closing(connect(app.state.db)) as conn:
+                    ensure_v1_api_support(conn)
+                    client_host = request.client.host if request.client else None
+                    client_hash = sha256_text(client_host) if client_host else None
+                    conn.execute(
+                        'INSERT INTO api_request_log(api_key_id, route, method, status_code, elapsed_ms, client_host_hash) VALUES (?, ?, ?, ?, ?, ?)',
+                        (getattr(request.state, 'api_key_id', None), request.url.path, request.method, response.status_code, round((time.perf_counter() - start) * 1000, 3), client_hash),
+                    )
+                    conn.commit()
             except Exception:
                 pass
         return response
@@ -1715,6 +1740,20 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
     def v1_health(_: dict[str, Any] = Depends(require_v1_api_key)) -> dict[str, Any]:
         counts = db_counts(app.state.db)
         return {'data': {'ok': counts['support_ready'], 'service': 'saveroom-pokemon-api', 'version': 'v1', 'started_at': STARTED_AT, 'checked_at': now_utc(), 'counts': counts, 'support_status': _public_support_status(app.state.support_status), 'auth': {'api_key_required': settings.require_api_key or os.environ.get('POKEMON_DB_REQUIRE_API_KEY', '').strip().lower() in {'1', 'true', 'yes', 'on'}}}}
+
+    @app.get('/api/v1/readiness', summary='Readiness check for normal API traffic')
+    def v1_readiness(_: dict[str, Any] = Depends(require_v1_api_key)) -> dict[str, Any]:
+        counts = db_counts(app.state.db)
+        image_root = _image_root_dir(settings.image_root, fallback_root=settings.db.parent)
+        checks = {
+            'database_reachable': True,
+            'support_ready': bool(counts['support_ready']),
+            'required_schema_present': bool(counts['v2_card_search_fts'] and counts['v2_card_detail_api_cache']),
+            'image_root_available': bool(image_root and image_root.exists()),
+            'configuration_valid': True,
+        }
+        ready = all(checks.values())
+        return {'data': {'ready': ready, 'service': 'saveroom-pokemon-api', 'checked_at': now_utc(), 'checks': checks}}
 
     @app.get('/api/v1/search/cards', response_model=CardSearchResponseV1)
     def v1_search_cards(
@@ -5760,17 +5799,17 @@ LIMIT ? OFFSET ?
         request: Request = None,
         _: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
     ) -> dict[str, Any]:
-        conn = connect(app.state.db)
-        ensure_inventory_support(conn)
-        cur = conn.cursor()
         _auth = getattr(request.state, 'auth_dict', None) or {}
         tenant_id = get_tenant_from_key(_auth)
 
         # Verify item exists and belongs to this tenant
-        item = cur.execute(
-            "SELECT 1 FROM physical_items WHERE item_id=? AND tenant_id=?",
-            (item_id, tenant_id)
-        ).fetchone()
+        with closing(connect(app.state.db)) as conn:
+            ensure_inventory_support(conn)
+            cur = conn.cursor()
+            item = cur.execute(
+                "SELECT 1 FROM physical_items WHERE item_id=? AND tenant_id=?",
+                (item_id, tenant_id)
+            ).fetchone()
         if not item:
             raise v1_error(404, 'item_not_found', 'Item not found in this tenant.', {})
 
@@ -5781,19 +5820,26 @@ LIMIT ? OFFSET ?
                            f'Invalid file type: {file.content_type}. Allowed: {", ".join(sorted(allowed_mime))}.', {})
 
         # Read and validate file
-        contents = file.file.read()
-        file_size = len(contents)
-        if file_size > 10 * 1024 * 1024:  # 10MB limit
-            raise v1_error(400, 'file_too_large', 'File exceeds 10MB limit.', {'file_bytes': file_size})
-
-        # Validate image decoding
-        from PIL import Image
-        import io
         try:
+            contents = file.file.read()
+            file_size = len(contents)
+            if file_size > 10 * 1024 * 1024:  # 10MB limit
+                raise v1_error(400, 'file_too_large', 'File exceeds 10MB limit.', {'file_bytes': file_size})
+
+            # Validate image decoding
+            from PIL import Image
+            import io
             img = Image.open(io.BytesIO(contents))
             img.verify()
+        except HTTPException:
+            raise
         except Exception:
             raise v1_error(400, 'invalid_image', 'Uploaded file is not a valid image or is corrupted.', {})
+        finally:
+            try:
+                file.file.close()
+            except Exception:
+                pass
 
         # Store to physical photos directory
         import uuid
@@ -5806,16 +5852,27 @@ LIMIT ? OFFSET ?
         with open(storage_path, 'wb') as f:
             f.write(contents)
 
+        photo_id: int | None = None
         now_val = now_utc()
-        cur.execute(
-            "INSERT INTO physical_item_photos(item_id, tenant_id, uploaded_by, original_filename, storage_path, mime_type, file_bytes, is_published, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (item_id, tenant_id, _auth.get('api_key_id') if _auth else None,
-             file.filename or stored_name, str(storage_path),
-             file.content_type, file_size, 1 if publish else 0, now_val)
-        )
-        conn.commit()
-        photo_id = cur.lastrowid
+        try:
+            with closing(connect(app.state.db)) as conn:
+                ensure_inventory_support(conn)
+                cur = conn.cursor()
+                cur.execute(
+                    "INSERT INTO physical_item_photos(item_id, tenant_id, uploaded_by, original_filename, storage_path, mime_type, file_bytes, is_published, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (item_id, tenant_id, _auth.get('api_key_id') if _auth else None,
+                     file.filename or stored_name, str(storage_path),
+                     file.content_type, file_size, 1 if publish else 0, now_val)
+                )
+                photo_id = cur.lastrowid
+                conn.commit()
+        except Exception:
+            try:
+                storage_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
         return {
             'data': {
                 'photo_id': photo_id,
@@ -5834,13 +5891,13 @@ LIMIT ? OFFSET ?
         request: Request = None,
         _: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
     ) -> dict[str, Any]:
-        conn = connect(app.state.db)
-        cur = conn.cursor()
         tenant_id = get_tenant_from_key(getattr(request.state, 'auth_dict', None) or {})
-        rows_result = cur.execute(
-            "SELECT * FROM physical_item_photos WHERE item_id=? AND tenant_id=? ORDER BY created_at DESC",
-            (item_id, tenant_id)
-        ).fetchall()
+        with closing(connect(app.state.db)) as conn:
+            cur = conn.cursor()
+            rows_result = cur.execute(
+                "SELECT * FROM physical_item_photos WHERE item_id=? AND tenant_id=? ORDER BY created_at DESC",
+                (item_id, tenant_id)
+            ).fetchall()
         return {'data': [dict(r) for r in rows_result]}
 
     @app.get('/api/v1/inventory/items/{item_id}/photos/{photo_id}')
@@ -5850,13 +5907,13 @@ LIMIT ? OFFSET ?
         request: Request = None,
         _: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
     ) -> Response:
-        conn = connect(app.state.db)
-        cur = conn.cursor()
         tenant_id = get_tenant_from_key(getattr(request.state, 'auth_dict', None) or {})
-        row = cur.execute(
-            "SELECT * FROM physical_item_photos WHERE photo_id=? AND item_id=? AND tenant_id=?",
-            (photo_id, item_id, tenant_id)
-        ).fetchone()
+        with closing(connect(app.state.db)) as conn:
+            cur = conn.cursor()
+            row = cur.execute(
+                "SELECT * FROM physical_item_photos WHERE photo_id=? AND item_id=? AND tenant_id=?",
+                (photo_id, item_id, tenant_id)
+            ).fetchone()
         if not row:
             raise v1_error(404, 'photo_not_found', 'Photo not found.', {})
         storage_path = row['storage_path']
@@ -5878,23 +5935,22 @@ LIMIT ? OFFSET ?
         request: Request = None,
         _: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
     ) -> dict[str, Any]:
-        conn = connect(app.state.db)
-        cur = conn.cursor()
         tenant_id = get_tenant_from_key(getattr(request.state, 'auth_dict', None) or {})
-        row = cur.execute(
-            "SELECT storage_path FROM physical_item_photos WHERE photo_id=? AND item_id=? AND tenant_id=?",
-            (photo_id, item_id, tenant_id)
-        ).fetchone()
-        if not row:
-            raise v1_error(404, 'photo_not_found', 'Photo not found.', {})
-        storage_path = row['storage_path']
-        # Archive the photo (soft delete — keep record)
-        now_val = now_utc()
-        cur.execute(
-            "UPDATE physical_item_photos SET is_published=0 WHERE photo_id=?",
-            (photo_id,)
-        )
-        conn.commit()
+        with closing(connect(app.state.db)) as conn:
+            cur = conn.cursor()
+            row = cur.execute(
+                "SELECT storage_path FROM physical_item_photos WHERE photo_id=? AND item_id=? AND tenant_id=?",
+                (photo_id, item_id, tenant_id)
+            ).fetchone()
+            if not row:
+                raise v1_error(404, 'photo_not_found', 'Photo not found.', {})
+            storage_path = row['storage_path']
+            # Archive the photo (soft delete — keep record)
+            cur.execute(
+                "UPDATE physical_item_photos SET is_published=0 WHERE photo_id=?",
+                (photo_id,)
+            )
+            conn.commit()
         # Delete file from disk
         if os.path.exists(storage_path):
             try:
