@@ -66,13 +66,17 @@ from pokemon_db_v3_config import (  # noqa: E402
     startup_lines,
     validate_settings,
 )
-from pokemon_db_v5_api_models import (  # noqa: E402
+from pokemon_db_v5_api_models import (
     ApiKeyCreateV1,
     ApiKeyCreatedResponseV1,
     ApiKeyListResponseV1,
+    CanonicalPrintingSummaryV1,
     CardDetailResponseV1,
     CardSearchResponseV1,
+    CommercialVariantSummaryV1,
     HealthResponseV1,
+    IdentityBuildRunSummaryV1,
+    IdentityHealthResponseV1,
     ImageDetailResponseV1,
     InventoryItemCreate,
     InventoryItemResponse,
@@ -91,6 +95,7 @@ from pokemon_db_v5_api_models import (  # noqa: E402
     PriceSummaryResponseV1,
     QuotaStatusResponseV1,
     SellableSKUIdentity,
+    SellableSKUSummaryV1,
     SetDetailResponseV1,
     SetListResponseV1,
     TenantCreate,
@@ -2653,6 +2658,138 @@ LIMIT ? OFFSET ?
                 )
             ''', 'Create image hash table for Phase 1 scanner.'),
             ('v57b', 'CREATE INDEX IF NOT EXISTS idx_card_image_hashes_hash ON card_image_hashes(image_hash)', 'Index for image hash lookup.'),
+            # ── v10: Canonical commercial identity foundation ───────────────────
+            ('v58', "CREATE TABLE IF NOT EXISTS v10_canonical_printings ("
+                "canonical_printing_id TEXT PRIMARY KEY, "
+                "canonical_key TEXT UNIQUE NOT NULL, "
+                "game TEXT NOT NULL DEFAULT 'pokemon_tcg', "
+                "core_set_id TEXT NOT NULL, "
+                "set_id TEXT, "
+                "set_code TEXT, "
+                "collector_number TEXT, "
+                "collector_number_sort TEXT, "
+                "canonical_name TEXT NOT NULL, "
+                "name_english TEXT, "
+                "primary_language TEXT NOT NULL, "
+                "card_kind TEXT, "
+                "rarity TEXT, "
+                "first_seen_source TEXT NOT NULL, "
+                "status TEXT NOT NULL DEFAULT 'active', "
+                "confidence_score REAL NOT NULL, "
+                "confidence_label TEXT NOT NULL, "
+                "confidence_reason TEXT NOT NULL, "
+                "created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), "
+                "updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
+                ")", 'Create v10 canonical printing identity table.'),
+            ('v58b', 'CREATE INDEX IF NOT EXISTS idx_v10_cp_core_set ON v10_canonical_printings(core_set_id, collector_number_sort)', 'Index for set+number lookup on canonical printings.'),
+            ('v58c', 'CREATE INDEX IF NOT EXISTS idx_v10_cp_name ON v10_canonical_printings(canonical_name)', 'Index for name lookup on canonical printings.'),
+            ('v58d', 'CREATE INDEX IF NOT EXISTS idx_v10_cp_confidence ON v10_canonical_printings(confidence_label)', 'Index for confidence filtering.'),
+            ('v59', "CREATE TABLE IF NOT EXISTS v10_canonical_printing_cards ("
+                "canonical_printing_id TEXT NOT NULL, "
+                "card_key TEXT NOT NULL, "
+                "language_code TEXT NOT NULL, "
+                "source_card_id TEXT, "
+                "match_method TEXT NOT NULL, "
+                "confidence_score REAL NOT NULL, "
+                "confidence_reason TEXT NOT NULL, "
+                "created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), "
+                "PRIMARY KEY (canonical_printing_id, card_key)"
+                ")", 'Create v10 canonical-to-source-card link table.'),
+            ('v59b', 'CREATE INDEX IF NOT EXISTS idx_v10_cpc_card_key ON v10_canonical_printing_cards(card_key)', 'Index for reverse card-to-canonical lookup.'),
+            ('v60', "CREATE TABLE IF NOT EXISTS v10_commercial_variants ("
+                "commercial_variant_id TEXT PRIMARY KEY, "
+                "canonical_printing_id TEXT NOT NULL, "
+                "variant_key TEXT UNIQUE NOT NULL, "
+                "language_code TEXT NOT NULL, "
+                "finish TEXT NOT NULL DEFAULT 'unknown', "
+                "variant_type TEXT NOT NULL DEFAULT 'standard', "
+                "stamp TEXT, "
+                "edition TEXT, "
+                "is_reverse_holo INTEGER NOT NULL DEFAULT 0, "
+                "is_holo INTEGER, "
+                "is_promo INTEGER NOT NULL DEFAULT 0, "
+                "market_region TEXT, "
+                "status TEXT NOT NULL DEFAULT 'active', "
+                "confidence_score REAL NOT NULL, "
+                "confidence_label TEXT NOT NULL, "
+                "confidence_reason TEXT NOT NULL, "
+                "created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), "
+                "updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
+                ")", 'Create v10 commercial variant table.'),
+            ('v60b', 'CREATE INDEX IF NOT EXISTS idx_v10_cv_canonical ON v10_commercial_variants(canonical_printing_id)', 'Index for variant-to-canonical lookup.'),
+            ('v60c', 'CREATE INDEX IF NOT EXISTS idx_v10_cv_language ON v10_commercial_variants(language_code)', 'Index for language filtering.'),
+            ('v60d', 'CREATE INDEX IF NOT EXISTS idx_v10_cv_finish ON v10_commercial_variants(finish)', 'Index for finish filtering.'),
+            ('v61', "CREATE TABLE IF NOT EXISTS v10_sellable_skus ("
+                "sellable_sku_id TEXT PRIMARY KEY, "
+                "commercial_variant_id TEXT NOT NULL, "
+                "sku_key TEXT UNIQUE NOT NULL, "
+                "item_class TEXT NOT NULL DEFAULT 'single_card', "
+                "condition_policy TEXT NOT NULL DEFAULT 'raw_conditioned', "
+                "display_title TEXT NOT NULL, "
+                "pricing_key TEXT, "
+                "inventory_enabled INTEGER NOT NULL DEFAULT 1, "
+                "listing_enabled INTEGER NOT NULL DEFAULT 1, "
+                "scanner_enabled INTEGER NOT NULL DEFAULT 1, "
+                "status TEXT NOT NULL DEFAULT 'active', "
+                "confidence_score REAL NOT NULL, "
+                "confidence_label TEXT NOT NULL, "
+                "confidence_reason TEXT NOT NULL, "
+                "created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), "
+                "updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
+                ")", 'Create v10 sellable SKU table.'),
+            ('v61b', 'CREATE INDEX IF NOT EXISTS idx_v10_sku_variant ON v10_sellable_skus(commercial_variant_id)', 'Index for SKU-to-variant lookup.'),
+            ('v61c', 'CREATE INDEX IF NOT EXISTS idx_v10_sku_item_class ON v10_sellable_skus(item_class)', 'Index for item class filtering.'),
+            ('v62', "CREATE TABLE IF NOT EXISTS v10_external_references ("
+                "external_reference_id TEXT PRIMARY KEY, "
+                "entity_type TEXT NOT NULL, "
+                "entity_id TEXT NOT NULL, "
+                "source_name TEXT NOT NULL, "
+                "source_entity_type TEXT, "
+                "source_identifier TEXT NOT NULL, "
+                "source_url TEXT, "
+                "match_method TEXT NOT NULL, "
+                "confidence_score REAL NOT NULL, "
+                "confidence_label TEXT NOT NULL, "
+                "confidence_reason TEXT NOT NULL, "
+                "created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), "
+                "updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), "
+                "status TEXT NOT NULL DEFAULT 'active', "
+                "UNIQUE(entity_type, entity_id, source_name, source_identifier)"
+                ")", 'Create v10 external reference mapping table.'),
+            ('v62b', 'CREATE INDEX IF NOT EXISTS idx_v10_er_entity ON v10_external_references(entity_type, entity_id)', 'Index for entity reference lookup.'),
+            ('v63', "CREATE TABLE IF NOT EXISTS v10_identity_build_runs ("
+                "build_run_id TEXT PRIMARY KEY, "
+                "started_at TEXT NOT NULL, "
+                "finished_at TEXT, "
+                "status TEXT NOT NULL, "
+                "source_db_path TEXT, "
+                "algorithm_version TEXT NOT NULL DEFAULT '1.0.0', "
+                "cards_seen INTEGER DEFAULT 0, "
+                "canonical_printings_created INTEGER DEFAULT 0, "
+                "commercial_variants_created INTEGER DEFAULT 0, "
+                "sellable_skus_created INTEGER DEFAULT 0, "
+                "external_references_created INTEGER DEFAULT 0, "
+                "warnings_count INTEGER DEFAULT 0, "
+                "errors_count INTEGER DEFAULT 0, "
+                "notes TEXT"
+                ")", 'Create v10 identity build run tracking table.'),
+            ('v64', "CREATE TABLE IF NOT EXISTS v10_identity_build_events ("
+                "event_id TEXT PRIMARY KEY, "
+                "build_run_id TEXT NOT NULL, "
+                "severity TEXT NOT NULL, "
+                "entity_type TEXT, "
+                "entity_id TEXT, "
+                "message TEXT NOT NULL, "
+                "details_json TEXT, "
+                "created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
+                ")", 'Create v10 identity build event log table.'),
+            ('v65', "CREATE TABLE IF NOT EXISTS v10_inventory_sku_links ("
+                "link_id TEXT PRIMARY KEY, "
+                "sellable_sku_id TEXT NOT NULL, "
+                "legacy_sku_id INTEGER NOT NULL, "
+                "created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')), "
+                "UNIQUE(sellable_sku_id, legacy_sku_id)"
+                ")", 'Create v10-to-legacy SKU bridge table for inventory compatibility.'),
         ]
         ran: list[str] = []
         for version, sql, desc in migrations:
@@ -6034,6 +6171,326 @@ LIMIT ? OFFSET ?
             'query_image_size': len(image_bytes),
             'hash_computed': format(query_hash, '016x'),
         }
+
+    # ── v10 identity endpoints ────────────────────────────────────────────
+
+    @app.get('/api/v1/identity/health', response_model=IdentityHealthResponseV1)
+    def v1_identity_health(
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> IdentityHealthResponseV1:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM v10_canonical_printings')
+        cp_count = cur.fetchone()[0]
+        cur.execute('SELECT COUNT(*) FROM v10_canonical_printing_cards')
+        link_count = cur.fetchone()[0]
+        cur.execute('SELECT COUNT(*) FROM v10_commercial_variants')
+        cv_count = cur.fetchone()[0]
+        cur.execute('SELECT COUNT(*) FROM v10_sellable_skus')
+        sku_count = cur.fetchone()[0]
+        cur.execute('SELECT COUNT(*) FROM v10_external_references')
+        er_count = cur.fetchone()[0]
+        cur.execute('SELECT COUNT(*) FROM v10_identity_build_runs')
+        run_count = cur.fetchone()[0]
+        cur.execute('SELECT COUNT(*) FROM v10_canonical_printings WHERE confidence_label = ?', ('HIGH',))
+        high_conf = cur.fetchone()[0]
+        cur.execute('SELECT COUNT(*) FROM v10_canonical_printings WHERE confidence_label = ?', ('MEDIUM',))
+        med_conf = cur.fetchone()[0]
+        cur.execute('SELECT COUNT(*) FROM v10_canonical_printings WHERE confidence_label = ?', ('LOW',))
+        low_conf = cur.fetchone()[0]
+        cur.execute('SELECT COUNT(*) FROM v10_commercial_variants WHERE finish = ?', ('unknown',))
+        unknown_finish = cur.fetchone()[0]
+
+        last_run: IdentityBuildRunSummaryV1 | None = None
+        cur.execute('SELECT * FROM v10_identity_build_runs ORDER BY started_at DESC LIMIT 1')
+        row = cur.fetchone()
+        if row:
+            last_run = IdentityBuildRunSummaryV1(
+                build_run_id=row['build_run_id'],
+                started_at=row['started_at'],
+                status=row['status'],
+                algorithm_version=row['algorithm_version'],
+                canonical_printings_created=row['canonical_printings_created'],
+                commercial_variants_created=row['commercial_variants_created'],
+                sellable_skus_created=row['sellable_skus_created'],
+                notes=row.get('notes'),
+            )
+        conn.close()
+        return IdentityHealthResponseV1(
+            canonical_printings=cp_count,
+            card_links=link_count,
+            commercial_variants=cv_count,
+            sellable_skus=sku_count,
+            external_references=er_count,
+            build_runs=run_count,
+            last_build_run=last_run,
+            high_confidence=high_conf,
+            medium_confidence=med_conf,
+            low_confidence=low_conf,
+            unknown_finish=unknown_finish,
+        )
+
+    @app.get('/api/v1/identity/canonical-printings', response_model=None)
+    def v1_identity_canonical_printings(
+        q: str = Query(None),
+        core_set_id: str | None = Query(None),
+        set_id: str | None = Query(None),
+        collector_number: str | None = Query(None),
+        language: str | None = Query(None, alias='language_code'),
+        confidence_label: str | None = Query(None),
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        conditions: list[str] = []
+        params: list[Any] = []
+        if q:
+            conditions.append('(cp.canonical_name LIKE ? OR cp.canonical_key LIKE ?)')
+            like_q = f'%{q}%'
+            params.extend([like_q, like_q])
+        if core_set_id:
+            conditions.append('cp.core_set_id = ?')
+            params.append(core_set_id)
+        if set_id:
+            conditions.append('cp.set_id = ?')
+            params.append(set_id)
+        if collector_number:
+            conditions.append('cp.collector_number = ?')
+            params.append(collector_number)
+        if language:
+            conditions.append('cp.primary_language = ?')
+            params.append(language)
+        if confidence_label:
+            conditions.append('cp.confidence_label = ?')
+            params.append(confidence_label)
+
+        where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
+        sql = f"""
+            SELECT cp.* FROM v10_canonical_printings cp
+            {where}
+            ORDER BY cp.core_set_id, cp.collector_number_sort
+            LIMIT ? OFFSET ?
+        """
+        params.extend([limit, offset])
+        cur.execute(sql, tuple(params))
+        rows = [dict(r) for r in cur.fetchall()]
+        # Attach confidence info
+        for r in rows:
+            r['confidence'] = {
+                'score': r['confidence_score'],
+                'label': r['confidence_label'],
+                'reason': r['confidence_reason'],
+            }
+        conn.close()
+        return {'data': rows, 'meta': {'limit': limit, 'offset': offset, 'count': len(rows)}}
+
+    @app.get('/api/v1/identity/canonical-printings/{canonical_printing_id}')
+    def v1_identity_canonical_printing_detail(
+        canonical_printing_id: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        cur.execute('SELECT * FROM v10_canonical_printings WHERE canonical_printing_id = ?', (canonical_printing_id,))
+        row = cur.fetchone()
+        if not row:
+            raise v1_error(404, 'not_found', f'Canonical printing {canonical_printing_id} not found.', None)
+        cp = dict(row)
+        cp['confidence'] = {
+            'score': cp['confidence_score'],
+            'label': cp['confidence_label'],
+            'reason': cp['confidence_reason'],
+        }
+        # Get linked cards
+        cur.execute('SELECT * FROM v10_canonical_printing_cards WHERE canonical_printing_id = ?', (canonical_printing_id,))
+        cp['linked_cards'] = [dict(r) for r in cur.fetchall()]
+        # Get variants
+        cur.execute('SELECT * FROM v10_commercial_variants WHERE canonical_printing_id = ?', (canonical_printing_id,))
+        variants = []
+        for r in cur.fetchall():
+            v = dict(r)
+            v['confidence'] = {
+                'score': v['confidence_score'],
+                'label': v['confidence_label'],
+                'reason': v['confidence_reason'],
+            }
+            variants.append(v)
+        cp['commercial_variants'] = variants
+        conn.close()
+        return {'data': cp}
+
+    @app.get('/api/v1/identity/sellable-skus')
+    def v1_identity_sellable_skus(
+        q: str = Query(None),
+        item_class: str | None = Query(None),
+        language: str | None = Query(None, alias='language_code'),
+        status: str | None = Query(None),
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        conditions: list[str] = []
+        params: list[Any] = []
+        if q:
+            conditions.append('(s.display_title LIKE ? OR s.sku_key LIKE ?)')
+            like_q = f'%{q}%'
+            params.extend([like_q, like_q])
+        if item_class:
+            conditions.append('s.item_class = ?')
+            params.append(item_class)
+        if language:
+            conditions.append("""
+                s.commercial_variant_id IN (
+                    SELECT cv.commercial_variant_id FROM v10_commercial_variants cv
+                    WHERE cv.language_code = ?
+                )
+            """)
+            params.append(language)
+        if status:
+            conditions.append('s.status = ?')
+            params.append(status)
+
+        where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
+        sql = f"""
+            SELECT s.* FROM v10_sellable_skus s
+            {where}
+            ORDER BY s.sku_key
+            LIMIT ? OFFSET ?
+        """
+        params.extend([limit, offset])
+        cur.execute(sql, tuple(params))
+        rows = []
+        for r in cur.fetchall():
+            d = dict(r)
+            d['confidence'] = {
+                'score': d['confidence_score'],
+                'label': d['confidence_label'],
+                'reason': d['confidence_reason'],
+            }
+            rows.append(d)
+        conn.close()
+        return {'data': rows, 'meta': {'limit': limit, 'offset': offset, 'count': len(rows)}}
+
+    @app.get('/api/v1/identity/sellable-skus/{sellable_sku_id}')
+    def v1_identity_sellable_sku_detail(
+        sellable_sku_id: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        cur.execute('SELECT * FROM v10_sellable_skus WHERE sellable_sku_id = ?', (sellable_sku_id,))
+        row = cur.fetchone()
+        if not row:
+            raise v1_error(404, 'not_found', f'Sellable SKU {sellable_sku_id} not found.', None)
+        sku = dict(row)
+        sku['confidence'] = {
+            'score': sku['confidence_score'],
+            'label': sku['confidence_label'],
+            'reason': sku['confidence_reason'],
+        }
+        conn.close()
+        return {'data': sku}
+
+    @app.get('/api/v1/identity/cards/{card_key:path}')
+    def v1_identity_card_lookup(
+        card_key: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        # Find linked canonical printing for this card
+        cur.execute('''
+            SELECT cp.* FROM v10_canonical_printings cp
+            JOIN v10_canonical_printing_cards l ON cp.canonical_printing_id = l.canonical_printing_id
+            WHERE l.card_key = ?
+        ''', (card_key,))
+        cp_row = cur.fetchone()
+        if not cp_row:
+            conn.close()
+            return {
+                'data': {
+                    'card_key': card_key,
+                    'mapped': False,
+                    'warnings': [f'No identity mapping found for card {card_key}.'],
+                }
+            }
+        cp = dict(cp_row)
+        cp['confidence'] = {
+            'score': cp['confidence_score'],
+            'label': cp['confidence_label'],
+            'reason': cp['confidence_reason'],
+        }
+        cp_id = cp['canonical_printing_id']
+        # Get variants
+        cur.execute('SELECT * FROM v10_commercial_variants WHERE canonical_printing_id = ?', (cp_id,))
+        variants = [dict(r) for r in cur.fetchall()]
+        # Get SKUs via variants
+        cur.execute('''
+            SELECT * FROM v10_sellable_skus
+            WHERE commercial_variant_id IN (
+                SELECT commercial_variant_id FROM v10_commercial_variants
+                WHERE canonical_printing_id = ?
+            )
+        ''', (cp_id,))
+        skus = [dict(r) for r in cur.fetchall()]
+        # Get external references
+        cur.execute('''
+            SELECT * FROM v10_external_references
+            WHERE entity_type = 'canonical_printing' AND entity_id = ?
+        ''', (cp_id,))
+        refs = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return {'data': {
+            'card_key': card_key,
+            'mapped': True,
+            'canonical_printing': cp,
+            'commercial_variants': variants,
+            'sellable_skus': skus,
+            'external_references': refs,
+        }}
+
+    @app.get('/api/v1/identity/external-references')
+    def v1_identity_external_references(
+        entity_type: str | None = Query(None),
+        entity_id: str | None = Query(None),
+        source_name: str | None = Query(None),
+        source_identifier: str | None = Query(None),
+        confidence_label: str | None = Query(None),
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        conditions: list[str] = []
+        params: list[Any] = []
+        if entity_type:
+            conditions.append('entity_type = ?')
+            params.append(entity_type)
+        if entity_id:
+            conditions.append('entity_id = ?')
+            params.append(entity_id)
+        if source_name:
+            conditions.append('source_name = ?')
+            params.append(source_name)
+        if source_identifier:
+            conditions.append('source_identifier = ?')
+            params.append(source_identifier)
+        if confidence_label:
+            conditions.append('confidence_label = ?')
+            params.append(confidence_label)
+        where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
+        sql = f"SELECT * FROM v10_external_references{where} ORDER BY entity_id LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        cur.execute(sql, tuple(params))
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return {'data': rows, 'meta': {'limit': limit, 'offset': offset, 'count': len(rows)}}
+
 
     return app
 

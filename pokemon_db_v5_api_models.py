@@ -752,3 +752,76 @@ class ScannerScanResponse(BaseModel):
 class ScannerScanRequest(BaseModel):
     """Request body for scanner scan (optional, typically uses multipart upload)."""
     pass  # Image data comes via multipart/form-data
+
+
+# ── v10 identity models ───────────────────────────────────────────────────
+
+class IdentityConfidenceInfo(BaseModel):
+    score: float | None = None
+    label: str
+    reason: str
+
+
+class CanonicalPrintingSummaryV1(BaseModel):
+    canonical_printing_id: str
+    canonical_key: str
+    game: str = "pokemon_tcg"
+    core_set_id: str
+    set_id: str | None = None
+    collector_number: str | None = None
+    collector_number_sort: str | None = None
+    canonical_name: str
+    name_english: str | None = None
+    primary_language: str
+    card_kind: str | None = None
+    rarity: str | None = None
+    status: str = "active"
+    confidence: IdentityConfidenceInfo | None = None
+
+
+class CommercialVariantSummaryV1(BaseModel):
+    commercial_variant_id: str
+    commercial_key: str
+    language_code: str
+    finish: str = "unknown"
+    variant_type: str = "standard"
+    is_reverse_holo: bool = False
+    is_holo: bool | None = None
+    is_promo: bool = False
+    edition: str | None = None
+    status: str = "active"
+    confidence: IdentityConfidenceInfo | None = None
+
+
+class SellableSKUSummaryV1(BaseModel):
+    sellable_sku_id: str
+    sku_key: str
+    item_class: str = "single_card"
+    condition_policy: str = "raw_conditioned"
+    display_title: str
+    status: str = "active"
+    confidence: IdentityConfidenceInfo | None = None
+
+
+class IdentityHealthResponseV1(BaseModel):
+    canonical_printings: int = 0
+    card_links: int = 0
+    commercial_variants: int = 0
+    sellable_skus: int = 0
+    external_references: int = 0
+    build_runs: int = 0
+    last_build_run: IdentityBuildRunSummaryV1 | None = None
+    high_confidence: int = 0
+    medium_confidence: int = 0
+    low_confidence: int = 0
+
+
+class IdentityBuildRunSummaryV1(BaseModel):
+    build_run_id: str
+    started_at: str
+    status: str
+    algorithm_version: str
+    canonical_printings_created: int = 0
+    commercial_variants_created: int = 0
+    sellable_skus_created: int = 0
+    notes: str | None = None
