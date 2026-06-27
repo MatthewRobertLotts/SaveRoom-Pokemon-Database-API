@@ -339,6 +339,11 @@ def build_identity(
         if canonical_key in canonical_keys_seen:
             # Skip duplicates (same key from another row in same slot)
             continue
+        if not dry_run:
+            existing = _scalar(cur, "SELECT 1 FROM v10_canonical_printings WHERE canonical_key = ?", (canonical_key,))
+            if existing:
+                canonical_keys_seen.add(canonical_key)
+                continue
         canonical_keys_seen.add(canonical_key)
 
         cp_id = _mk_id("cp")
