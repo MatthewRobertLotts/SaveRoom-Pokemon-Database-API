@@ -256,3 +256,23 @@ pre {
 
 .legal-footer { border-top: 1px solid var(--line); padding: 1.5rem 2rem; margin-top: 2rem; font-size: 0.7rem; color: var(--muted); text-align: center; }
 .legal-footer a { color: var(--accent-2); text-decoration: underline; }
+
+/* v11 Market Evidence panel */
+.evidence-panel { margin-top: 1rem; padding: 1rem; }
+.evidence-search { display: flex; gap: 0.8rem; align-items: end; flex-wrap: wrap; margin-top: 0.8rem; }
+.evidence-health { margin-top: 0.8rem; font-size: 0.85rem; }
+.evidence-aggregate { margin-top: 0.5rem; }
+.evidence-aggregate .agg-card { display: inline-block; background: rgba(255,255,255,0.05); border: 1px solid var(--line); border-radius: 12px; padding: 0.6rem 0.8rem; margin: 0.3rem 0.3rem 0 0; }
+.evidence-aggregate .agg-card .curr { font-size: 0.7rem; color: var(--muted); }
+.evidence-aggregate .agg-card .price { font-size: 1.1rem; font-weight: 800; }
+.evidence-aggregate .agg-card .conf { font-size: 0.7rem; margin-top: 0.2rem; }
+.evidence-observations { margin-top: 0.8rem; }
+.obs-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+.obs-table th, .obs-table td { text-align: left; padding: 0.35rem 0.45rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+.obs-table th { color: var(--accent); font-size: 0.72rem; }
+.conf-high { color: var(--ok); }
+.conf-medium { color: var(--warning); }
+.conf-low { color: var(--danger); }
+.conf-unusable { color: var(--danger); text-decoration: line-through; }
+.obs-detail-row { background: rgba(255,255,255,0.03); }
+.obs-detail-row td { padding: 0.5rem; }

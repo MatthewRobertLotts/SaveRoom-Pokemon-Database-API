@@ -1666,6 +1666,12 @@ def create_app(settings: PokemonDBSettings | None = None) -> FastAPI:
     if settings.image_cache_mounted:
         print(f'[v9.1] Raw static /images mount removed. All image delivery now goes through GET /api/v1/images/assets/{{image_id}}/content (authenticated, policy-gated).')
 
+    # v11 market evidence endpoints
+    with closing(connect(app.state.db)) as v11_conn:
+        from pricing_sources.migrations import apply_v11_migrations
+        apply_v11_migrations(v11_conn)
+    from pricing_sources.router import v11_pricing_router
+    app.include_router(v11_pricing_router)
 
     # v1 API foundation: optional API key auth + request logging.
     with closing(connect(app.state.db)) as conn:

@@ -434,3 +434,116 @@ document.querySelectorAll('[data-set]').forEach((button) => {
 checkHealth();
 loadPricingDashboard();
 runSearch();
+
+/* ── v11 Market Evidence ─────────────────────────────────────────────── */
+
+const evidenceTargetId = $('evidenceTargetId');
+const evidenceCurrency = $('evidenceCurrency');
+const evidenceHealth = $('evidenceHealth');
+const evidenceAggregate = $('evidenceAggregate');
+const evidenceObservations = $('evidenceObservations');
+
+function confClassName(conf) {
+  if (conf === 'HIGH') return 'conf-high';
+  if (conf === 'MEDIUM') return 'conf-medium';
+  if (conf === 'LOW') return 'conf-low';
+  return 'conf-unusable';
+}
+
+async function loadHealth() {
+  evidenceHealth.textContent = 'Checking source health…';
+  try {
+    const d = await getJson('/api/v1/prices/sources/tcgdex/health');
+    const s = d.status || d.data?.status || 'unknown';
+    evidenceHealth.innerHTML = '<span class="ok">TCGdex: ' + escapeHtml(s) + '</span> · <span class="muted">' + escapeHtml(JSON.stringify(d.data || d)) + '</span>';
+  } catch (e) {
+    evidenceHealth.innerHTML = '<span class="bad">Health check failed: ' + escapeHtml(e.message) + '</span>';
+  }
+}
+
+async function loadEvidence() {
+  const target = evidenceTargetId.value.trim();
+  if (!target) {
+    evidenceObservations.innerHTML = '<p class="bad">Please enter a target ID.</p>';
+    return;
+  }
+  const currency = evidenceCurrency.value;
+  evidenceObservations.innerHTML = '<p class="muted">Loading observations…</p>';
+  evidenceAggregate.innerHTML = '';
+  try {
+    const obsPath = '/api/v1/prices/observations?canonical_printing_id=' + encodeURIComponent(target) + (currency ? '&currency=' + currency : '');
+    const aggPath = '/api/v1/prices/aggregate/canonical_printing/' + encodeURIComponent(target) + (currency ? '?currency=' + currency : '');
+    const [obsRes, aggRes] = await Promise.all([
+      getJson(obsPath).catch(() => ({ data: [], pagination: { total: 0 } })),
+      getJson(aggPath).catch(() => ({ data: [] })),
+    ]);
+    renderObservations(obsRes.data || []);
+    renderAggregates(aggRes.data || []);
+  } catch (e) {
+    evidenceObservations.innerHTML = '<p class="bad">Failed: ' + escapeHtml(e.message) + '</p>';
+  }
+}
+
+function renderObservations(rows) {
+  if (!rows.length) {
+    evidenceObservations.innerHTML = '<p class="muted">No observations found for this target.</p>';
+    return;
+  }
+  let html = '<table class="obs-table"><thead><tr><th>ID</th><th>Source</th><th>Amount</th><th>Currency</th><th>Finish</th><th>Market</th><th>Confidence</th><th>Match reason</th></tr></thead><tbody>';
+  for (const r of rows) {
+    html += '<tr>';
+    html += '<td>' + escapeHtml(r.observation_id) + '</td>';
+    html += '<td>' + escapeHtml(r.marketplace || '—') + '</td>';
+    html += '<td>' + escapeHtml(r.amount ?? '—') + '</td>';
+    html += '<td>' + escapeHtml(r.currency || '—') + '</td>';
+    html += '<td>' + escapeHtml(r.finish || '—') + '</td>';
+    html += '<td>' + escapeHtml(r.listing_type || '—') + '</td>';
+    html += '<td class="' + confClassName(r.match_confidence) + '">' + escapeHtml(r.match_confidence || '—') + '</td>';
+    html += '<td><span class="muted">' + escapeHtml(r.match_reason || '') + '</span></td>';
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  evidenceObservations.innerHTML = html;
+}
+
+function renderAggregates(aggregates) {
+  if (!aggregates.length) {
+    evidenceAggregate.innerHTML = '';
+    return;
+  }
+  let html = '<h4>Aggregate Valuations</h4>';
+  for (const a of aggregates) {
+    html += '<div class="agg-card">';
+    html += '<span class="curr">' + escapeHtml(a.currency) + ' · ' + escapeHtml(a.listing_type) + ' · ' + escapeHtml(a.finish) + '</span>';
+    html += '<div class="price">Median: ' + (a.median_price != null ? escapeHtml(a.median_price) : 'N/A') + '</div>';
+    html += '<div class="muted">Low: ' + (a.low_price != null ? escapeHtml(a.low_price) : 'N/A') + ' · High: ' + (a.high_price != null ? escapeHtml(a.high_price) : 'N/A') + ' · n=' + escapeHtml(a.observation_count) + '</div>';
+    html += '<div class="conf ' + confClassName(a.confidence_label) + '">' + escapeHtml(a.confidence_label) + ': ' + escapeHtml(a.confidence_reason || '') + '</div>';
+    html += '</div>';
+  }
+  evidenceAggregate.innerHTML = html;
+}
+
+async function refreshEvidence() {
+  const target = evidenceTargetId.value.trim();
+  if (!target) {
+    evidenceObservations.innerHTML = '<p class="bad">Please enter a target ID first.</p>';
+    return;
+  }
+  if (!confirm('Refresh evidence for ' + target + '?\n\nThis fetches from TCGdex and stores new observations.')) return;
+  evidenceObservations.innerHTML = '<p class="muted">Refreshing…</p>';
+  try {
+    const result = await postJson('/api/v1/prices/refresh/canonical_printing/' + encodeURIComponent(target), {});
+    if (result.data?.status === 'completed') {
+      evidenceObservations.innerHTML = '<p class="ok">Refresh completed: ' + escapeHtml(JSON.stringify(result.data)) + '</p>';
+      await loadEvidence();
+    } else {
+      evidenceObservations.innerHTML = '<p class="bad">Refresh result: ' + escapeHtml(JSON.stringify(result.data || result)) + '</p>';
+    }
+  } catch (e) {
+    evidenceObservations.innerHTML = '<p class="bad">Refresh failed: ' + escapeHtml(e.message) + '</p>';
+  }
+}
+
+$('loadEvidenceBtn').addEventListener('click', loadEvidence);
+$('loadHealthBtn').addEventListener('click', loadHealth);
+$('refreshEvidenceBtn').addEventListener('click', refreshEvidence);

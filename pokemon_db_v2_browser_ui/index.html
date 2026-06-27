@@ -92,6 +92,42 @@
       <div id="batchPriceStatus" class="batch-status muted"></div>
     </section>
 
+    <section class="panel evidence-panel" aria-labelledby="evidencePanelTitle">
+      <div class="panel-head">
+        <div>
+          <p class="eyebrow">Market Evidence</p>
+          <h2 id="evidencePanelTitle">v11 Pricing Evidence</h2>
+          <p class="muted">Inspect TCGdex-sourced pricing evidence attached to v10 canonical identity. Read-only inspection; refresh via API only.</p>
+        </div>
+        <div class="button-row">
+          <button id="refreshEvidenceBtn" class="secondary">Refresh evidence</button>
+          <button id="loadHealthBtn" class="secondary">Check source health</button>
+        </div>
+      </div>
+
+      <div class="evidence-search">
+        <div class="field grow">
+          <label for="evidenceTargetId">Target (canonical_printing ID or card key)</label>
+          <input id="evidenceTargetId" type="text" placeholder="cp-001 or en:sv03-223" />
+        </div>
+        <div class="field compact">
+          <label for="evidenceCurrency">Currency</label>
+          <select id="evidenceCurrency">
+            <option value="">Any</option>
+            <option value="USD">USD</option>
+            <option value="EUR">EUR</option>
+          </select>
+        </div>
+        <button id="loadEvidenceBtn" class="primary">Load evidence</button>
+      </div>
+
+      <div id="evidenceHealth" class="evidence-health muted"></div>
+      <div id="evidenceAggregate" class="evidence-aggregate muted"></div>
+      <div id="evidenceObservations" class="evidence-observations">
+        <p class="muted">Enter a target ID above and click "Load evidence" to inspect observations.</p>
+      </div>
+    </section>
+
     <section id="results" class="grid" aria-live="polite"></section>
   </main>
 
