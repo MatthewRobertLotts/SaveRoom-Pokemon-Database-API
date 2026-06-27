@@ -212,6 +212,34 @@ Procurement checklist:
 
 Do not build an adapter yet. The next implementation-enabling step is an access/terms checkpoint: choose JustTCG as the first procurement target, verify permitted API use/caching and quota/credit behavior, then collect approved fixture payloads for a fixture-only adapter spike.
 
+
+## Public web/Tavily research update — 2026-06-27
+
+A public research supplement now exists at `docs/V11_1_PUBLIC_SOURCE_TERMS_RESEARCH.md`. Fifty Tavily/web searches were run across JustTCG, PokéWallet, Cardmarket direct API, RapidAPI CardMarket/Pokémon pricing APIs, TCGplayer direct API, eBay Browse API, and eBay sold/completed providers.
+
+Public research confirmed:
+
+- JustTCG has public docs, examples, API key auth, Pokémon support, condition/printing examples, subscription-tier terms, and explicit free-tier non-commercial restrictions.
+- PokéWallet has public docs, public rate limits/plans, API key auth, Pokémon pricing from TCGPlayer/CardMarket, variant models, and terms allowing personal or commercial use subject to its terms.
+- Cardmarket direct API is publicly documented but currently not accepting API access applications; PriceGuide access is restricted, and public terms/search results indicate prior written agreement is needed to present trading-card prices.
+- RapidAPI/provider APIs advertise Pokémon/Cardmarket/TCGPlayer/eBay graded pricing and public price tiers, but provider/RapidAPI cache and redistribution rights remain unclear.
+- TCGplayer direct API has public docs/help for pricing data, but access is partner/API gated and terms around combining/rebranding/caching require direct review.
+- eBay Browse API is documented and supports active listing search with OAuth, but it is not a sold/completed price source.
+- eBay sold providers publicly offer sold-comps data, but require provider keys/tokens or paid plans and rely on title/category matching rather than Pokémon set+collector identity.
+
+What remains unclear:
+
+- Raw-response caching and retention permission for every viable provider.
+- Permanent normalized observation/aggregate storage rights.
+- Whether authenticated sample payloads can be saved as unit-test fixtures.
+- Customer-facing display permission for source-derived prices.
+- Exact price-bucket semantics for JustTCG: sold vs active listing vs market vs guide.
+- Whether JustTCG/PokéWallet localized Pokémon payloads can map cleanly to v10 identity without fallback.
+
+JustTCG contact is still needed. Public docs make JustTCG the best procurement target but do not prove safe implementation. In particular, public terms prohibit commercial/business use of the free tier and do not clearly authorize raw-response caching, fixture saving, or permanent derived aggregate storage.
+
+Best next step: send the JustTCG access request now, emphasizing paid-tier business use, caching/fixture permission, derived aggregate retention, display rights, and price-type semantics. If JustTCG cannot confirm those points, repeat procurement with PokéWallet as the next structured-source fallback.
+
 ## Links
 
 - Related: `docs/V11_1_PREFLIGHT.md`
