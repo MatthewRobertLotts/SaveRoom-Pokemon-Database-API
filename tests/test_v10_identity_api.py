@@ -198,3 +198,36 @@ class TestMissingEntity:
         assert response.status_code in (404, 422)
         data = response.json()
         assert 'detail' in data or 'error' in data
+
+
+class TestIdentityCardLookup:
+    def test_unmapped_card_returns_warning(self, client: TestClient) -> None:
+        response = client.get('/api/v1/identity/cards/en:nonexistent-card-xyz')
+        assert response.status_code == 200
+        data = response.json()
+        assert data['data']['mapped'] is False
+        assert len(data['data']['warnings']) > 0
+
+    def test_card_key_path_encoded(self, client: TestClient) -> None:
+        response = client.get('/api/v1/identity/cards/en%3Atest%2Fcard-1')
+        assert response.status_code == 200
+        data = response.json()
+        assert data['data']['card_key'] == 'en:test/card-1'
+
+
+class TestIdentityExternalReferences:
+    def test_empty_references(self, client: TestClient) -> None:
+        response = client.get('/api/v1/identity/external-references')
+        assert response.status_code == 200
+        data = response.json()
+        assert data['data'] == []
+
+    def test_filter_by_entity_type(self, client: TestClient) -> None:
+        response = client.get('/api/v1/identity/external-references?entity_type=canonical_printing')
+        assert response.status_code == 200
+        assert response.json()['data'] == []
+
+    def test_references_meta(self, client: TestClient) -> None:
+        response = client.get('/api/v1/identity/external-references')
+        assert 'meta' in response.json()
+        assert response.json()['meta']['count'] == 0

@@ -6395,6 +6395,102 @@ LIMIT ? OFFSET ?
         conn.close()
         return {'data': sku}
 
+    @app.get('/api/v1/identity/cards/{card_key:path}')
+    def v1_identity_card_lookup(
+        card_key: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        # Find linked canonical printing for this card
+        cur.execute('''
+            SELECT cp.* FROM v10_canonical_printings cp
+            JOIN v10_canonical_printing_cards l ON cp.canonical_printing_id = l.canonical_printing_id
+            WHERE l.card_key = ?
+        ''', (card_key,))
+        cp_row = cur.fetchone()
+        if not cp_row:
+            conn.close()
+            return {
+                'data': {
+                    'card_key': card_key,
+                    'mapped': False,
+                    'warnings': [f'No identity mapping found for card {card_key}.'],
+                }
+            }
+        cp = dict(cp_row)
+        cp['confidence'] = {
+            'score': cp['confidence_score'],
+            'label': cp['confidence_label'],
+            'reason': cp['confidence_reason'],
+        }
+        cp_id = cp['canonical_printing_id']
+        # Get variants
+        cur.execute('SELECT * FROM v10_commercial_variants WHERE canonical_printing_id = ?', (cp_id,))
+        variants = [dict(r) for r in cur.fetchall()]
+        # Get SKUs via variants
+        cur.execute('''
+            SELECT * FROM v10_sellable_skus
+            WHERE commercial_variant_id IN (
+                SELECT commercial_variant_id FROM v10_commercial_variants
+                WHERE canonical_printing_id = ?
+            )
+        ''', (cp_id,))
+        skus = [dict(r) for r in cur.fetchall()]
+        # Get external references
+        cur.execute('''
+            SELECT * FROM v10_external_references
+            WHERE entity_type = 'canonical_printing' AND entity_id = ?
+        ''', (cp_id,))
+        refs = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return {'data': {
+            'card_key': card_key,
+            'mapped': True,
+            'canonical_printing': cp,
+            'commercial_variants': variants,
+            'sellable_skus': skus,
+            'external_references': refs,
+        }}
+
+    @app.get('/api/v1/identity/external-references')
+    def v1_identity_external_references(
+        entity_type: str | None = Query(None),
+        entity_id: str | None = Query(None),
+        source_name: str | None = Query(None),
+        source_identifier: str | None = Query(None),
+        confidence_label: str | None = Query(None),
+        limit: int = Query(50, ge=1, le=500),
+        offset: int = Query(0, ge=0),
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        conditions: list[str] = []
+        params: list[Any] = []
+        if entity_type:
+            conditions.append('entity_type = ?')
+            params.append(entity_type)
+        if entity_id:
+            conditions.append('entity_id = ?')
+            params.append(entity_id)
+        if source_name:
+            conditions.append('source_name = ?')
+            params.append(source_name)
+        if source_identifier:
+            conditions.append('source_identifier = ?')
+            params.append(source_identifier)
+        if confidence_label:
+            conditions.append('confidence_label = ?')
+            params.append(confidence_label)
+        where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
+        sql = f"SELECT * FROM v10_external_references{where} ORDER BY entity_id LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        cur.execute(sql, tuple(params))
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+        return {'data': rows, 'meta': {'limit': limit, 'offset': offset, 'count': len(rows)}}
+
 
     return app
 

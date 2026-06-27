@@ -342,6 +342,7 @@ def build_identity(
         canonical_keys_seen.add(canonical_key)
 
         cp_id = _mk_id("cp")
+        cp_created += 1
 
         if not dry_run:
             cur.execute("""
@@ -361,8 +362,6 @@ def build_identity(
                 f"exact core_set_id + local_id group, {len(cards)} card row(s)",
                 now, now,
             ))
-
-        cp_created += 1
 
         # Step 4: Link all card rows to this canonical printing
         for c in cards:
@@ -440,7 +439,8 @@ def build_identity(
                             f"single-card SKU for {cv_key}",
                             now, now,
                         ))
-                    sku_created += 1
+                    if dry_run or cur.rowcount > 0:
+                        sku_created += 1
 
             # Step 7: Internal external reference
             ref_id = _mk_id("er")

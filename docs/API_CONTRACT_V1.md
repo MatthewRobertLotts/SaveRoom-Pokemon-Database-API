@@ -1179,3 +1179,25 @@ Commercial deployment must set configuration explicitly rather than relying on d
 - `POKEMON_DB_PUBLIC_BASE_URL=https://api.example.invalid` when binding publicly
 
 Production validation rejects missing explicit database paths, placeholder or short signing secrets, disabled API-key auth and debug mode. Sensitive values are not printed in startup logs.
+
+#### Identity Commercial Foundation (v10)
+
+`/api/v1/identity/*` provides read-only canonical commercial identity for the card catalogue. It answers: "Which exact printing is this card, and what product unit does it map to?"
+
+| Route | Description | Auth Scope | Status |
+|-------|-------------|------------|--------|
+| `GET /api/v1/identity/health` | Aggregate identity counts and last build info | v1 API key when auth is required | Active |
+| `GET /api/v1/identity/canonical-printings` | List canonical printings with filters | v1 API key when auth is required | Active |
+| `GET /api/v1/identity/canonical-printings/{id}` | Single printing with linked cards and variants | v1 API key when auth is required | Active |
+| `GET /api/v1/identity/cards/{card_key}` | Card-to-identity lookup (mapped/unmapped) | v1 API key when auth is required | Active |
+| `GET /api/v1/identity/sellable-skus` | List sellable SKUs with filters | v1 API key when auth is required | Active |
+| `GET /api/v1/identity/sellable-skus/{id}` | Single SKU detail | v1 API key when auth is required | Active |
+| `GET /api/v1/identity/external-references` | List external system references | v1 API key when auth is required | Active |
+
+**Notes:**
+- Identity is built by `scripts/build_v10_identity.py`. It is idempotent and read-write-safe with v9.2 data.
+- `v10_*` tables are not part of v9.2; they are additive and do not affect existing routes.
+- Canonical keys are stable: `pk_tcg:{core_set_id}-{local_id}-{language}`.
+- Finish values: `normal`, `holo`, `reverse`, `reverse_holo`, `unknown`.
+- All identity is HIGH confidence (set + number evidence) in v10.
+- `GET /api/v1/identity/cards/{card_key}` returns `mapped: false` with warnings for unmapped cards (does not 404).
