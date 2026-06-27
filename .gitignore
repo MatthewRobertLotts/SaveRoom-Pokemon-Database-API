@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 *secret*
+!tests/test_signing_secret.py
 *key*
 *.pem
 *.token

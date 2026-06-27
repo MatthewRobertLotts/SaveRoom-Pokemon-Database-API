@@ -25,6 +25,7 @@ DEFAULT_REPORTS_DIR = PROJECT_DIR / 'full_tcgdex' / 'reports'
 DEFAULT_HOST = '127.0.0.1'
 DEFAULT_PORT = 8765
 DEFAULT_CORS_ORIGINS = ('http://127.0.0.1:8765', 'http://localhost:8765')
+DEFAULT_RUNTIME_ENV = 'development'
 
 ENV_PREFIX = 'POKEMON_DB_'
 
@@ -53,6 +54,13 @@ class PokemonDBSettings:
     signed_url_secret: str | None = None
     skip_search_setup: bool = False
     require_api_key: bool = False
+    runtime_env: str = DEFAULT_RUNTIME_ENV
+    db_source: str = 'default'
+    debug: bool = False
+    public_base_url: str | None = None
+    physical_photo_root: Path | None = None
+    trusted_proxy: bool = False
+    log_level: str = 'INFO'
     # v9.1 — quota limits
     image_hourly_delivery_limit: int = 1000
     image_daily_delivery_limit: int = 5000
@@ -85,6 +93,20 @@ def _split_origins(value: str | None) -> tuple[str, ...] | None:
     return origins
 
 
+def _bool(value: str | None, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+def _is_placeholder_secret(value: str | None) -> bool:
+    if not value:
+        return True
+    lowered = value.strip().lower()
+    placeholders = {'changeme', 'change-me', 'replace-me', 'replace-with-secure-secret', 'dev-secret'}
+    return lowered in placeholders or 'replace' in lowered or 'placeholder' in lowered
+
+
 def settings_from_env() -> PokemonDBSettings:
     """Build settings from POKEMON_DB_* environment variables and defaults."""
 
@@ -95,8 +117,10 @@ def settings_from_env() -> PokemonDBSettings:
     image_root_raw = _env('IMAGE_ROOT')
     secret_raw = _env('SIGNED_URL_SECRET')
     require_key_raw = _env('REQUIRE_API_KEY')
+    db_raw = _env('DB')
+    runtime_env = (_env('ENV') or DEFAULT_RUNTIME_ENV).strip().lower()
     return PokemonDBSettings(
-        db=_path(_env('DB')) or DEFAULT_DB,
+        db=_path(db_raw) or DEFAULT_DB,
         ui_dir=_path(_env('UI_DIR')) or DEFAULT_UI_DIR,
         image_cache_dir=image_cache_dir,
         reports_dir=_path(reports_raw) or DEFAULT_REPORTS_DIR,
@@ -106,11 +130,14 @@ def settings_from_env() -> PokemonDBSettings:
         image_root=_path(image_root_raw),
         signed_url_secret=secret_raw or None,
         skip_search_setup=False,
-        require_api_key=(
-            require_key_raw.strip().lower() in {'1', 'true', 'yes', 'on'}
-            if require_key_raw
-            else False
-        ),
+        require_api_key=_bool(require_key_raw),
+        runtime_env=runtime_env,
+        db_source='env' if db_raw else 'default',
+        debug=_bool(_env('DEBUG')),
+        public_base_url=_env('PUBLIC_BASE_URL'),
+        physical_photo_root=_path(_env('PHYSICAL_PHOTO_ROOT')),
+        trusted_proxy=_bool(_env('TRUSTED_PROXY')),
+        log_level=(_env('LOG_LEVEL') or 'INFO').upper(),
     ).with_reports_default()
 
 
@@ -123,6 +150,10 @@ def add_common_args(parser: argparse.ArgumentParser, *, include_server: bool = F
     parser.add_argument('--reports-dir', default=None, help=f'Reports/log output directory (env: {ENV_PREFIX}REPORTS_DIR).')
     parser.add_argument('--cors-origin', action='append', dest='cors_origins', help='Allowed CORS origin. May be repeated. Defaults to local browser origins.')
     parser.add_argument('--image-root', default=None, help=f'Catalogue image storage root (env: {ENV_PREFIX}IMAGE_ROOT).')
+    parser.add_argument('--env', dest='runtime_env', default=None, choices=('development', 'test', 'production'), help=f'Runtime environment name (env: {ENV_PREFIX}ENV).')
+    parser.add_argument('--public-base-url', default=None, help=f'Public base URL for generated links (env: {ENV_PREFIX}PUBLIC_BASE_URL).')
+    parser.add_argument('--physical-photo-root', default=None, help=f'Physical item photo storage root (env: {ENV_PREFIX}PHYSICAL_PHOTO_ROOT).')
+    parser.add_argument('--require-api-key', action='store_true', help=f'Require API keys on /api/v1 routes (env: {ENV_PREFIX}REQUIRE_API_KEY).')
     if include_server:
         parser.add_argument('--host', default=None, help=f'Bind host (env: {ENV_PREFIX}HOST).')
         parser.add_argument('--port', type=int, default=None, help=f'Bind port (env: {ENV_PREFIX}PORT).')
@@ -137,9 +168,11 @@ def settings_from_args(args: argparse.Namespace) -> PokemonDBSettings:
         image_cache_dir = _path(args.image_cache_dir)
     cors_arg = getattr(args, 'cors_origins', None)
     image_root_arg = getattr(args, 'image_root', None)
+    db_arg = getattr(args, 'db', None)
     return replace(
         base,
-        db=_path(getattr(args, 'db', None)) or base.db,
+        db=_path(db_arg) or base.db,
+        db_source='arg' if db_arg else base.db_source,
         ui_dir=_path(getattr(args, 'ui_dir', None)) or base.ui_dir,
         image_cache_dir=image_cache_dir,
         reports_dir=_path(getattr(args, 'reports_dir', None)) or base.reports_dir,
@@ -147,6 +180,10 @@ def settings_from_args(args: argparse.Namespace) -> PokemonDBSettings:
         port=getattr(args, 'port', None) or base.port,
         cors_origins=tuple(origin.rstrip('/') for origin in cors_arg) if cors_arg else base.cors_origins,
         image_root=_path(image_root_arg) or base.image_root,
+        runtime_env=getattr(args, 'runtime_env', None) or base.runtime_env,
+        public_base_url=getattr(args, 'public_base_url', None) or base.public_base_url,
+        physical_photo_root=_path(getattr(args, 'physical_photo_root', None)) or base.physical_photo_root,
+        require_api_key=True if getattr(args, 'require_api_key', False) else base.require_api_key,
     ).with_reports_default()
 
 
@@ -160,6 +197,24 @@ def validate_settings(settings: PokemonDBSettings, *, require_ui: bool = True) -
         errors.append(f'UI directory does not exist or is not a directory: {settings.ui_dir}')
     if settings.image_cache_dir is not None and settings.image_cache_dir.exists() and not settings.image_cache_dir.is_dir():
         errors.append(f'Image cache path exists but is not a directory: {settings.image_cache_dir}')
+    env_name = settings.runtime_env.strip().lower()
+    if env_name not in {'development', 'test', 'production'}:
+        errors.append(f'POKEMON_DB_ENV must be development, test or production; got {settings.runtime_env!r}')
+    if settings.physical_photo_root is not None and settings.physical_photo_root.exists() and not settings.physical_photo_root.is_dir():
+        errors.append(f'Physical photo root exists but is not a directory: {settings.physical_photo_root}')
+    if settings.log_level.upper() not in {'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'}:
+        errors.append(f'POKEMON_DB_LOG_LEVEL must be DEBUG, INFO, WARNING, ERROR or CRITICAL; got {settings.log_level!r}')
+    if env_name == 'production':
+        if settings.db_source == 'default':
+            errors.append('Production requires an explicit database path via POKEMON_DB_DB or --db; refusing to use the development default silently.')
+        if not settings.require_api_key:
+            errors.append('Production requires POKEMON_DB_REQUIRE_API_KEY=1 or --require-api-key.')
+        if settings.debug:
+            errors.append('Production must not run with POKEMON_DB_DEBUG enabled.')
+        if _is_placeholder_secret(settings.signed_url_secret) or len(settings.signed_url_secret or '') < 32:
+            errors.append('Production requires a non-placeholder POKEMON_DB_SIGNED_URL_SECRET with at least 32 characters.')
+        if settings.host not in {'127.0.0.1', 'localhost'} and not settings.public_base_url:
+            errors.append('Production public binds require POKEMON_DB_PUBLIC_BASE_URL so generated URLs are explicit.')
     if errors:
         raise ValueError('; '.join(errors))
     # Validate quota limits are positive
@@ -180,6 +235,8 @@ def public_settings(settings: PokemonDBSettings) -> dict[str, object]:
         'image_cache_mounted': settings.image_cache_mounted,
         'image_cache_url_prefix': '/images' if settings.image_cache_mounted else None,
         'cors_origins': list(settings.cors_origins),
+        'runtime_env': settings.runtime_env,
+        'api_key_required': settings.require_api_key,
     }
 
 
@@ -187,6 +244,8 @@ def startup_lines(settings: PokemonDBSettings, support_status: dict[str, object]
     """Human-facing startup log lines. These are console-only, not public API."""
 
     yield f'DB path: {settings.db}'
+    yield f'Runtime env: {settings.runtime_env}'
+    yield f'DB source: {settings.db_source}'
     yield f'UI dir: {settings.ui_dir}'
     if settings.image_cache_dir is None:
         yield 'Image cache: disabled'
@@ -195,7 +254,14 @@ def startup_lines(settings: PokemonDBSettings, support_status: dict[str, object]
     else:
         yield f'Image cache: not mounted; directory missing: {settings.image_cache_dir}'
     yield f'Reports dir: {settings.reports_dir}'
+    if settings.physical_photo_root is not None:
+        yield f'Physical photo root: {settings.physical_photo_root}'
     yield f'Bind: {settings.host}:{settings.port}'
+    yield f'API key auth: {"required" if settings.require_api_key else "optional/local"}'
+    yield f'Debug: {"on" if settings.debug else "off"}'
+    yield f'Log level: {settings.log_level.upper()}'
+    if settings.public_base_url:
+        yield f'Public base URL: {settings.public_base_url}'
     yield f'CORS origins: {", ".join(settings.cors_origins) if settings.cors_origins else "none"}'
     if support_status:
         yield 'Cache rows: v2_card_search={v2_card_search_rows}, fts={fts_rows}, api_cache={api_cache_rows}, refreshed={refreshed}'.format(
