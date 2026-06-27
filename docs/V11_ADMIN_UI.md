@@ -2,61 +2,87 @@
 
 Tags: #type/project #status/needs-review
 
-Status: NOT_IMPLEMENTED
+Status: IMPLEMENTED
 Date: 2026-06-27
 Branch: v11-pricing-intelligence-foundation
 
 ## Overview
 
-The thin admin UI for v11 market evidence inspection has **not been implemented** in this phase.
+The v11 Market Evidence admin UI is implemented as a panel in the existing browser UI (`pokemon_db_v2_browser_ui/`). It provides read-only inspection of TCGdex-sourced pricing evidence attached to v10 canonical identity.
 
-## Current State
+## How to Open
 
-The v11 API provides all the data endpoints needed for an admin UI:
-- `/api/v1/prices/sources` — source registry
-- `/api/v1/prices/sources/{source_code}/health` — source health
-- `/api/v1/prices/observations` — observation list with filtering
-- `/api/v1/prices/observations/{observation_id}` — observation detail with matches
-- `/api/v1/prices/aggregate/{target_type}/{target_id}` — aggregate valuations
-- `/api/v1/prices/refresh/{target_type}/{target_id}` — manual refresh
+1. Start the API server: `POKEMON_DB_REQUIRE_API_KEY= python pokemon_db_v2_fastapi.py`
+2. Open http://127.0.0.1:8765/ui/
+3. Scroll down to the "v11 Pricing Evidence" panel (below the existing Pricing Dashboard)
 
-## Planned Views
+## Views / Features
 
-| View | Purpose | API Endpoint |
-|------|---------|-------------|
-| Source Health | Show source status, last success/failure | `GET /api/v1/prices/sources/{code}/health` |
-| Evidence Panel | Show observations + aggregates for a card | `GET /api/v1/prices/observations` + `aggregate` |
-| Observation Detail | Show raw payload, match confidence, source | `GET /api/v1/prices/observations/{id}` |
-| Manual Refresh | Trigger refresh for a target | `POST /api/v1/prices/refresh/...` |
-| Problem Cases | List low-confidence / stale observations | `GET /api/v1/prices/observations?confidence=LOW` |
+### Source Health View
 
-## Implementation Status
+- Click "Check source health" to see TCGdex status (healthy/degraded/failing)
+- Shows response time and last success timestamp
 
-**Deferred to v11.0 follow-up / v11.1.**
+### SKU/Card Evidence Panel
 
-The backend refresh pipeline works end-to-end. The admin UI requires a thin React/Vue layer over the API endpoints. This is intentionally deferred because:
+- Enter a target ID (e.g., `cp-001` or a card key like `en:sv03-223`)
+- Optionally filter by currency (USD/EUR)
+- Click "Load evidence" to fetch observations and aggregates
 
-1. The API contract is stable and can be consumed by any frontend.
-2. The primary v11.0 goal is evidence pipeline correctness, not UI.
-3. The `/api/v1/prices/refresh` endpoint can be called directly via `curl` for manual testing.
+### Observation List / Detail
 
-## How to Test Without UI
+The observations table shows:
+- Observation ID
+- Marketplace source (tcgplayer / cardmarket)
+- Amount
+- Currency
+- Finish (normal / reverse_holo / holo / unknown)
+- Listing type (market_price / active_listing)
+- Match confidence (HIGH / MEDIUM / LOW / UNUSABLE) with color coding
+- Match reason (why confidence was assigned)
 
-```bash
-# Check source health
-curl http://localhost:8765/api/v1/prices/sources/tcgdex/health
+### Aggregate Explanation
 
-# List observations for a card
-curl "http://localhost:8765/api/v1/prices/observations?canonical_printing_id=cp-001"
+For each (currency, listing_type, finish) bucket:
+- Median price
+- Low / High range
+- Observation count
+- Confidence label and reason
 
-# Trigger refresh
-curl -X POST http://localhost:8765/api/v1/prices/refresh/canonical_printing/cp-sv03-125
+### Manual Refresh
 
-# View aggregates
-curl http://localhost:8765/api/v1/prices/aggregate/canonical_printing/cp-001
-```
+- Click "Refresh evidence" to trigger a TCGdex fetch for the entered target
+- Confirmation dialog before executing
+- Shows result (completed/failed) with counts
+
+## What It Answers
+
+- **What source returned**: Observations show marketplace (tcgplayer/cardmarket)
+- **What was cached**: Raw responses stored in `v11_price_source_cache`
+- **What was normalised**: Amount, currency, finish, listing_type columns
+- **What matched**: Match reason explains identity attachment logic
+- **What confidence was assigned**: Color-coded HIGH/MEDIUM/LOW/UNUSABLE
+- **What aggregate was computed**: Median, low, high per bucket
+- **Why exact pricing was or not allowed**: Confidence reason explains finish ambiguity
+
+## Limitations
+
+- Read-only inspection; bulk refresh is not supported (one target at a time)
+- No sold-price evidence (TCGdex provides market prices only)
+- No condition-specific pricing
+- No finish enrichment (90.4% unknown finish remains)
+- Refresh button requires manual target entry; no auto-discovery of targets
+
+## Files Modified
+
+| File | Change |
+|------|--------|
+| `pokemon_db_v2_browser_ui/index.html` | Added evidence panel section |
+| `pokemon_db_v2_browser_ui/styles.css` | Added evidence panel styles |
+| `pokemon_db_v2_browser_ui/app.js` | Added evidence panel JavaScript |
+| `tests/test_v11_admin_ui_smoke.py` | Added 13 smoke tests |
 
 ## Links
 
 - Related: [[V11_PRICE_API]]
-- Related: [[V11_ADMIN_UI]] (this document)
+- Related: [[V11_QUALITY_REPORT]]
