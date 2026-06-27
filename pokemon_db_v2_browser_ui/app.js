@@ -74,29 +74,76 @@ function productTitle(card) {
   return (card.name || 'Unknown card') + number + ' — ' + setName + ' — ' + lang + ' Pokémon Card';
 }
 
-function displayImageUrl(card) {
+function cardKey(card) {
+  if (card.card_key) return card.card_key;
+  if (card.language_code && card.card_id) return card.language_code + ':' + card.card_id;
+  return '';
+}
+
+function imageUrlCandidates(card) {
   const images = card.images || {};
-  // Prefer local gateway path constructed from card_key — works without auth in dev mode
-  if (card.card_key) {
-    return apiBase() + '/api/v1/images/card/' + encodeURIComponent(card.card_key) + '/content?size=medium';
+  const urls = [];
+
+  const addUrl = (url) => {
+    if (!url) return;
+    if (!urls.includes(url)) urls.push(url);
+  };
+
+  // Prefer the backend image gateway when the card can be identified.
+  // The backend route is GET /api/v1/images/card/{card_key}/content.
+  const key = cardKey(card);
+  if (key) {
+    addUrl(apiBase() + '/api/v1/images/card/' + encodeURIComponent(key) + '/content?size=medium');
   }
-  // Fall back to signed URL if available
+
   if (images.signed_image_url) {
-    return images.signed_image_url.startsWith('http') ? images.signed_image_url : apiBase() + images.signed_image_url;
+    addUrl(images.signed_image_url.startsWith('http') ? images.signed_image_url : apiBase() + images.signed_image_url);
   }
+
   if (card.signed_image_url) {
-    return card.signed_image_url.startsWith('http') ? card.signed_image_url : apiBase() + card.signed_image_url;
+    addUrl(card.signed_image_url.startsWith('http') ? card.signed_image_url : apiBase() + card.signed_image_url);
   }
-  // Use local_display_image_url if it's an API gateway path
+
   if (images.local_display_image_url) {
     const url = images.local_display_image_url;
-    if (url.startsWith('/api/v1/')) return apiBase() + url;
-    if (url.startsWith('http')) return url;
+    if (url.startsWith('/api/v1/')) addUrl(apiBase() + url);
+    else if (url.startsWith('http')) addUrl(url);
   }
-  // Fall back to display_image_url (may be external)
-  if (images.display_image_url) return images.display_image_url;
-  if (images.exact_image_url) return images.exact_image_url;
-  return null;
+
+  addUrl(images.display_image_url);
+  addUrl(images.exact_image_url);
+
+  return urls;
+}
+
+function renderImageWithFallback(card, img, noImage, missingText = 'No image') {
+  const imageUrls = imageUrlCandidates(card);
+
+  if (imageUrls.length > 0) {
+    let imageIndex = 0;
+
+    const tryNextImage = () => {
+      if (imageIndex >= imageUrls.length) {
+        img.hidden = true;
+        noImage.hidden = false;
+        noImage.textContent = 'Image failed';
+        return;
+      }
+
+      img.hidden = false;
+      noImage.hidden = true;
+      img.src = imageUrls[imageIndex];
+      imageIndex += 1;
+    };
+
+    img.alt = (card.name || 'Card') + ' image';
+    img.onerror = tryNextImage;
+    tryNextImage();
+  } else {
+    img.hidden = true;
+    noImage.hidden = false;
+    noImage.textContent = missingText;
+  }
 }
 
 function priceBadgeHtml(price) {
@@ -127,13 +174,7 @@ function renderResults(results) {
     badge.textContent = status.label;
     badge.dataset.status = status.className;
 
-    const imageUrl = displayImageUrl(card);
-    if (imageUrl) {
-      img.src = imageUrl;
-      img.alt = (card.name || 'Card') + ' image';
-      noImage.hidden = true;
-      img.onerror = () => { img.hidden = true; noImage.hidden = false; noImage.textContent = 'Image failed'; };
-    } else { img.hidden = true; noImage.hidden = false; }
+    renderImageWithFallback(card, img, noImage);
 
     // Price badge from search results (include_prices=true)
     if (card.price) {
@@ -182,10 +223,7 @@ async function openDetail(summaryCard) {
     modalTitle.textContent = state.selectedDetail.name || 'Card';
     modalKicker.textContent = languageLabel(state.selectedDetail) + ' · ' + state.selectedDetail.card_id + ' · ' + data.elapsed_ms + ' ms';
 
-    const image = displayImageUrl(state.selectedDetail);
-    const imgHtml = image
-      ? '<img class="detail-image" src="' + image + '" alt="' + escapeHtml(state.selectedDetail.name || 'Card') + ' image" />'
-      : '<div class="detail-image no-image">No display image</div>';
+    const imgHtml = '<div class="detail-image-wrap"><img id="detailImage" class="detail-image" alt="" /><div id="detailNoImage" class="detail-image no-image">No image</div></div>';
     const set = state.selectedDetail.set || {};
     const rules = state.selectedDetail.rules_text || {};
 
@@ -209,7 +247,8 @@ async function openDetail(summaryCard) {
     html += '</div></div>';
 
     modalBody.innerHTML = html;
-    
+    renderImageWithFallback(state.selectedDetail, $('detailImage'), $('detailNoImage'), 'No display image');
+
     await loadPriceHistory(state.selectedDetail);
   } catch (error) {
     console.error(error);
