@@ -76,15 +76,24 @@ function productTitle(card) {
 
 function displayImageUrl(card) {
   const images = card.images || {};
-  // Prefer signed URL — works in <img> tags without auth headers
+  // Prefer local gateway path constructed from card_key — works without auth in dev mode
+  if (card.card_key) {
+    return apiBase() + '/api/v1/images/card/' + encodeURIComponent(card.card_key) + '/content?size=medium';
+  }
+  // Fall back to signed URL if available
   if (images.signed_image_url) {
     return images.signed_image_url.startsWith('http') ? images.signed_image_url : apiBase() + images.signed_image_url;
   }
-  // Fall back to card-level signed_image_url (search response)
   if (card.signed_image_url) {
     return card.signed_image_url.startsWith('http') ? card.signed_image_url : apiBase() + card.signed_image_url;
   }
-  // Only permit publicly accessible external URLs (never protected local paths)
+  // Use local_display_image_url if it's an API gateway path
+  if (images.local_display_image_url) {
+    const url = images.local_display_image_url;
+    if (url.startsWith('/api/v1/')) return apiBase() + url;
+    if (url.startsWith('http')) return url;
+  }
+  // Fall back to display_image_url (may be external)
   if (images.display_image_url) return images.display_image_url;
   if (images.exact_image_url) return images.exact_image_url;
   return null;

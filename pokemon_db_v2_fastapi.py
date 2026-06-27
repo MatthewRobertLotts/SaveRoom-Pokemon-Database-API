@@ -912,7 +912,7 @@ def resolve_image_asset(conn: sqlite3.Connection, image_id: int) -> dict[str, An
         'language_code': row[3],
         'source_type': row[4],
         'source_language_code': row[5],
-        'image_path': str(row[6]).lstrip('/'),
+        'image_path': re.sub(r'^/?images/', '', str(row[6])).lstrip('/'),
         'source_hash': row[7],
     }
 
@@ -941,7 +941,7 @@ def resolve_preferred_card_image(conn: sqlite3.Connection, card_key: str) -> dic
         'language_code': row[3],
         'source_type': row[4],
         'source_language_code': row[5],
-        'image_path': str(row[6]).lstrip('/'),
+        'image_path': re.sub(r'^/?images/', '', str(row[6])).lstrip('/'),
         'source_hash': row[7],
     }
 
@@ -1096,7 +1096,7 @@ def _resolve_card_image(conn: sqlite3.Connection, card_key: str) -> dict[str, An
     set_info = detail.get('set', {})
     source_type = images.get('display_image_source_type')
     return {
-        'image_path': str(local_url).lstrip('/'),
+        'image_path': re.sub(r'^/?images/', '', str(local_url)).lstrip('/'),
         'card_key': canonical_card_key(lang, cid),
         'set_id': set_info.get('resolved_set_id') or set_info.get('core_set_id'),
         'language_code': lang,
