@@ -112,6 +112,35 @@ Price summaries should prefer recommended raw inputs, excluding graded/bundles/n
 
 Live RapidAPI fetches are deliberately out of scope for read-only public v1 endpoints. Fetching/updating prices remains under internal `/api/prices/*` until pricing auth, quota, billing, and abuse controls are production-grade.
 
+## v11 Market Evidence Endpoints (2026-06-27)
+
+v11 adds a new pricing evidence pipeline under `/api/v1/prices/`. These endpoints provide structured, source-attached pricing evidence from the TCGdex market API.
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| GET | `/api/v1/prices/sources` | List registered pricing sources |
+| GET | `/api/v1/prices/sources/{source_code}/health` | Source health status |
+| GET | `/api/v1/prices/observations` | List price observations with filtering |
+| GET | `/api/v1/prices/observations/{id}` | Observation detail with identity matches |
+| GET | `/api/v1/prices/aggregate/{target_type}/{target_id}` | Aggregate valuation |
+| POST | `/api/v1/prices/refresh/{target_type}/{target_id}` | Trigger manual evidence refresh |
+
+### v11 Confidence Model
+
+| Confidence | Meaning |
+|------------|---------|
+| HIGH | Exact match: set code + collector number + variant + language |
+| MEDIUM | Match with some ambiguity (e.g., exact identity but unknown finish) |
+| LOW | Name-only match or stale data |
+| UNUSABLE | Too broad, wrong language, or otherwise unsafe |
+
+### v11 Pricing Levels
+
+- Canonical printing indicative value: allowed
+- Commercial variant value: allowed when evidence supports it
+- SKU exact value: allowed only for HIGH-confidence matches with known finish
+- Inferred finish-specific value: **not allowed** in v11.0
+
 ## Pagination standard
 
 List endpoints use offset/limit pagination:
