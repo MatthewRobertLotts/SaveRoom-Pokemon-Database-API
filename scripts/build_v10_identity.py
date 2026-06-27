@@ -462,7 +462,8 @@ def build_identity(
                     "internal_source_card_id", c["card_id"], "exact",
                     1.0, "HIGH", "internal_source_id", now, now, "active",
                 ))
-            er_created += 1
+            if dry_run or cur.rowcount > 0:
+                er_created += 1
 
     if not dry_run:
         conn.commit()
