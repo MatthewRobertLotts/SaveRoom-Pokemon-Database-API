@@ -825,3 +825,130 @@ class IdentityBuildRunSummaryV1(BaseModel):
     commercial_variants_created: int = 0
     sellable_skus_created: int = 0
     notes: str | None = None
+
+
+# ── v12 app-ready card detail contract ──────────────────────────────────
+
+
+class AppReadyProviderStatusV1(BaseModel):
+    role: str
+    status: str
+    live_enabled: bool = False
+    terms_confirmed: bool = False
+    notes: str | None = None
+
+
+class AppReadyProviderStatusMapV1(BaseModel):
+    uk_ebay_sold: AppReadyProviderStatusV1 | None = None
+    tcgdex: AppReadyProviderStatusV1 | None = None
+    justtcg: AppReadyProviderStatusV1 | None = None
+    cardmarket: AppReadyProviderStatusV1 | None = None
+    tcgplayer: AppReadyProviderStatusV1 | None = None
+
+
+class AppReadyPriceV1(BaseModel):
+    amount: float | None = None
+    currency: str
+    region: str | None = None
+    price_type: str
+    source: str | None = None
+    evidence_count: int = 0
+    confidence: str | None = None
+    original_currency: str | None = None
+    original_amount: float | None = None
+    fx_rate: float | None = None
+    fx_rate_source: str | None = None
+    fx_rate_timestamp: str | None = None
+
+
+class AppReadySourceBreakdownV1(BaseModel):
+    tier: int | None = None
+    source: str
+    currency: str
+    price_type: str
+    evidence_count: int = 0
+    median_gbp: float | None = None
+    low_gbp: float | None = None
+    high_gbp: float | None = None
+    sample_date: str | None = None
+
+
+class AppReadyEvidenceSummaryV1(BaseModel):
+    total_evidence: int = 0
+    uk_evidence: int = 0
+    uk_tier_1_source: str | None = None
+    has_uk_sold_evidence: bool = False
+    has_converted_evidence: bool = False
+    oldest_evidence_date: str | None = None
+    newest_evidence_date: str | None = None
+
+
+class AppReadyCardV1(BaseModel):
+    card_key: str
+    card_id: str | None = None
+    canonical_printing_id: str | None = None
+    name: str | None = None
+    name_english: str | None = None
+    language_code: str | None = None
+    number: str | None = None
+    rarity: str | None = None
+    supertype: str | None = None
+    subtypes: list[str] | None = None
+
+
+class AppReadySetV1(BaseModel):
+    set_id: str | None = None
+    set_code: str | None = None
+    name: str | None = None
+    localized_name: str | None = None
+    release_date: str | None = None
+    language_code: str | None = None
+
+
+class AppReadyImageV1(BaseModel):
+    primary_image_url: str | None = None
+    thumbnail_url: str | None = None
+    signed_image_url: str | None = None
+    has_local_image: bool = False
+    image_policy_status: str | None = None
+    missing_image: bool = True
+    fallbacks: list[str] | None = None
+
+
+class AppReadyCommercialV1(BaseModel):
+    canonical_printing: dict[str, Any] | None = None
+    commercial_variants: list[dict[str, Any]] | None = None
+    sellable_skus: list[dict[str, Any]] | None = None
+    external_references: list[dict[str, Any]] | None = None
+
+
+class AppReadyPricingV1(BaseModel):
+    primary_price: AppReadyPriceV1 | None = None
+    fallback_price: AppReadyPriceV1 | None = None
+    source_breakdown: list[AppReadySourceBreakdownV1] | None = None
+    evidence_summary: AppReadyEvidenceSummaryV1 | None = None
+    confidence: str | None = None
+    warnings: list[str] | None = None
+    last_refresh: str | None = None
+
+
+class AppReadyMetadataV1(BaseModel):
+    api_version: str = "v1"
+    contract: str = "v12-app-ready-card-detail"
+    generated_at: str
+    request: dict[str, Any] | None = None
+
+
+class AppReadyCardDetailResponseV1(BaseModel):
+    data: AppReadyCardDetailDataV1
+    warnings: list[str] | None = None
+    metadata: AppReadyMetadataV1 | None = None
+
+
+class AppReadyCardDetailDataV1(BaseModel):
+    card: AppReadyCardV1
+    set: AppReadySetV1 | None = None
+    images: AppReadyImageV1 | None = None
+    commercial: AppReadyCommercialV1 | None = None
+    pricing: AppReadyPricingV1 | None = None
+    provider_status: AppReadyProviderStatusMapV1 | None = None

@@ -2,7 +2,7 @@
 
 Tags: #type/project #status/needs-review
 
-Status: DRAFT — proposed v12 contract, not implemented yet
+Status: IMPLEMENTED (endpoint live, live UK pricing not connected)
 Date: 2026-06-28
 Branch: v12-app-readiness-next
 
@@ -10,7 +10,7 @@ Branch: v12-app-readiness-next
 
 Define what scanner/POS/inventory/web/listing tools need from pricing responses. This contract ensures the API returns a consistent, consumer-ready shape that downstream applications can rely on without interpreting raw source data.
 
-**This is a proposed v12 contract draft. Do not claim implementation exists yet.**
+**This contract is implemented as of 2026-06-28.** The endpoint `GET /api/v1/cards/{card_key}/detail` returns this shape. Live UK eBay sold/completed pricing is not yet connected — `primary_price` will be null until a real UK external source is connected. No external API calls are made by this endpoint.
 
 ## Response sections
 

@@ -54,17 +54,17 @@ Identify gaps between what the current API provides and what the six app-ready c
 
 **Consumers affected:** all 6.
 
-**Current state:** scanner/POS/inventory/web/listing/external API consumers must call multiple endpoints (identity, pricing, images, variants, SKUs) and assemble the card detail themselves.
+**Current state:** RESOLVED. The `GET /api/v1/cards/{card_key}/detail` endpoint exists and returns a combined payload with identity, set, images, commercial variants/SKUs, pricing summary shell, provider status, and warnings.
 
-**Required:** a single `GET /api/v1/cards/{type}/detail/{id}` (or similar) that returns canonical identity + localized display + set info + image manifest + variants + SKUs + UK-first pricing summary + fallback evidence summary + confidence + warnings in one response.
+**Required:** ~~a single `GET /api/v1/cards/{type}/detail/{id}` endpoint that returns canonical identity + localized display + set info + image manifest + variants + SKUs + UK-first pricing summary + fallback evidence summary + confidence + warnings in one response.~~
 
 ### Gap 2: No UK-first pricing summary
 
 **Consumers affected:** scanner, POS, inventory, web, listing, external API.
 
-**Current state:** v11 pricing endpoints return TCGdex-only evidence. No GBP headline, no source breakdown, no tier labelling, no FX conversion metadata.
+**Current state:** PARTIALLY RESOLVED. The v12 app-ready endpoint returns a pricing summary shell with `primary_price`, `fallback_price`, `source_breakdown`, `confidence`, `warnings`, and `provider_status`. The shape is in place. However, `primary_price` is always null because the live UK eBay sold/completed source is not yet connected. Existing local evidence (TCGdex/legacy) is used as fallback only, correctly labelled as non-UK evidence.
 
-**Required:** pricing summary section in the card detail response with `primary_price`, `fallback_price`, `source_breakdown`, `confidence`, `warnings`, `provider_status`.
+**Required:** ~~pricing summary section in the card detail response with `primary_price`, `fallback_price`, `source_breakdown`, `confidence`, `warnings`, `provider_status`.~~
 
 ### Gap 3: No fallback evidence summary
 

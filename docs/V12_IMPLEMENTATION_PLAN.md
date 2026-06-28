@@ -49,7 +49,8 @@ Scanner, POS, inventory, web tracker and listing assistant all need one reliable
 
 ### Slice 1: App-ready card detail response
 
-- **Endpoint:** `GET /api/v1/cards/{type}/detail/{id}`
+- **Endpoint:** `GET /api/v1/cards/{card_key}/detail`
+- **Status:** IMPLEMENTED
 - **Effort:** medium
 - **Depends on:** nothing
 - **Unblocks:** all consumer surfaces

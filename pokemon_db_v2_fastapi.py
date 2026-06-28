@@ -123,6 +123,19 @@ from pokemon_db_v5_api_models import (
     PhysicalPhotoDetailResponse,
     PhysicalPhotoItem,
     ScannerScanResponse,  # v7 scanner
+    AppReadyCardDetailResponseV1,
+    AppReadyCardDetailDataV1,
+    AppReadyCardV1,
+    AppReadySetV1,
+    AppReadyImageV1,
+    AppReadyCommercialV1,
+    AppReadyPricingV1,
+    AppReadyPriceV1,
+    AppReadySourceBreakdownV1,
+    AppReadyEvidenceSummaryV1,
+    AppReadyProviderStatusMapV1,
+    AppReadyProviderStatusV1,
+    AppReadyMetadataV1,
 )
 
 # DEFAULT_SETTINGS removed in v9.1 — call settings_from_env() directly
@@ -1887,6 +1900,234 @@ LIMIT ? OFFSET ?
         results = fuzzy_search_names(q, conn, limit=limit)
         return {'data': results}
 
+    # ── /api/v1/cards detail (v12 app-ready) ───────────────────────────
+    # Declared BEFORE the catch-all {card_key:path} route so /detail is not
+    # swallowed by the path converter.
+
+    @app.get('/api/v1/cards/{card_key:path}/detail', response_model=AppReadyCardDetailResponseV1)
+    def v12_app_ready_card_detail(
+        card_key: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        """v12 app-ready card detail endpoint.
+
+        Returns a consumer-ready payload combining canonical identity, set info,
+        image manifest, commercial variants/SKUs, UK-first pricing summary shell,
+        provider status, and warnings.
+
+        Pricing summary shape follows the corrected UK-first external pricing
+        strategy. Live UK eBay sold/completed pricing is not yet implemented —
+        primary_price will be null until a real UK external source is connected.
+        No external API calls are made by this endpoint.
+        """
+        language_code, card_id = parse_card_key(card_key)
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+
+        # ── card existence check ────────────────────────────────────────
+        cur.execute('SELECT 1 FROM v2_card_detail_api_cache WHERE language_code=? AND card_id=? LIMIT 1', (language_code, card_id))
+        if not cur.fetchone():
+            conn.close()
+            raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': canonical_card_key(language_code, card_id)})
+
+        detail, _elapsed_ms = get_card_detail(conn, language_code, card_id)
+        if detail is None:
+            conn.close()
+            raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': canonical_card_key(language_code, card_id)})
+
+        card_info = detail.get('card') or {}
+        set_info = detail.get('set') or {}
+        images = detail.get('images') or {}
+        card_k = canonical_card_key(language_code, card_id)
+        en_name = get_en_name(conn, language_code, card_id, detail.get('name'))
+
+        # ── canonical printing / identity ───────────────────────────────
+        cur.execute('''
+            SELECT cp.* FROM v10_canonical_printings cp
+            JOIN v10_canonical_printing_cards l ON cp.canonical_printing_id = l.canonical_printing_id
+            WHERE l.card_key = ?
+            LIMIT 1
+        ''', (card_k,))
+        cp_row = cur.fetchone()
+        cp_dict: dict[str, Any] | None = None
+        variants: list[dict[str, Any]] = []
+        skus: list[dict[str, Any]] = []
+        ext_refs: list[dict[str, Any]] = []
+        if cp_row:
+            cp_dict = dict(cp_row)
+            cp_id = cp_dict.get('canonical_printing_id')
+            cur.execute('SELECT * FROM v10_commercial_variants WHERE canonical_printing_id = ?', (cp_id,))
+            variants = [dict(r) for r in cur.fetchall()]
+            if variants:
+                cv_ids = [v['commercial_variant_id'] for v in variants]
+                placeholders = ','.join('?' * len(cv_ids))
+                cur.execute(f'SELECT * FROM v10_sellable_skus WHERE commercial_variant_id IN ({placeholders})', cv_ids)
+                skus = [dict(r) for r in cur.fetchall()]
+            cur.execute('''
+                SELECT * FROM v10_external_references
+                WHERE entity_type = 'canonical_printing' AND entity_id = ?
+            ''', (cp_id,))
+            ext_refs = [dict(r) for r in cur.fetchall()]
+
+        # ── image manifest ──────────────────────────────────────────────
+        signed_url = _generate_card_signed_url(conn, card_k, app.state.settings) if app.state.settings else None
+        image_out = {
+            'primary_image_url': images.get('exact_image_url') or images.get('display_image_url'),
+            'thumbnail_url': None,
+            'signed_image_url': signed_url,
+            'has_local_image': bool(images.get('has_exact_image') or images.get('has_display_image')),
+            'image_policy_status': 'signed_gateway' if signed_url else 'no_image',
+            'missing_image': not bool(images.get('has_exact_image') or images.get('has_display_image')),
+            'fallbacks': [],
+        }
+
+        # ── pricing summary (UK-first shell, no live source) ───────────
+        price_evidence = v1_price_summary(conn, language_code, card_id)
+        has_price_evidence = price_evidence.get('evidence_count', 0) > 0
+        warnings_list: list[str] = []
+        warnings_list.append('UK eBay sold/completed source is not yet live. No headline UK market estimate available.')
+
+        primary_price = None
+        fallback_price = None
+        source_breakdown: list[dict[str, Any]] = []
+        confidence: str | None = 'NONE'
+        existing_source: str | None = None
+
+        if has_price_evidence:
+            existing_source = price_evidence.get('source', 'tcgdex')
+            fallback_price = {
+                'amount': price_evidence.get('raw_median'),
+                'currency': price_evidence.get('currency', 'GBP'),
+                'region': 'UK' if existing_source == 'ebay_uk_sold' else None,
+                'price_type': 'market_existing_local',
+                'source': existing_source,
+                'evidence_count': price_evidence.get('evidence_count', 0),
+                'confidence': 'LOW',
+            }
+            source_breakdown.append({
+                'tier': 3 if existing_source == 'tcgdex' else 2,
+                'source': existing_source,
+                'currency': price_evidence.get('currency', 'GBP'),
+                'price_type': 'market',
+                'evidence_count': price_evidence.get('evidence_count', 0),
+                'median_gbp': price_evidence.get('raw_median'),
+                'low_gbp': price_evidence.get('raw_min'),
+                'high_gbp': price_evidence.get('raw_max'),
+                'sample_date': price_evidence.get('latest_fetched_at'),
+            })
+            confidence = 'LOW'
+            warnings_list.append(
+                'Fallback evidence is existing local data, not UK sold-market evidence.'
+            )
+
+        evidence_summary = {
+            'total_evidence': price_evidence.get('evidence_count', 0),
+            'uk_evidence': price_evidence.get('evidence_count', 0) if existing_source == 'ebay_uk_sold' else 0,
+            'uk_tier_1_source': 'ebay_uk' if existing_source == 'ebay_uk_sold' else None,
+            'has_uk_sold_evidence': existing_source == 'ebay_uk_sold',
+            'has_converted_evidence': False,
+            'oldest_evidence_date': None,
+            'newest_evidence_date': price_evidence.get('latest_fetched_at'),
+        }
+
+        pricing_out = {
+            'primary_price': primary_price,
+            'fallback_price': fallback_price,
+            'source_breakdown': source_breakdown,
+            'evidence_summary': evidence_summary,
+            'confidence': confidence,
+            'warnings': warnings_list,
+            'last_refresh': now_utc(),
+        }
+
+        # ── provider status ─────────────────────────────────────────────
+        provider_status = {
+            'uk_ebay_sold': {
+                'role': 'primary_uk_market_evidence',
+                'status': 'planned',
+                'live_enabled': False,
+                'terms_confirmed': False,
+                'notes': 'UK eBay sold/completed external evidence in GBP. Not yet implemented.',
+            },
+            'tcgdex': {
+                'role': 'existing_local_source',
+                'status': 'available',
+                'live_enabled': True,
+                'terms_confirmed': False,
+                'notes': 'Free keyless source. Current local evidence base. Not UK sold evidence.',
+            },
+            'justtcg': {
+                'role': 'supporting_usd_fallback',
+                'status': 'blocked_pending_terms',
+                'live_enabled': False,
+                'terms_confirmed': False,
+                'notes': 'USD external market/current pricing. Blocked pending approved access/terms/caching/fixture/display permissions.',
+            },
+            'cardmarket': {
+                'role': 'supporting_eu_fallback',
+                'status': 'blocked_access_closed',
+                'live_enabled': False,
+                'terms_confirmed': False,
+                'notes': 'Cardmarket direct API not currently accepting applications.',
+            },
+            'tcgplayer': {
+                'role': 'supporting_usd_fallback',
+                'status': 'blocked_pending_access',
+                'live_enabled': False,
+                'terms_confirmed': False,
+                'notes': 'TCGplayer API access is partner/gated. Blocked pending approved access.',
+            },
+        }
+
+        # ── assemble response ───────────────────────────────────────────
+        card_section = {
+            'card_key': card_k,
+            'card_id': card_id,
+            'canonical_printing_id': cp_dict.get('canonical_printing_id') if cp_dict else None,
+            'name': detail.get('name'),
+            'name_english': en_name,
+            'language_code': language_code,
+            'number': detail.get('collector_number'),
+            'rarity': card_info.get('rarity') or cp_dict.get('rarity') if cp_dict else card_info.get('rarity'),
+            'supertype': card_info.get('category'),
+            'subtypes': None,
+        }
+        set_section = {
+            'set_id': set_info.get('resolved_set_id') or set_info.get('raw_set_id'),
+            'set_code': set_info.get('core_set_id'),
+            'name': set_info.get('resolved_set_name'),
+            'localized_name': set_info.get('core_set_name'),
+            'release_date': set_info.get('release_date'),
+            'language_code': language_code,
+        }
+        commercial_section = {
+            'canonical_printing': cp_dict,
+            'commercial_variants': variants,
+            'sellable_skus': skus,
+            'external_references': ext_refs,
+        }
+
+        metadata = {
+            'api_version': 'v1',
+            'contract': 'v12-app-ready-card-detail',
+            'generated_at': now_utc(),
+            'request': {'card_key': card_key},
+        }
+
+        conn.close()
+        return {
+            'data': {
+                'card': card_section,
+                'set': set_section,
+                'images': image_out,
+                'commercial': commercial_section,
+                'pricing': pricing_out,
+                'provider_status': provider_status,
+            },
+            'warnings': warnings_list,
+            'metadata': metadata,
+        }
+
     @app.get('/api/v1/cards/{card_key:path}', response_model=CardDetailResponseV1)
     def v1_card_detail(card_key: str, _: dict[str, Any] = Depends(require_v1_api_key)) -> dict[str, Any]:
         language_code, card_id = parse_card_key(card_key)
@@ -2027,6 +2268,233 @@ LIMIT ? OFFSET ?
             'card_key': card_k,
             'language_code': language_code,
             'card_id': card_id,
+        }
+
+    # ── /api/v1/cards detail (v12 app-ready) ───────────────────────────
+
+    @app.get('/api/v1/cards/{card_key:path}/detail', response_model=AppReadyCardDetailResponseV1)
+    def v12_app_ready_card_detail(
+        card_key: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        """v12 app-ready card detail endpoint.
+
+        Returns a consumer-ready payload combining canonical identity, set info,
+        image manifest, commercial variants/SKUs, UK-first pricing summary shell,
+        provider status, and warnings.
+
+        Pricing summary shape follows the corrected UK-first external pricing
+        strategy. Live UK eBay sold/completed pricing is not yet implemented —
+        primary_price will be null until a real UK external source is connected.
+        No external API calls are made by this endpoint.
+        """
+        language_code, card_id = parse_card_key(card_key)
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+
+        # ── card existence check ────────────────────────────────────────
+        cur.execute('SELECT 1 FROM v2_card_detail_api_cache WHERE language_code=? AND card_id=? LIMIT 1', (language_code, card_id))
+        if not cur.fetchone():
+            conn.close()
+            raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': canonical_card_key(language_code, card_id)})
+
+        detail, _elapsed_ms = get_card_detail(conn, language_code, card_id)
+        if detail is None:
+            conn.close()
+            raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': canonical_card_key(language_code, card_id)})
+
+        card_info = detail.get('card') or {}
+        set_info = detail.get('set') or {}
+        images = detail.get('images') or {}
+        card_k = canonical_card_key(language_code, card_id)
+        en_name = get_en_name(conn, language_code, card_id, detail.get('name'))
+
+        # ── canonical printing / identity ───────────────────────────────
+        cur.execute('''
+            SELECT cp.* FROM v10_canonical_printings cp
+            JOIN v10_canonical_printing_cards l ON cp.canonical_printing_id = l.canonical_printing_id
+            WHERE l.card_key = ?
+            LIMIT 1
+        ''', (card_k,))
+        cp_row = cur.fetchone()
+        cp_dict: dict[str, Any] | None = None
+        variants: list[dict[str, Any]] = []
+        skus: list[dict[str, Any]] = []
+        ext_refs: list[dict[str, Any]] = []
+        if cp_row:
+            cp_dict = dict(cp_row)
+            cp_id = cp_dict.get('canonical_printing_id')
+            cur.execute('SELECT * FROM v10_commercial_variants WHERE canonical_printing_id = ?', (cp_id,))
+            variants = [dict(r) for r in cur.fetchall()]
+            if variants:
+                cv_ids = [v['commercial_variant_id'] for v in variants]
+                placeholders = ','.join('?' * len(cv_ids))
+                cur.execute(f'SELECT * FROM v10_sellable_skus WHERE commercial_variant_id IN ({placeholders})', cv_ids)
+                skus = [dict(r) for r in cur.fetchall()]
+            cur.execute('''
+                SELECT * FROM v10_external_references
+                WHERE entity_type = 'canonical_printing' AND entity_id = ?
+            ''', (cp_id,))
+            ext_refs = [dict(r) for r in cur.fetchall()]
+
+        # ── image manifest ──────────────────────────────────────────────
+        signed_url = _generate_card_signed_url(conn, card_k, app.state.settings) if app.state.settings else None
+        image_out = {
+            'primary_image_url': images.get('exact_image_url') or images.get('display_image_url'),
+            'thumbnail_url': None,
+            'signed_image_url': signed_url,
+            'has_local_image': bool(images.get('has_exact_image') or images.get('has_display_image')),
+            'image_policy_status': 'signed_gateway' if signed_url else 'no_image',
+            'missing_image': not bool(images.get('has_exact_image') or images.get('has_display_image')),
+            'fallbacks': [],
+        }
+
+        # ── pricing summary (UK-first shell, no live source) ───────────
+        price_evidence = v1_price_summary(conn, language_code, card_id)
+        has_price_evidence = price_evidence.get('evidence_count', 0) > 0
+        warnings_list: list[str] = []
+        warnings_list.append('UK eBay sold/completed source is not yet live. No headline UK market estimate available.')
+
+        primary_price = None
+        fallback_price = None
+        source_breakdown: list[dict[str, Any]] = []
+        confidence: str | None = 'NONE'
+
+        if has_price_evidence:
+            # Existing local evidence is TCGdex/legacy data, not UK sold evidence.
+            # Treat as fallback only, clearly labelled.
+            existing_source = price_evidence.get('source', 'tcgdex')
+            fallback_price = {
+                'amount': price_evidence.get('raw_median'),
+                'currency': price_evidence.get('currency', 'GBP'),
+                'region': 'UK' if existing_source == 'ebay_uk_sold' else None,
+                'price_type': 'market_existing_local',
+                'source': existing_source,
+                'evidence_count': price_evidence.get('evidence_count', 0),
+                'confidence': 'LOW',
+            }
+            source_breakdown.append({
+                'tier': 3 if existing_source == 'tcgdex' else 2,
+                'source': existing_source,
+                'currency': price_evidence.get('currency', 'GBP'),
+                'price_type': 'market',
+                'evidence_count': price_evidence.get('evidence_count', 0),
+                'median_gbp': price_evidence.get('raw_median'),
+                'low_gbp': price_evidence.get('raw_min'),
+                'high_gbp': price_evidence.get('raw_max'),
+                'sample_date': price_evidence.get('latest_fetched_at'),
+            })
+            confidence = 'LOW'
+            warnings_list.append(
+                'Fallback evidence is existing local data, not UK sold-market evidence.'
+            )
+
+        evidence_summary = {
+            'total_evidence': price_evidence.get('evidence_count', 0),
+            'uk_evidence': price_evidence.get('evidence_count', 0) if existing_source == 'ebay_uk_sold' else 0,
+            'uk_tier_1_source': 'ebay_uk' if existing_source == 'ebay_uk_sold' else None,
+            'has_uk_sold_evidence': existing_source == 'ebay_uk_sold',
+            'has_converted_evidence': False,
+            'oldest_evidence_date': None,
+            'newest_evidence_date': price_evidence.get('latest_fetched_at'),
+        }
+
+        pricing_out = {
+            'primary_price': primary_price,
+            'fallback_price': fallback_price,
+            'source_breakdown': source_breakdown,
+            'evidence_summary': evidence_summary,
+            'confidence': confidence,
+            'warnings': warnings_list,
+            'last_refresh': now_utc(),
+        }
+
+        # ── provider status ─────────────────────────────────────────────
+        provider_status = {
+            'uk_ebay_sold': {
+                'role': 'primary_uk_market_evidence',
+                'status': 'planned',
+                'live_enabled': False,
+                'terms_confirmed': False,
+                'notes': 'UK eBay sold/completed external evidence in GBP. Not yet implemented.',
+            },
+            'tcgdex': {
+                'role': 'existing_local_source',
+                'status': 'available',
+                'live_enabled': True,
+                'terms_confirmed': False,
+                'notes': 'Free keyless source. Current local evidence base. Not UK sold evidence.',
+            },
+            'justtcg': {
+                'role': 'supporting_usd_fallback',
+                'status': 'blocked_pending_terms',
+                'live_enabled': False,
+                'terms_confirmed': False,
+                'notes': 'USD external market/current pricing. Blocked pending approved access/terms/caching/fixture/display permissions.',
+            },
+            'cardmarket': {
+                'role': 'supporting_eu_fallback',
+                'status': 'blocked_access_closed',
+                'live_enabled': False,
+                'terms_confirmed': False,
+                'notes': 'Cardmarket direct API not currently accepting applications.',
+            },
+            'tcgplayer': {
+                'role': 'supporting_usd_fallback',
+                'status': 'blocked_pending_access',
+                'live_enabled': False,
+                'terms_confirmed': False,
+                'notes': 'TCGplayer API access is partner/gated. Blocked pending approved access.',
+            },
+        }
+
+        # ── assemble response ───────────────────────────────────────────
+        card_section = {
+            'card_key': card_k,
+            'card_id': card_id,
+            'canonical_printing_id': cp_dict.get('canonical_printing_id') if cp_dict else None,
+            'name': detail.get('name'),
+            'name_english': en_name,
+            'language_code': language_code,
+            'number': detail.get('collector_number'),
+            'rarity': card_info.get('rarity') or cp_dict.get('rarity') if cp_dict else card_info.get('rarity'),
+            'supertype': card_info.get('category'),
+            'subtypes': None,
+        }
+        set_section = {
+            'set_id': set_info.get('resolved_set_id') or set_info.get('raw_set_id'),
+            'set_code': set_info.get('core_set_id'),
+            'name': set_info.get('resolved_set_name'),
+            'localized_name': set_info.get('core_set_name'),
+            'release_date': set_info.get('release_date'),
+            'language_code': language_code,
+        }
+        commercial_section = {
+            'canonical_printing': cp_dict,
+            'commercial_variants': variants,
+            'sellable_skus': skus,
+            'external_references': ext_refs,
+        }
+
+        metadata = {
+            'api_version': 'v1',
+            'contract': 'v12-app-ready-card-detail',
+            'generated_at': now_utc(),
+            'request': {'card_key': card_key},
+        }
+
+        conn.close()
+        return {
+            'data': {
+                'card': card_section,
+                'set': set_section,
+                'images': image_out,
+                'commercial': commercial_section,
+                'pricing': pricing_out,
+                'provider_status': provider_status,
+            },
+            'warnings': warnings_list,
+            'metadata': metadata,
         }
 
     # ── /api/v1/prices ────────────────────────────────────────────────
