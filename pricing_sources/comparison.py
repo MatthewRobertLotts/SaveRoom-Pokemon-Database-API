@@ -345,3 +345,161 @@ def compare_source_pair(
         "fetched_at": b0.get("fetched_at", now),
     }
     return compare_price_aggregates(agg_a, agg_b)
+
+
+def compare_target_aggregates(
+    aggregates: list[dict[str, Any]],
+    *,
+    existing_label: str = "MEDIUM",
+    stale_threshold_days: int = DEFAULT_STALE_DAYS,
+) -> dict[str, Any]:
+    """Compare all source aggregates for a single target.
+
+    Takes a list of aggregate dicts (as read from v11_price_aggregates).
+    Groups them by bucket (currency, listing_type, finish, condition),
+    then compares all source pairs within each bucket.
+
+    Returns a dict with:
+      - target_type, target_id
+      - comparisons: list of ComparisonResult-like dicts
+      - summary: source_count, comparison_count, highest_disagreement,
+                 confidence_note
+
+    Never invents a second source. Never calls external providers.
+    """
+    if not aggregates:
+        return {
+            "target_type": "",
+            "target_id": "",
+            "comparisons": [],
+            "summary": {
+                "source_count": 0,
+                "comparison_count": 0,
+                "highest_disagreement": AgreementBand.INSUFFICIENT_EVIDENCE.value,
+                "confidence_note": "No aggregate evidence available",
+            },
+        }
+
+    # Identify target from first aggregate
+    target_type = str(aggregates[0].get("target_type", ""))
+    target_id = str(aggregates[0].get("target_id", ""))
+
+    # Group aggregates by bucket
+    buckets: dict[tuple[str, str, str, str], list[dict[str, Any]]] = {}
+    for agg in aggregates:
+        key = (
+            str(agg.get("currency", "unknown")).upper(),
+            str(agg.get("listing_type", "unknown")),
+            str(agg.get("finish", "unknown")).lower(),
+            str(agg.get("condition", "unknown")).lower(),
+        )
+        buckets.setdefault(key, []).append(agg)
+
+    comparisons: list[dict[str, Any]] = []
+    highest_band = AgreementBand.AGREE
+    all_source_ids: set[str] = set()
+
+    for bucket_key, aggs in buckets.items():
+        currency, listing_type, finish, condition = bucket_key
+        source_ids = {str(a.get("source_id", "")) for a in aggs}
+        all_source_ids.update(source_ids)
+
+        if len(aggs) < 2:
+            # Only one aggregate in this bucket — cannot compare
+            comparisons.append({
+                "source_a_id": str(aggs[0].get("source_id", "")),
+                "source_b_id": None,
+                "currency": currency,
+                "listing_type": listing_type,
+                "finish": finish,
+                "condition": condition,
+                "source_a_median": aggs[0].get("median_price"),
+                "source_b_median": None,
+                "absolute_difference": None,
+                "percentage_difference": None,
+                "agreement_band": AgreementBand.INSUFFICIENT_EVIDENCE.value,
+                "confidence_impact": ConfidenceImpact.NONE.value,
+                "comparison_reason": "Only one source in this bucket",
+                "is_comparable": False,
+            })
+            highest_band = _worse_band(highest_band, AgreementBand.INSUFFICIENT_EVIDENCE)
+            continue
+
+        # Compare all pairs
+        for i in range(len(aggs)):
+            for j in range(i + 1, len(aggs)):
+                result = compare_price_aggregates(
+                    aggs[i], aggs[j],
+                    existing_label=existing_label,
+                    source_count=len(source_ids),
+                    stale_threshold_days=stale_threshold_days,
+                )
+                comparisons.append({
+                    "source_a_id": result.source_a_id,
+                    "source_b_id": result.source_b_id,
+                    "currency": result.currency,
+                    "listing_type": result.listing_type,
+                    "finish": result.finish,
+                    "condition": result.condition,
+                    "source_a_median": result.source_a_median,
+                    "source_b_median": result.source_b_median,
+                    "absolute_difference": result.absolute_difference,
+                    "percentage_difference": result.percentage_difference,
+                    "agreement_band": result.agreement_band,
+                    "confidence_impact": result.confidence_impact,
+                    "comparison_reason": result.comparison_reason,
+                    "is_comparable": result.is_comparable,
+                })
+                highest_band = _worse_band(highest_band, _band_from_str(result.agreement_band))
+
+    source_count = len(all_source_ids)
+    comparison_count = sum(1 for c in comparisons if c.get("is_comparable"))
+
+    if source_count < 2:
+        confidence_note = "Only one source available"
+    elif comparison_count == 0:
+        confidence_note = "No comparable buckets across sources"
+    elif highest_band == AgreementBand.AGREE:
+        confidence_note = "Sources agree"
+    elif highest_band == AgreementBand.MINOR_DISAGREEMENT:
+        confidence_note = "Sources show minor disagreement"
+    elif highest_band == AgreementBand.MAJOR_DISAGREEMENT:
+        confidence_note = "Sources show major disagreement"
+    else:
+        confidence_note = "Insufficient evidence for comparison"
+
+    return {
+        "target_type": target_type,
+        "target_id": target_id,
+        "comparisons": comparisons,
+        "summary": {
+            "source_count": source_count,
+            "comparison_count": comparison_count,
+            "highest_disagreement": highest_band.value,
+            "confidence_note": confidence_note,
+        },
+    }
+
+
+_BAND_ORDER = {
+    AgreementBand.AGREE: 0,
+    AgreementBand.INSUFFICIENT_EVIDENCE: 1,
+    AgreementBand.MIXED_SEMANTICS: 2,
+    AgreementBand.STALE_SOURCE: 3,
+    AgreementBand.MINOR_DISAGREEMENT: 4,
+    AgreementBand.MAJOR_DISAGREEMENT: 5,
+}
+
+
+def _band_from_str(value: str) -> AgreementBand:
+    try:
+        return AgreementBand(value)
+    except ValueError:
+        return AgreementBand.INSUFFICIENT_EVIDENCE
+
+
+def _worse_band(a: AgreementBand, b: AgreementBand) -> AgreementBand:
+    """Return the more severe of two agreement bands."""
+    if _BAND_ORDER.get(b, 0) > _BAND_ORDER.get(a, 0):
+        return b
+    return a

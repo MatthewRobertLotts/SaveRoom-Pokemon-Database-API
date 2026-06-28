@@ -174,6 +174,60 @@ fetched_at: str  # newest observation fetch behind this aggregate
 source_id: str
 ```
 
+
+## API Endpoint
+
+### `GET /api/v1/prices/comparison/{target_type}/{target_id}`
+
+Read-only endpoint that compares existing source evidence for a target.
+
+**Behavior:**
+- Reads existing `v11_price_observations` rows for the target
+- Computes per-source aggregate buckets (median per source/currency/listing_type/finish/condition)
+- Compares source pairs using the provider-neutral comparison module
+- Returns `INSUFFICIENT_EVIDENCE` when only one source exists
+- Does NOT fetch from any external provider
+- Does NOT invent a second source
+
+**Response shape:**
+```json
+{
+  "data": {
+    "target_type": "canonical_printing",
+    "target_id": "cp-001",
+    "comparisons": [
+      {
+        "source_a_id": "src-tcgdex",
+        "source_b_id": "src-justtcg",
+        "currency": "USD",
+        "listing_type": "market_price",
+        "finish": "normal",
+        "condition": "unknown",
+        "source_a_median": 100.0,
+        "source_b_median": 105.0,
+        "absolute_difference": 5.0,
+        "percentage_difference": 0.0476,
+        "agreement_band": "AGREE",
+        "confidence_impact": "BOOSTED",
+        "comparison_reason": "two sources agree; raised to HIGH",
+        "is_comparable": true
+      }
+    ],
+    "summary": {
+      "source_count": 2,
+      "comparison_count": 1,
+      "highest_disagreement": "AGREE",
+      "confidence_note": "Sources agree"
+    }
+  }
+}
+```
+
+**Limitations:**
+- Only compares evidence already stored in the database
+- Becomes more useful after a real second source is approved and its observations are stored
+- Does not imply pricing certainty
+
 ## Links
 
 - Related: `docs/V11_1_PREFLIGHT.md`
