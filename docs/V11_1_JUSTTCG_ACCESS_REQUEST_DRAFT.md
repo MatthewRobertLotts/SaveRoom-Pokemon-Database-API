@@ -10,6 +10,8 @@ Branch: v11.1-market-evidence-next
 
 Short draft Matthew can send to JustTCG to request access and terms clarification before SaveRoom builds a second-source pricing evidence integration. This draft does not include secrets or private contact details.
 
+> **Strategy note (2026-06-28):** JustTCG is a **supporting/fallback provider** in the corrected UK-first external pricing strategy. It is **not** the core UK pricing source. UK-first pricing intelligence is anchored on UK sold/completed market evidence (eBay UK as the planned primary source). JustTCG's role is USD external market/current pricing, trend/sanity checks, thin-market support, and identifier mapping. See `docs/V12_PRICING_STRATEGY_CORRECTION.md` for the full correction.
+
 ## Message Draft
 
 Subject: JustTCG API access and terms clarification for Pokémon pricing evidence project
@@ -50,12 +52,33 @@ Thanks — I want to make sure SaveRoom uses JustTCG in a compliant way before w
 Best,
 Matthew
 
+## JustTCG Pricing Plans (observed 2026-06-28)
+
+| Plan | Price | Monthly Requests | Daily Requests | Rate Limit | Cards/Request | Support |
+|---|---|---|---|---|---|---|
+| **Free Tier** | $0 | 1,000 | 100 | 10/min | 20 | Basic |
+| **Starter** | $19/mo | 10,000 | 1,000 | 50/min | 100 | Basic |
+| **Professional** | $49/mo | 50,000 | 5,000 | 100/min | 100 | Priority |
+| **Enterprise** | $149/mo | 500,000 | 50,000 | 500/min | 200 | Highest priority |
+
+### Plan notes
+- Free tier is active but has no API key configured yet
+- All plans support all TCGs (not just Pokémon)
+- Starter ($19/mo) is likely the minimum viable plan for development + early production
+- Professional ($49/mo) recommended if SaveRoom launches a paid product
+- Enterprise has custom integration support and priority request routing
+
+### Recommended plan for SaveRoom
+**Starter ($19/mo)** for initial development and testing. Upgrade to Professional ($49/mo) if/when launching a customer-facing product with meaningful traffic.
+
 ## Notes for Matthew
 
 - Do not include an API key in the message.
 - Do not include phone number or private address details.
 - If JustTCG replies with terms, save the response outside Git first and summarize the allowed/blocked points before asking Hermes to code.
 - If they approve fixture saving, collect only the smallest representative payload set needed for adapter tests.
+- The Free Tier (1K/mo) may be sufficient for initial development but will need upgrading for production use.
+- Consider starting with Starter ($19/mo) for comfortable development headroom.
 
 ## Links
 
