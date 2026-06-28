@@ -1,0 +1,44 @@
+{
+  "_metadata": {
+    "provider_code": "internal_synthetic",
+    "fixture_name": "synthetic_pokemon_cards_2026",
+    "source_url_or_doc": "internally generated synthetic data for testing",
+    "captured_at": "2026-06-28",
+    "permission_basis": "internally generated synthetic data, not provider data",
+    "contains_raw_provider_response": false,
+    "allowed_for_unit_tests": true,
+    "notes": "This is synthetic test data. It does not come from JustTCG, Pok\u00e9Wallet, Cardmarket, or any real provider."
+  },
+  "payload": [
+    {
+      "id": "synthetic_001",
+      "name": "Synthetic Charizard VSTAR",
+      "currency": "USD",
+      "amount": 45.5,
+      "finish": "holo",
+      "condition": "unknown",
+      "listing_type": "market_price",
+      "marketplace": "synthetic"
+    },
+    {
+      "id": "synthetic_002",
+      "name": "Synthetic Pikachu Promo",
+      "currency": "USD",
+      "amount": 12.0,
+      "finish": "normal",
+      "condition": "unknown",
+      "listing_type": "market_price",
+      "marketplace": "synthetic"
+    },
+    {
+      "id": "synthetic_003",
+      "name": "Synthetic Mew VMAX",
+      "currency": "USD",
+      "amount": 28.75,
+      "finish": "reverse_holo",
+      "condition": "unknown",
+      "listing_type": "active_listing",
+      "marketplace": "synthetic"
+    }
+  ]
+}
