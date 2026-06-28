@@ -100,6 +100,43 @@ All tests verify default-blocked behavior:
 - Secrets are not printed in decision repr/string
 - Error messages do not include API key value
 
+## Adapter Framework Integration
+
+The access gate is wired into `pricing_sources/base.py`:
+
+- `requires_access_gate()` — defaults to `False` (keyless adapters like TCGdex)
+- `live_calls_enabled(config)` — checks the gate for keyed adapters
+- `require_live_access(config)` — raises `PermissionError` if not allowed
+
+### Future Adapter Checklist
+
+1. Validate provider terms (caching, commercial use, display)
+2. Add env flags to `.env.example`
+3. Add fixture-only tests (no live calls)
+4. Implement adapter with `requires_access_gate() -> True`
+5. Call `self.require_live_access(config)` before every HTTP call
+6. Never log secrets
+7. Document cache/display permissions
+8. Keep adapter disabled by default until terms confirmed
+
+### Example Future Adapter Skeleton
+
+```python
+class JustTCGAdapter(PriceSourceAdapter):
+    @property
+    def source_code(self) -> str:
+        return "justtcg"
+
+    def requires_access_gate(self) -> bool:
+        return True
+
+    def fetch(self, query: dict) -> dict | None:
+        self.require_live_access(os.environ)  # raises if not allowed
+        # ... make HTTP call ...
+```
+
+No live second source is implemented yet. TCGdex remains the current keyless first source.
+
 ## Links
 
 - Related: `docs/V11_2_PREFLIGHT.md`
