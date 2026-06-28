@@ -126,6 +126,18 @@
       <div id="evidenceObservations" class="evidence-observations">
         <p class="muted">Enter a target ID above and click "Load evidence" to inspect observations.</p>
       </div>
+
+      <div class="evidence-comparison">
+        <div class="comparison-controls">
+          <button id="loadComparisonBtn" class="secondary">Compare sources</button>
+          <p class="muted">Read-only cross-source comparison using stored evidence. Does not fetch providers.</p>
+        </div>
+        <div id="evidenceComparison" class="evidence-comparison-results">
+          <p class="muted">Click "Compare sources" to view cross-source agreement for the target above.</p>
+        </div>
+        <div id="comparisonSummary" class="comparison-summary"></div>
+        <div id="comparisonRows" class="comparison-rows"></div>
+      </div>
     </section>
 
     <section id="results" class="grid" aria-live="polite"></section>
@@ -166,7 +178,7 @@
   </template>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="app.js"></script>
+  <script src="app.js?v=20260628-comparison-ui-v1"></script>
   <footer class="legal-footer">
     <p><strong>SaveRoom Pokémon Card Database</strong> is not affiliated with, endorsed by, or sponsored by Nintendo, Creatures Inc., GAME FREAK Inc., or The Pokémon Company. Pokémon and Pokémon character names are trademarks of Nintendo. Card images are sourced from publicly available reference archives. <a href="#terms" onclick="return false;">Terms of Use</a> prohibit bulk harvesting and republishing.</p>
   </footer>

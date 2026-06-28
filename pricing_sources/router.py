@@ -229,6 +229,119 @@ def get_aggregate(
     return {"data": aggregates}
 
 
+@v11_pricing_router.get("/comparison/{target_type}/{target_id:path}")
+def get_comparison(
+    request: Request,
+    target_type: str,
+    target_id: str,
+) -> dict[str, Any]:
+    """Get cross-source comparison for a target.
+
+    Read-only. Reads existing v11_price_observations rows for the target,
+    computes per-source aggregate buckets, and compares them using the
+    provider-neutral comparison module.
+
+    Does NOT fetch from any external provider. Does NOT invent a second
+    source. Returns INSUFFICIENT_EVIDENCE when only one source exists.
+
+    This endpoint becomes more useful after a real second source is
+    approved and its observations are stored.
+    """
+    from pricing_sources.comparison import compare_target_aggregates
+
+    conn = _get_db(request)
+    cur = conn.cursor()
+
+    # Resolve the target's canonical_printing_id for observation lookup
+    canonical_id = None
+    if target_type == "canonical_printing":
+        canonical_id = target_id
+    elif target_type == "commercial_variant":
+        cur.execute("SELECT canonical_printing_id FROM v10_commercial_variants WHERE commercial_variant_id = ?", (target_id,))
+        row = cur.fetchone()
+        if row:
+            canonical_id = row[0]
+    elif target_type == "sellable_sku":
+        cur.execute(
+            "SELECT cv.canonical_printing_id FROM v10_sellable_skus sk "
+            "JOIN v10_commercial_variants cv ON sk.commercial_variant_id = cv.commercial_variant_id "
+            "WHERE sk.sellable_sku_id = ?",
+            (target_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            canonical_id = row[0]
+
+    if not canonical_id:
+        return {"data": compare_target_aggregates([])}
+
+    # Fetch all observations for this canonical printing
+    cur.execute(
+        """SELECT o.source_id, o.currency, o.listing_type, o.finish,
+                  o.condition, o.amount, o.fetched_at
+           FROM v11_price_observations o
+           WHERE o.canonical_printing_id = ?
+           ORDER BY o.fetched_at DESC""",
+        (canonical_id,),
+    )
+    cols = [d[0] for d in cur.description]
+    observations = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+    if not observations:
+        return {"data": compare_target_aggregates([])}
+
+    # Compute per-source aggregate buckets
+    # Group by (source_id, currency, listing_type, finish, condition) and compute median
+    buckets: dict[tuple, dict] = {}
+    for obs in observations:
+        key = (
+            str(obs.get("source_id", "")),
+            str(obs.get("currency", "USD")).upper(),
+            str(obs.get("listing_type", "market_price")),
+            str(obs.get("finish", "unknown")).lower(),
+            str(obs.get("condition", "unknown")).lower(),
+        )
+        bucket = buckets.setdefault(key, {
+            "source_id": key[0],
+            "target_type": target_type,
+            "target_id": target_id,
+            "currency": key[1],
+            "listing_type": key[2],
+            "finish": key[3],
+            "condition": key[4],
+            "fetched_at": obs.get("fetched_at", ""),
+            "amounts": [],
+        })
+        bucket["amounts"].append(float(obs.get("amount", 0)))
+        # Keep the most recent fetched_at
+        if obs.get("fetched_at", "") > bucket.get("fetched_at", ""):
+            bucket["fetched_at"] = obs["fetched_at"]
+
+    # Build aggregate dicts with median
+    aggregates = []
+    for bucket in buckets.values():
+        amounts = sorted(bucket["amounts"])
+        n = len(amounts)
+        if n == 0:
+            continue
+        median = amounts[n // 2] if n % 2 == 1 else (amounts[n // 2 - 1] + amounts[n // 2]) / 2.0
+        aggregates.append({
+            "source_id": bucket["source_id"],
+            "target_type": bucket["target_type"],
+            "target_id": bucket["target_id"],
+            "currency": bucket["currency"],
+            "listing_type": bucket["listing_type"],
+            "finish": bucket["finish"],
+            "condition": bucket["condition"],
+            "median_price": round(median, 2),
+            "computed_at": bucket["fetched_at"],
+            "fetched_at": bucket["fetched_at"],
+        })
+
+    result = compare_target_aggregates(aggregates)
+    return {"data": result}
+
+
 @v11_pricing_router.post("/refresh/{target_type}/{target_id:path}")
 def refresh_evidence(
     request: Request,

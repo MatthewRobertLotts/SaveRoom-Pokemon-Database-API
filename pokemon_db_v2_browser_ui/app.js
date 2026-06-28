@@ -74,20 +74,76 @@ function productTitle(card) {
   return (card.name || 'Unknown card') + number + ' — ' + setName + ' — ' + lang + ' Pokémon Card';
 }
 
-function displayImageUrl(card) {
+function cardKey(card) {
+  if (card.card_key) return card.card_key;
+  if (card.language_code && card.card_id) return card.language_code + ':' + card.card_id;
+  return '';
+}
+
+function imageUrlCandidates(card) {
   const images = card.images || {};
-  // Prefer signed URL — works in <img> tags without auth headers
+  const urls = [];
+
+  const addUrl = (url) => {
+    if (!url) return;
+    if (!urls.includes(url)) urls.push(url);
+  };
+
+  // Prefer the backend image gateway when the card can be identified.
+  // The backend route is GET /api/v1/images/card/{card_key}/content.
+  const key = cardKey(card);
+  if (key) {
+    addUrl(apiBase() + '/api/v1/images/card/' + encodeURIComponent(key) + '/content?size=medium');
+  }
+
   if (images.signed_image_url) {
-    return images.signed_image_url.startsWith('http') ? images.signed_image_url : apiBase() + images.signed_image_url;
+    addUrl(images.signed_image_url.startsWith('http') ? images.signed_image_url : apiBase() + images.signed_image_url);
   }
-  // Fall back to card-level signed_image_url (search response)
+
   if (card.signed_image_url) {
-    return card.signed_image_url.startsWith('http') ? card.signed_image_url : apiBase() + card.signed_image_url;
+    addUrl(card.signed_image_url.startsWith('http') ? card.signed_image_url : apiBase() + card.signed_image_url);
   }
-  // Only permit publicly accessible external URLs (never protected local paths)
-  if (images.display_image_url) return images.display_image_url;
-  if (images.exact_image_url) return images.exact_image_url;
-  return null;
+
+  if (images.local_display_image_url) {
+    const url = images.local_display_image_url;
+    if (url.startsWith('/api/v1/')) addUrl(apiBase() + url);
+    else if (url.startsWith('http')) addUrl(url);
+  }
+
+  addUrl(images.display_image_url);
+  addUrl(images.exact_image_url);
+
+  return urls;
+}
+
+function renderImageWithFallback(card, img, noImage, missingText = 'No image') {
+  const imageUrls = imageUrlCandidates(card);
+
+  if (imageUrls.length > 0) {
+    let imageIndex = 0;
+
+    const tryNextImage = () => {
+      if (imageIndex >= imageUrls.length) {
+        img.hidden = true;
+        noImage.hidden = false;
+        noImage.textContent = 'Image failed';
+        return;
+      }
+
+      img.hidden = false;
+      noImage.hidden = true;
+      img.src = imageUrls[imageIndex];
+      imageIndex += 1;
+    };
+
+    img.alt = (card.name || 'Card') + ' image';
+    img.onerror = tryNextImage;
+    tryNextImage();
+  } else {
+    img.hidden = true;
+    noImage.hidden = false;
+    noImage.textContent = missingText;
+  }
 }
 
 function priceBadgeHtml(price) {
@@ -118,13 +174,7 @@ function renderResults(results) {
     badge.textContent = status.label;
     badge.dataset.status = status.className;
 
-    const imageUrl = displayImageUrl(card);
-    if (imageUrl) {
-      img.src = imageUrl;
-      img.alt = (card.name || 'Card') + ' image';
-      noImage.hidden = true;
-      img.onerror = () => { img.hidden = true; noImage.hidden = false; noImage.textContent = 'Image failed'; };
-    } else { img.hidden = true; noImage.hidden = false; }
+    renderImageWithFallback(card, img, noImage);
 
     // Price badge from search results (include_prices=true)
     if (card.price) {
@@ -173,10 +223,7 @@ async function openDetail(summaryCard) {
     modalTitle.textContent = state.selectedDetail.name || 'Card';
     modalKicker.textContent = languageLabel(state.selectedDetail) + ' · ' + state.selectedDetail.card_id + ' · ' + data.elapsed_ms + ' ms';
 
-    const image = displayImageUrl(state.selectedDetail);
-    const imgHtml = image
-      ? '<img class="detail-image" src="' + image + '" alt="' + escapeHtml(state.selectedDetail.name || 'Card') + ' image" />'
-      : '<div class="detail-image no-image">No display image</div>';
+    const imgHtml = '<div class="detail-image-wrap"><img id="detailImage" class="detail-image" alt="" /><div id="detailNoImage" class="detail-image no-image">No image</div></div>';
     const set = state.selectedDetail.set || {};
     const rules = state.selectedDetail.rules_text || {};
 
@@ -200,7 +247,8 @@ async function openDetail(summaryCard) {
     html += '</div></div>';
 
     modalBody.innerHTML = html;
-    
+    renderImageWithFallback(state.selectedDetail, $('detailImage'), $('detailNoImage'), 'No display image');
+
     await loadPriceHistory(state.selectedDetail);
   } catch (error) {
     console.error(error);
@@ -547,3 +595,85 @@ async function refreshEvidence() {
 $('loadEvidenceBtn').addEventListener('click', loadEvidence);
 $('loadHealthBtn').addEventListener('click', loadHealth);
 $('refreshEvidenceBtn').addEventListener('click', refreshEvidence);
+
+/* ── v11.1 Source Comparison ────────────────────────────────────────── */
+
+const evidenceComparison = $('evidenceComparison');
+const comparisonSummary = $('comparisonSummary');
+const comparisonRows = $('comparisonRows');
+
+function agreementBandClass(band) {
+  if (band === 'AGREE') return 'comparison-agree';
+  if (band === 'MINOR_DISAGREEMENT') return 'comparison-minor';
+  if (band === 'MAJOR_DISAGREEMENT') return 'comparison-major';
+  if (band === 'INSUFFICIENT_EVIDENCE') return 'comparison-insufficient';
+  if (band === 'MIXED_SEMANTICS') return 'comparison-mixed';
+  if (band === 'STALE_SOURCE') return 'comparison-stale';
+  return 'comparison-insufficient';
+}
+
+async function loadComparison() {
+  const target = evidenceTargetId.value.trim();
+  if (!target) {
+    evidenceComparison.innerHTML = '<p class="bad">Please enter a target ID first.</p>';
+    comparisonSummary.innerHTML = '';
+    comparisonRows.innerHTML = '';
+    return;
+  }
+  evidenceComparison.innerHTML = '<p class="muted">Loading comparison…</p>';
+  comparisonSummary.innerHTML = '';
+  comparisonRows.innerHTML = '';
+  try {
+    const d = await getJson('/api/v1/prices/comparison/canonical_printing/' + encodeURIComponent(target));
+    renderComparison(d.data || d);
+  } catch (e) {
+    evidenceComparison.innerHTML = '<p class="bad">Comparison failed: ' + escapeHtml(e.message) + '</p>';
+  }
+}
+
+function renderComparison(data) {
+  const summary = data.summary || {};
+  const comparisons = data.comparisons || [];
+
+  // Render summary
+  let sumHtml = '<div class="comparison-summary-card">';
+  sumHtml += '<h4>Source Comparison</h4>';
+  sumHtml += '<div class="comparison-summary-grid">';
+  sumHtml += '<div><span class="comparison-label">Sources</span><span class="comparison-value">' + escapeHtml(summary.source_count ?? 0) + '</span></div>';
+  sumHtml += '<div><span class="comparison-label">Comparisons</span><span class="comparison-value">' + escapeHtml(summary.comparison_count ?? 0) + '</span></div>';
+  sumHtml += '<div><span class="comparison-label">Highest disagreement</span><span class="comparison-value ' + agreementBandClass(summary.highest_disagreement) + '">' + escapeHtml(summary.highest_disagreement || '—') + '</span></div>';
+  sumHtml += '</div>';
+  sumHtml += '<p class="muted comparison-note">' + escapeHtml(summary.confidence_note || '') + '</p>';
+  sumHtml += '</div>';
+  comparisonSummary.innerHTML = sumHtml;
+
+  // Handle empty / insufficient
+  if (!comparisons.length) {
+    evidenceComparison.innerHTML = '<p class="muted">No comparison data available. Only one source exists or no evidence is stored.</p>';
+    comparisonRows.innerHTML = '';
+    return;
+  }
+
+  // Render comparison rows
+  let rowsHtml = '<table class="comparison-table"><thead><tr>';
+  rowsHtml += '<th>Sources</th><th>Bucket</th><th>A median</th><th>B median</th>';
+  rowsHtml += '<th>Diff</th><th>Band</th><th>Impact</th><th>Reason</th>';
+  rowsHtml += '</tr></thead><tbody>';
+  for (const c of comparisons) {
+    rowsHtml += '<tr>';
+    rowsHtml += '<td>' + escapeHtml(c.source_a_id || '—') + '<br><span class="muted">vs</span><br>' + escapeHtml(c.source_b_id || '—') + '</td>';
+    rowsHtml += '<td>' + escapeHtml(c.currency || '—') + ' · ' + escapeHtml(c.listing_type || '—') + '<br><span class="muted">' + escapeHtml(c.finish || '—') + ' · ' + escapeHtml(c.condition || '—') + '</span></td>';
+    rowsHtml += '<td>' + (c.source_a_median != null ? escapeHtml(c.source_a_median) : '—') + '</td>';
+    rowsHtml += '<td>' + (c.source_b_median != null ? escapeHtml(c.source_b_median) : '—') + '</td>';
+    rowsHtml += '<td>' + (c.percentage_difference != null ? escapeHtml((c.percentage_difference * 100).toFixed(1) + '%') : '—') + '</td>';
+    rowsHtml += '<td class="' + agreementBandClass(c.agreement_band) + '">' + escapeHtml(c.agreement_band || '—') + '</td>';
+    rowsHtml += '<td>' + escapeHtml(c.confidence_impact || '—') + '</td>';
+    rowsHtml += '<td><span class="muted">' + escapeHtml(c.comparison_reason || '') + '</span></td>';
+    rowsHtml += '</tr>';
+  }
+  rowsHtml += '</tbody></table>';
+  comparisonRows.innerHTML = rowsHtml;
+  evidenceComparison.innerHTML = '';
+}
+
+$('loadComparisonBtn').addEventListener('click', loadComparison);
