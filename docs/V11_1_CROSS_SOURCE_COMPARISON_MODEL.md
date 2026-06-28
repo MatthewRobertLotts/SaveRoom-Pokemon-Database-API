@@ -228,6 +228,17 @@ Read-only endpoint that compares existing source evidence for a target.
 - Becomes more useful after a real second source is approved and its observations are stored
 - Does not imply pricing certainty
 
+
+
+## Admin UI
+
+A minimal read-only comparison panel is implemented in `pokemon_db_v2_browser_ui/`:
+- `index.html` adds DOM: `evidenceComparison`, `loadComparisonBtn`, `comparisonSummary`, `comparisonRows`
+- `app.js` adds `loadComparison()` and `renderComparison()` functions
+- `styles.css` adds badge classes: `comparison-agree`, `comparison-minor`, `comparison-major`, `comparison-insufficient`, `comparison-mixed`, `comparison-stale`
+
+The UI is intentionally conservative and does not imply price certainty.
+
 ## Links
 
 - Related: `docs/V11_1_PREFLIGHT.md`

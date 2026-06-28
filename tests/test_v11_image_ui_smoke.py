@@ -12,7 +12,7 @@ from test_gateway_fixture import READER_KEY, gw as _gw_fixture
 
 HERE = Path(__file__).resolve().parent
 UI_DIR = HERE.parent / "pokemon_db_v2_browser_ui"
-CACHE_BUST = "20260627-image-fix-v4"
+CACHE_BUST = "20260628-comparison-ui-v1"
 GATEWAY_ROUTE = "/api/v1/images/card/"
 
 
@@ -52,6 +52,7 @@ def test_index_uses_latest_cache_bust_string() -> None:
     assert f'<script src="app.js?v={CACHE_BUST}"></script>' in html
     assert "20260627-image-gateway-v2" not in html
     assert "20260627-image-fallback-v3" not in html
+    assert "20260627-image-fix-v4" not in html
 
 
 def test_app_has_exactly_one_image_url_candidates_function() -> None:

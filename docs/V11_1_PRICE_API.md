@@ -85,3 +85,26 @@ Read-only endpoint that compares existing source evidence for a target.
 - Implementation: `pricing_sources/router.py` (`get_comparison`)
 - Comparison logic: `pricing_sources/comparison.py` (`compare_target_aggregates`)
 - Tests: `tests/test_v11_1_price_comparison_api.py`
+
+
+## UI Panel
+
+### Browser Comparison Panel
+
+A minimal read-only comparison panel is available in the browser UI under the "v11 Pricing Evidence" section.
+
+**Behavior:**
+- Reuses the existing `evidenceTargetId` input (treated as `canonical_printing`)
+- Calls `GET /api/v1/prices/comparison/canonical_printing/{target}`
+- Does NOT fetch from any external provider
+- Shows source count, comparison count, highest disagreement, and confidence note
+- Renders comparison rows in a table with agreement band badges
+
+**Conservative messaging:**
+- "Only one source available — comparison is not yet possible."
+- "Sources agree within the configured band."
+- "Sources disagree — confidence should be treated cautiously."
+
+**Cache bust:** `app.js?v=20260628-comparison-ui-v1`
+
+**Until a second approved source exists:** the panel will show `INSUFFICIENT_EVIDENCE` for live data.

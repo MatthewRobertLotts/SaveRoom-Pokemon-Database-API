@@ -595,3 +595,85 @@ async function refreshEvidence() {
 $('loadEvidenceBtn').addEventListener('click', loadEvidence);
 $('loadHealthBtn').addEventListener('click', loadHealth);
 $('refreshEvidenceBtn').addEventListener('click', refreshEvidence);
+
+/* ── v11.1 Source Comparison ────────────────────────────────────────── */
+
+const evidenceComparison = $('evidenceComparison');
+const comparisonSummary = $('comparisonSummary');
+const comparisonRows = $('comparisonRows');
+
+function agreementBandClass(band) {
+  if (band === 'AGREE') return 'comparison-agree';
+  if (band === 'MINOR_DISAGREEMENT') return 'comparison-minor';
+  if (band === 'MAJOR_DISAGREEMENT') return 'comparison-major';
+  if (band === 'INSUFFICIENT_EVIDENCE') return 'comparison-insufficient';
+  if (band === 'MIXED_SEMANTICS') return 'comparison-mixed';
+  if (band === 'STALE_SOURCE') return 'comparison-stale';
+  return 'comparison-insufficient';
+}
+
+async function loadComparison() {
+  const target = evidenceTargetId.value.trim();
+  if (!target) {
+    evidenceComparison.innerHTML = '<p class="bad">Please enter a target ID first.</p>';
+    comparisonSummary.innerHTML = '';
+    comparisonRows.innerHTML = '';
+    return;
+  }
+  evidenceComparison.innerHTML = '<p class="muted">Loading comparison…</p>';
+  comparisonSummary.innerHTML = '';
+  comparisonRows.innerHTML = '';
+  try {
+    const d = await getJson('/api/v1/prices/comparison/canonical_printing/' + encodeURIComponent(target));
+    renderComparison(d.data || d);
+  } catch (e) {
+    evidenceComparison.innerHTML = '<p class="bad">Comparison failed: ' + escapeHtml(e.message) + '</p>';
+  }
+}
+
+function renderComparison(data) {
+  const summary = data.summary || {};
+  const comparisons = data.comparisons || [];
+
+  // Render summary
+  let sumHtml = '<div class="comparison-summary-card">';
+  sumHtml += '<h4>Source Comparison</h4>';
+  sumHtml += '<div class="comparison-summary-grid">';
+  sumHtml += '<div><span class="comparison-label">Sources</span><span class="comparison-value">' + escapeHtml(summary.source_count ?? 0) + '</span></div>';
+  sumHtml += '<div><span class="comparison-label">Comparisons</span><span class="comparison-value">' + escapeHtml(summary.comparison_count ?? 0) + '</span></div>';
+  sumHtml += '<div><span class="comparison-label">Highest disagreement</span><span class="comparison-value ' + agreementBandClass(summary.highest_disagreement) + '">' + escapeHtml(summary.highest_disagreement || '—') + '</span></div>';
+  sumHtml += '</div>';
+  sumHtml += '<p class="muted comparison-note">' + escapeHtml(summary.confidence_note || '') + '</p>';
+  sumHtml += '</div>';
+  comparisonSummary.innerHTML = sumHtml;
+
+  // Handle empty / insufficient
+  if (!comparisons.length) {
+    evidenceComparison.innerHTML = '<p class="muted">No comparison data available. Only one source exists or no evidence is stored.</p>';
+    comparisonRows.innerHTML = '';
+    return;
+  }
+
+  // Render comparison rows
+  let rowsHtml = '<table class="comparison-table"><thead><tr>';
+  rowsHtml += '<th>Sources</th><th>Bucket</th><th>A median</th><th>B median</th>';
+  rowsHtml += '<th>Diff</th><th>Band</th><th>Impact</th><th>Reason</th>';
+  rowsHtml += '</tr></thead><tbody>';
+  for (const c of comparisons) {
+    rowsHtml += '<tr>';
+    rowsHtml += '<td>' + escapeHtml(c.source_a_id || '—') + '<br><span class="muted">vs</span><br>' + escapeHtml(c.source_b_id || '—') + '</td>';
+    rowsHtml += '<td>' + escapeHtml(c.currency || '—') + ' · ' + escapeHtml(c.listing_type || '—') + '<br><span class="muted">' + escapeHtml(c.finish || '—') + ' · ' + escapeHtml(c.condition || '—') + '</span></td>';
+    rowsHtml += '<td>' + (c.source_a_median != null ? escapeHtml(c.source_a_median) : '—') + '</td>';
+    rowsHtml += '<td>' + (c.source_b_median != null ? escapeHtml(c.source_b_median) : '—') + '</td>';
+    rowsHtml += '<td>' + (c.percentage_difference != null ? escapeHtml((c.percentage_difference * 100).toFixed(1) + '%') : '—') + '</td>';
+    rowsHtml += '<td class="' + agreementBandClass(c.agreement_band) + '">' + escapeHtml(c.agreement_band || '—') + '</td>';
+    rowsHtml += '<td>' + escapeHtml(c.confidence_impact || '—') + '</td>';
+    rowsHtml += '<td><span class="muted">' + escapeHtml(c.comparison_reason || '') + '</span></td>';
+    rowsHtml += '</tr>';
+  }
+  rowsHtml += '</tbody></table>';
+  comparisonRows.innerHTML = rowsHtml;
+  evidenceComparison.innerHTML = '';
+}
+
+$('loadComparisonBtn').addEventListener('click', loadComparison);
