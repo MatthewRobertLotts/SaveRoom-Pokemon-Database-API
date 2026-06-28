@@ -93,6 +93,21 @@ PriceQuery → TCGdexAdapter.build_queries() → query dicts
          → aggregator → v11_price_aggregates
 ```
 
+## Future Adapter Checklist (v11.2+)
+
+When adding a new keyed/paid provider adapter:
+
+1. **Validate provider terms** — confirm caching, commercial use, display rights
+2. **Add env flags** to `.env.example` (all default to false/empty)
+3. **Add fixture-only tests** using sanitized sample payloads
+4. **Implement adapter** with `requires_access_gate() -> True`
+5. **Call `self.require_live_access(config)`** before every HTTP call
+6. **Never log secrets** — the gate ensures keys never appear in errors
+7. **Document permissions** — what caching/display/commercial rights are granted
+8. **Keep disabled by default** — adapter is inert until explicitly enabled + terms confirmed
+
+See `docs/V11_2_PROVIDER_ACCESS_READINESS.md` and `pricing_sources/provider_access.py`.
+
 ## Links
 
 - Related: [[V11_SOURCE_VALIDATION]]

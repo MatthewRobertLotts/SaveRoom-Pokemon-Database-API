@@ -103,6 +103,11 @@ class PriceSourceAdapter(abc.ABC):
     - Normalising responses into observations
     - Matching observations to v10 identity targets
     - Reporting source health
+
+    Access gate integration:
+    - Keyless/free adapters (like TCGdex) keep default behavior (no gate).
+    - Keyed/paid adapters MUST override ``requires_access_gate()`` to return True
+      and call ``self.require_live_access(config)`` before any HTTP call.
     """
 
     @property
@@ -114,6 +119,42 @@ class PriceSourceAdapter(abc.ABC):
     @abc.abstractmethod
     def source_name(self) -> str:
         """Human-readable source name."""
+
+    def requires_access_gate(self) -> bool:
+        """Whether this adapter requires the provider access gate.
+
+        Keyless/free adapters (TCGdex) return False.
+        Keyed/paid adapters MUST return True.
+        """
+        return False
+
+    def live_calls_enabled(self, config: Mapping[str, str] | None = None) -> bool:
+        """Check if live calls are allowed for this adapter.
+
+        Uses the provider_access gate if requires_access_gate() is True.
+        Keyless adapters always return True.
+        """
+        if not self.requires_access_gate():
+            return True
+        if config is None:
+            return False
+        from pricing_sources.provider_access import provider_is_live_call_allowed
+        return provider_is_live_call_allowed(self.source_code, config)
+
+    def require_live_access(self, config: Mapping[str, str] | None = None) -> None:
+        """Raise PermissionError if live calls are not allowed.
+
+        Keyless adapters are always allowed.
+        Keyed adapters must pass valid config with key + enabled + terms confirmed.
+        """
+        if not self.requires_access_gate():
+            return
+        if config is None:
+            raise PermissionError(
+                f"Adapter '{self.source_code}' requires access gate config but none was provided."
+            )
+        from pricing_sources.provider_access import require_provider_live_access
+        require_provider_live_access(self.source_code, config)
 
     @abc.abstractmethod
     def capabilities(self) -> dict[str, Any]:
@@ -147,6 +188,7 @@ class PriceSourceAdapter(abc.ABC):
 
         The raw response should be JSON-serialisable.
         Implementations must handle network errors gracefully.
+        Keyed adapters MUST call self.require_live_access(config) before HTTP.
         """
 
     @abc.abstractmethod
