@@ -91,9 +91,9 @@ def make_one_card_request(config: dict[str, str]) -> dict:
     api_key = config["POKEMON_PRICE_SOURCE_JUSTTCG_API_KEY"]
     base_url = "https://api.justtcg.com/v1"
 
-    # Use a safe, low-risk query: Charizard from Base Set
-    # This is a well-known card that should return reliably
-    url = f"{base_url}/cards?game=pokemon&name=Charizard&limit=1"
+    # Use a targeted query: specific card (Charizard from Base Set)
+    # with condition/printing to avoid sealed products and loose matches.
+    url = f"{base_url}/cards?game=pokemon&set=base1&name=Charizard&condition=NM&printing=Normal&limit=1"
 
     print(f"Requesting: GET {url}")
     print("(API key is included in header but never printed)")
@@ -241,6 +241,32 @@ def inspect(raw: dict) -> None:
         for k in ("apiPlan", "apiRateLimit"):
             if k in acct_meta:
                 print(f"    {k}: {acct_meta[k]}")
+
+    # ── Sealed-product detection ─────────────────────────────────────
+    print("\n  Sealed-product check:")
+    SEALED_CONDITIONS = {"Sealed"}
+    SEALED_NAME_MARKERS = [
+        "booster box", "booster pack", "etb", "elite trainer box",
+        "display", "tin", "blister", "bundle",
+    ]
+    for card in cards:
+        if not isinstance(card, dict):
+            continue
+        name = str(card.get("name", "")).lower()
+        variants = card.get("variants", [])
+        for v in variants:
+            if not isinstance(v, dict):
+                continue
+            condition = str(v.get("condition", ""))
+            is_sealed_condition = condition in SEALED_CONDITIONS
+            is_sealed_name = any(marker in name for marker in SEALED_NAME_MARKERS)
+            if is_sealed_condition or is_sealed_name:
+                print(f"    WARNING: Result appears to be sealed product, not an individual card.")
+                print(f"    Card: {card.get('name')} | Condition: {condition}")
+                print(f"    Do not use as card fixture.")
+                return
+
+    print("    OK: Result appears to be individual card(s).")
 
 
 # ── Main ──────────────────────────────────────────────────────────────
