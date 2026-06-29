@@ -1233,3 +1233,14 @@ Production validation rejects missing explicit database paths, placeholder or sh
 - Finish values: `normal`, `holo`, `reverse`, `reverse_holo`, `unknown`.
 - All identity is HIGH confidence (set + number evidence) in v10.
 - `GET /api/v1/identity/cards/{card_key}` returns `mapped: false` with warnings for unmapped cards (does not 404).
+
+## v12 Pricing Source Exposure Policy
+
+JustTCG-derived pricing is subject to a terms restriction that prevents its exposure through standalone external developer pricing APIs:
+
+- **SaveRoom ecosystem apps** (internal, admin, customer-facing): JustTCG-derived fields are **allowed** with attribution.
+- **External developer API**: JustTCG-derived fields are **blocked**. Pricing fields from restricted sources are redacted (set to null) and source_breakdown items are removed.
+
+The restriction is enforced by `pricing_sources/exposure_policy.py` and is permanent — it cannot be overridden by env flags.
+
+See `docs/V12_PRICING_SOURCE_EXPOSURE_POLICY.md` for full details.
