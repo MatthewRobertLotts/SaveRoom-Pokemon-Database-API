@@ -101,6 +101,8 @@ def make_one_card_request(config: dict[str, str]) -> dict:
     req = Request(url)
     req.add_header("x-api-key", api_key)
     req.add_header("Accept", "application/json")
+    # Cloudflare blocks default Python UA; send a browser-like one
+    req.add_header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
     try:
         with urlopen(req, timeout=30) as resp:
