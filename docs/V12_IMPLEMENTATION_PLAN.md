@@ -66,10 +66,12 @@ Scanner, POS, inventory, web tracker and listing assistant all need one reliable
 
 ### Slice 3: Chart-ready price history
 
-- **Endpoint:** `GET /api/v1/prices/chart/{type}/{id}`
+- **Endpoint:** `GET /api/v1/prices/chart/cards/{card_key}`
+- **Status:** IMPLEMENTED
 - **Effort:** small
 - **Depends on:** nothing (extends existing history)
 - **Unblocks:** web tracker
+- **Notes:** Time-bucketed price series (day/week/month) from local evidence. Per-source series with percentile points. No live provider calls.
 
 ### Slice 4: Listing assistant endpoint
 
@@ -91,7 +93,7 @@ Scanner, POS, inventory, web tracker and listing assistant all need one reliable
 |---|---|---|---|---|
 || 1. Card detail | 1 | 3-4 | 10-15 | low |
 || 2. Batch detail | 1 | 7 | 22 | low |
-| 3. Chart history | 0 | 1 | 4-6 | low |
+|| 3. Chart history | 1 | 5 | 24 | low |
 | 4. Listing endpoint | 0 | 1 | 4-6 | low |
 | 5. Live adapter | 0 | 3-5 | 10-15 | medium |
 

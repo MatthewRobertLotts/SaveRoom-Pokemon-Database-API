@@ -39,6 +39,7 @@ Initial v1 resources:
 - `POST /api/v1/cards/detail/batch` — v12 batch app-ready card detail (up to 50 card keys, partial success, include_pricing/include_commercial/include_images flags).
 - `GET /api/v1/prices/cards/{card_key}` — future local price summary endpoint.
 - `GET /api/v1/prices/history/cards/{card_key}` — future local price evidence history endpoint.
+- `GET /api/v1/prices/chart/cards/{card_key}` — v12 chart-ready price history (time-bucketed series, day/week/month, per-source percentiles, confidence labels).
 
 Implemented first in v5 phase 1:
 

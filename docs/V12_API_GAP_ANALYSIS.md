@@ -94,7 +94,7 @@ Identify gaps between what the current API provides and what the six app-ready c
 
 **Consumers affected:** web tracker.
 
-**Current state:** price history returns raw observations. No time-series aggregation, no source annotations, no confidence trend.
+**Current state:** RESOLVED. `GET /api/v1/prices/chart/cards/{card_key}` returns time-bucketed price series (day/week/month) with per-source series, percentile points (median/10th/90th), confidence labels, and summary. Reads from local `uk_price_history` only. No live provider calls.
 
 **Required:** chart-ready series format with date buckets, per-source series, confidence trend line.
 

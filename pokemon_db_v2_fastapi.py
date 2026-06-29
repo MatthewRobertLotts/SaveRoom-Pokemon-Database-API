@@ -142,6 +142,11 @@ from pokemon_db_v5_api_models import (
     AppReadyBatchItemErrorV1,
     AppReadyBatchSummaryV1,
     AppReadyBatchDataV1,
+    ChartReadyPriceHistoryResponseV1,
+    ChartReadyPriceHistoryDataV1,
+    ChartReadySeriesV1,
+    ChartReadyPointV1,
+    ChartReadySummaryV1,
 )
 
 # DEFAULT_SETTINGS removed in v9.1 — call settings_from_env() directly
@@ -2421,6 +2426,198 @@ LIMIT ? OFFSET ?
             'card_key': canonical_card_key(language_code, card_id),
             'language_code': language_code,
             'card_id': card_id,
+        }
+
+    # ── /api/v1/prices/chart (v12 chart-ready) ───────────────────────
+
+    @app.get('/api/v1/prices/chart/cards/{card_key:path}', response_model=ChartReadyPriceHistoryResponseV1)
+    def v12_chart_ready_price_history(
+        card_key: str,
+        bucket_size: str = Query('day', description='Time bucket: day, week, month'),
+        source: str | None = Query(None, description='Filter to one source (e.g. ebay_uk_sold)'),
+        include_non_recommended: bool = Query(False, description='Include non-recommended evidence'),
+        limit: int = Query(365, ge=1, le=365, description='Max points per series'),
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        """v12 chart-ready price history endpoint.
+
+        Returns time-bucketed price series from existing local evidence
+        only. No external API calls. Suitable for rendering price charts
+        in the web tracker, inventory views, and listing assistant.
+        """
+        if bucket_size not in ('day', 'week', 'month'):
+            raise v1_error(400, 'invalid_bucket_size', 'bucket_size must be day, week, or month.', {'allowed': ['day', 'week', 'month']})
+
+        language_code, card_id = parse_card_key(card_key)
+        conn = connect(app.state.db)
+        ensure_price_support(conn)
+        cur = conn.cursor()
+
+        cur.execute('SELECT 1 FROM v2_card_detail_api_cache WHERE language_code=? AND card_id=? LIMIT 1', (language_code, card_id))
+        if not cur.fetchone():
+            raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': canonical_card_key(language_code, card_id)})
+
+        # Build evidence filter
+        wh = 'card_id = ? AND language_code = ?'
+        pr: list[Any] = [card_id, language_code]
+        if source:
+            wh += ' AND source = ?'
+            pr.append(source)
+        if not include_non_recommended:
+            wh += ' AND COALESCE(is_recommended_input, 0) = 1'
+
+        # Fetch evidence rows
+        cur.execute(
+            f'SELECT sold_date, price_gbp, source FROM uk_price_history WHERE {wh} ORDER BY sold_date, source',
+            pr,
+        )
+        rows = cur.fetchall()
+
+        card_k = canonical_card_key(language_code, card_id)
+
+        if not rows:
+            return {
+                'data': {
+                    'card_key': card_k,
+                    'series': [],
+                    'summary': {
+                        'has_uk_sold_evidence': False,
+                        'has_fallback_evidence': False,
+                        'primary_source_live': False,
+                        'point_count': 0,
+                    },
+                },
+                'warnings': [
+                    'UK eBay sold/completed source is not yet live.',
+                    'Chart uses existing local fallback evidence only.',
+                    'No price evidence available for this card.',
+                ],
+                'metadata': {
+                    'api_version': 'v1',
+                    'contract': 'v12-chart-ready-price-history',
+                    'generated_at': now_utc(),
+                    'request': {
+                        'card_key': card_k,
+                        'bucket_size': bucket_size,
+                        'source': source,
+                        'include_non_recommended': include_non_recommended,
+                        'limit': limit,
+                    },
+                },
+            }
+
+        # Group by source
+        from collections import defaultdict
+        by_source: dict[str, list[tuple[str, float]]] = defaultdict(list)
+        all_sources: set[str] = set()
+        for sold_date, price_gbp, src in rows:
+            by_source[src].append((sold_date, price_gbp))
+            all_sources.add(src)
+
+        # Bucket function
+        def _bucket_key(date_str: str) -> str:
+            if bucket_size == 'day':
+                return date_str
+            try:
+                d = dt.date.fromisoformat(date_str)
+            except (ValueError, TypeError):
+                return date_str
+            if bucket_size == 'week':
+                # ISO week Monday
+                offset = d.weekday()
+                monday = d - dt.timedelta(days=offset)
+                return monday.isoformat()
+            else:  # month
+                return f'{d.year:04d}-{d.month:02d}-01'
+
+        # Percentile helper
+        def _percentile(sorted_vals: list[float], pct: float) -> float | None:
+            if not sorted_vals:
+                return None
+            idx = pct * (len(sorted_vals) - 1)
+            lo = int(idx)
+            hi = min(lo + 1, len(sorted_vals) - 1)
+            frac = idx - lo
+            return round(sorted_vals[lo] + frac * (sorted_vals[hi] - sorted_vals[lo]), 2)
+
+        # Confidence from evidence count
+        def _confidence(count: int) -> str:
+            if count >= 10:
+                return 'MEDIUM'
+            if count >= 3:
+                return 'LOW'
+            return 'VERY_LOW'
+
+        # Build series
+        series_list: list[dict[str, Any]] = []
+        total_points = 0
+        for src in sorted(by_source.keys()):
+            items = by_source[src]
+            # Group by bucket
+            buckets: dict[str, list[float]] = defaultdict(list)
+            for date_str, price in items:
+                bk = _bucket_key(date_str)
+                buckets[bk].append(price)
+
+            points: list[dict[str, Any]] = []
+            for bk in sorted(buckets.keys()):
+                prices = sorted(buckets[bk])
+                median = _percentile(prices, 0.5)
+                low = _percentile(prices, 0.1)
+                high = _percentile(prices, 0.9)
+                ev_count = len(prices)
+                points.append({
+                    'date': bk,
+                    'median': median,
+                    'low': low,
+                    'high': high,
+                    'evidence_count': ev_count,
+                    'confidence': _confidence(ev_count),
+                })
+
+            # Apply limit
+            if len(points) > limit:
+                points = points[-limit:]
+
+            total_points += len(points)
+            series_list.append({
+                'source': src,
+                'currency': 'GBP',
+                'price_type': 'market_existing_local',
+                'region': 'UK' if 'uk' in src.lower() else None,
+                'points': points,
+            })
+
+        has_uk_sold = 'ebay_uk_sold' in all_sources
+        has_fallback = len(all_sources) > 0
+
+        return {
+            'data': {
+                'card_key': card_k,
+                'series': series_list,
+                'summary': {
+                    'has_uk_sold_evidence': has_uk_sold,
+                    'has_fallback_evidence': has_fallback,
+                    'primary_source_live': False,
+                    'point_count': total_points,
+                },
+            },
+            'warnings': [
+                'UK eBay sold/completed source is not yet live.',
+                'Chart uses existing local fallback evidence only.',
+            ],
+            'metadata': {
+                'api_version': 'v1',
+                'contract': 'v12-chart-ready-price-history',
+                'generated_at': now_utc(),
+                'request': {
+                    'card_key': card_k,
+                    'bucket_size': bucket_size,
+                    'source': source,
+                    'include_non_recommended': include_non_recommended,
+                    'limit': limit,
+                },
+            },
         }
 
     # ── /api/v1/admin/keys ────────────────────────────────────────────

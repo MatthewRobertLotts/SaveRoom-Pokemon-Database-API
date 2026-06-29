@@ -991,3 +991,41 @@ class AppReadyBatchResponseV1(BaseModel):
 class AppReadyBatchDataV1(BaseModel):
     items: list[AppReadyBatchItemV1]
     summary: AppReadyBatchSummaryV1
+
+
+# ── v12 Chart-ready price history models ─────────────────────────────
+
+class ChartReadyPointV1(BaseModel):
+    date: str
+    median: float | None = None
+    low: float | None = None
+    high: float | None = None
+    evidence_count: int = 0
+    confidence: str = 'VERY_LOW'
+
+
+class ChartReadySeriesV1(BaseModel):
+    source: str
+    currency: str = 'GBP'
+    price_type: str = 'market_existing_local'
+    region: str | None = None
+    points: list[ChartReadyPointV1] = []
+
+
+class ChartReadySummaryV1(BaseModel):
+    has_uk_sold_evidence: bool = False
+    has_fallback_evidence: bool = False
+    primary_source_live: bool = False
+    point_count: int = 0
+
+
+class ChartReadyPriceHistoryDataV1(BaseModel):
+    card_key: str
+    series: list[ChartReadySeriesV1] = []
+    summary: ChartReadySummaryV1
+
+
+class ChartReadyPriceHistoryResponseV1(BaseModel):
+    data: Any
+    warnings: list[str] | None = None
+    metadata: Any | None = None

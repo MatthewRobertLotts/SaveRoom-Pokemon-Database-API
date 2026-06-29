@@ -79,3 +79,8 @@ No provider has `terms_confirmed: true`.
 - Related: `docs/API_CONTRACT_V1.md`
 - Implementation: `pokemon_db_v2_fastapi.py` (function `v12_app_ready_card_detail`)
 - Tests: `tests/test_v12_app_ready_card_detail_api.py`
+
+## Related endpoints
+
+- Batch: `POST /api/v1/cards/detail/batch` — see `docs/V12_APP_READY_CARD_DETAIL_BATCH_ENDPOINT.md`
+- Chart-ready price history: `GET /api/v1/prices/chart/cards/{card_key}` — see `docs/V12_CHART_READY_PRICE_HISTORY_PLAN.md`
