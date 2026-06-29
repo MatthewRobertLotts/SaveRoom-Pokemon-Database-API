@@ -106,7 +106,7 @@ v12 planning assumes:
 
 - UK-first external pricing as the platform USP.
 - eBay UK sold/completed as the primary target source (planned, not live).
-- JustTCG as a supporting/fallback provider (blocked pending terms/access).
+- JustTCG as a supporting/fallback provider (terms approved 2026-06-29 with API resale restriction; adapter implementation unblocked for SaveRoom ecosystem apps).
 - Cardmarket and TCGplayer as additional supporting/fallback providers (blocked pending access).
 - No live provider adapters in v12 slice 0.
 - App-readiness work proceeds using the corrected pricing summary shape, with placeholder structure for future live data.

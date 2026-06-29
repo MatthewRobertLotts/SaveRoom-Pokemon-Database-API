@@ -48,7 +48,7 @@ tests/fixtures/pricing_sources/justtcg/
 
 ## Current Status
 
-**No fixtures stored yet.** Waiting for approved provider access and terms confirmation.
+**No fixtures stored yet.** JustTCG fixture storage is now approved (2026-06-29). Fixture collection is unblocked after API key is obtained and configured.
 
 ## Links
 

@@ -44,7 +44,7 @@ Fallback, sanity check, trend and thin-market support only.
 - Region: global/US.
 - Price type: market price / active listing / guide price (not sold).
 - Use: fallback estimate, trend direction, thin-market coverage, identifier mapping.
-- Status: **blocked pending terms/access/caching/fixture/display confirmation.**
+- Status: **JustTCG terms approved (2026-06-29) with restriction.** All permissions confirmed (cache/fixtures/storage/display). **Critical restriction:** JustTCG-derived pricing must NOT be exposed via standalone external developer API. SaveRoom ecosystem apps only. Live adapter unblocked after API key + env flags.
 
 ### Tier 4 — active listings
 

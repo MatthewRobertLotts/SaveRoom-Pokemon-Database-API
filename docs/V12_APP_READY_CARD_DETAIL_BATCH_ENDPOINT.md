@@ -107,7 +107,7 @@ Pricing behaviour matches the single-card endpoint:
 
 ## Provider status behaviour
 
-All provider status fields match the single-card endpoint. No provider has `terms_confirmed: true`. JustTCG remains `blocked_pending_terms`.
+All provider status fields match the single-card endpoint. JustTCG is now `terms_approved_with_restriction` (2026-06-29): approved for SaveRoom ecosystem apps, must not be exposed via standalone external developer pricing API. The adapter must propagate `terms_confirmed: false` until API key is configured and env flags are set.
 
 ## Implementation notes
 

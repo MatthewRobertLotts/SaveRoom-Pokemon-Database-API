@@ -44,11 +44,11 @@ The pricing summary follows the corrected UK-first external pricing strategy.
 |---|---|---|---|
 | uk_ebay_sold | planned | primary_uk_market_evidence | no |
 | tcgdex | available | existing_local_source | yes (free keyless) |
-| justtcg | blocked_pending_terms | supporting_usd_fallback | no |
+| justtcg | terms_approved_with_restriction | supporting_usd_fallback | no |
 | cardmarket | blocked_access_closed | supporting_eu_fallback | no |
 | tcgplayer | blocked_pending_access | supporting_usd_fallback | no |
 
-No provider has `terms_confirmed: true`.
+No provider has `terms_confirmed: true` at the API response level. JustTCG terms are approved (2026-06-29) for SaveRoom ecosystem apps with a restriction against standalone external API resale. The adapter must propagate `terms_confirmed: false` until the API key is configured and env flags are set.
 
 ## Error responses
 

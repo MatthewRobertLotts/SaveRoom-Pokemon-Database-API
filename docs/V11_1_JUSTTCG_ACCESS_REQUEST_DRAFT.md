@@ -2,9 +2,56 @@
 
 Tags: #type/project #status/needs-review
 
-Status: DRAFT
-Date: 2026-06-27
+Status: TERMS_APPROVED_WITH_RESTRICTION
+Date: 2026-06-29
 Branch: v11.1-market-evidence-next
+
+## Terms Approval (2026-06-29)
+
+Matthew received a direct written reply from JustTCG confirming approved access with restriction. Summary:
+
+| Permission | Status |
+|---|---|
+| Commercial backend use | ✅ allowed |
+| Raw API response cache | ✅ allowed (no retention limit stated) |
+| Normalized observation storage | ✅ allowed |
+| Aggregate storage | ✅ allowed |
+| Fixture storage (test payloads) | ✅ allowed |
+| Internal display (admin UI) | ✅ allowed |
+| Customer-facing display | ✅ allowed |
+| Soft attribution | ✅ requested ("Pricing data provided by JustTCG") |
+| Identifier mapping | ✅ allowed |
+| Price semantics | market price (not sold/listing) |
+| Listings in core price | ❌ not to be mixed into core market price |
+| Source currency | USD only |
+| Role | supporting USD market fallback, sanity/trend/mapping |
+
+**Critical restriction:** The integration **cannot be wrapped into a secondary API that acts as a standalone pricing service or competing data product for external parties.**
+
+```
+external_standalone_api_resale_allowed: false
+external_developer_pricing_api_allowed: false for JustTCG-derived pricing
+saveroom_ecosystem_apps_allowed: true
+```
+
+Allowed consumers: SaveRoom scanner, POS, inventory desktop, web tracker, listing assistant, admin panel, customer-facing app.
+Blocked: Selling JustTCG-derived pricing through a standalone external developer API or competing data product.
+
+### Identifier strategy
+
+| Field | Usage |
+|---|---|
+| preferred_match_key | tcgplayerSkuId |
+| fallback_match_key | justtcg_variant_uuid |
+| card.uuid | stable UUID v5 (primary key) |
+
+### Next steps
+
+1. Obtain API key (do NOT commit to Git).
+2. Configure env flags per v11.2 access gate.
+3. Implement fixture-only adapter first.
+4. Test against representative card list from Section G.
+5. Do NOT expose JustTCG-derived pricing through standalone external developer API.
 
 ## Overview
 

@@ -2,8 +2,8 @@
 
 Tags: #type/project #status/needs-review
 
-Status: PROCUREMENT_READY
-Date: 2026-06-27
+Status: TERMS_APPROVED (JustTCG, 2026-06-29) — adapter implementation now unblocked for SaveRoom ecosystem apps only
+Date: 2026-06-29
 Branch: v11.1-market-evidence-next
 Baseline commit: 44ac638
 
