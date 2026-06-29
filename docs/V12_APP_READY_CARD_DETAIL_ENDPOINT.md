@@ -4,7 +4,7 @@ Tags: #type/project #status/implemented
 
 Status: IMPLEMENTED
 Date: 2026-06-29
-Branch: v11-pricing-intelligence-foundation
+Branch: v12-app-readiness-next
 
 ## Endpoint
 

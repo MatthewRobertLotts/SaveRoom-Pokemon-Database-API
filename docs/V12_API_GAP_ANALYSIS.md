@@ -2,9 +2,9 @@
 
 Tags: #type/project #status/needs-review
 
-Status: UPDATED
+Status: ACTIVE
 Date: 2026-06-29
-Branch: v11-pricing-intelligence-foundation
+Branch: v12-app-readiness-next
 
 ## Overview
 
