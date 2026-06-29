@@ -1,14 +1,14 @@
-"""JustTCG pricing source adapter — fixture-only spike.
+"""JustTCG pricing source adapter — gated live fetch.
 
 JustTCG (https://api.justtcg.com/v1) is a structured TCG pricing API
 providing market prices, condition/variant data, and price history for
 Pokémon and other TCGs. Currency is USD only. Price semantics are
 market price (not sold/completed listings).
 
-This adapter is a fixture-only spike. It can normalize fixture payloads
-and would make live HTTP calls ONLY when the access gate is fully
+This adapter makes live HTTP calls ONLY when the access gate is fully
 configured (API key + enabled + terms confirmed). Live fetch is
-gated and will not execute unless all env flags are set.
+gated and will not execute unless all env flags are set. When no
+config is provided, it falls back to fixture_path if configured.
 
 Design: docs/V12_JUSTTCG_FIXTURE_ADAPTER_SPIKE.md
 Terms: docs/V11_1_JUSTTCG_ACCESS_REQUEST_DRAFT.md
@@ -22,6 +22,9 @@ from __future__ import annotations
 
 import json
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -36,6 +39,10 @@ from pricing_sources.base import (
 )
 
 JUSTTCG_BASE_URL = "https://api.justtcg.com/v1"
+JUSTTCG_BROWSER_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
 
 
 class JustTCGAdapter(PriceSourceAdapter):
@@ -100,12 +107,19 @@ class JustTCGAdapter(PriceSourceAdapter):
         }
 
     def health_check(self) -> SourceHealthResult:
-        """Health check. Without live access, reports disabled."""
+        """Health check. With live access, reports config status."""
+        if self.requires_access_gate():
+            live = self.live_calls_enabled()
+            return SourceHealthResult(
+                source_code=self.source_code,
+                status="healthy" if live else "disabled",
+                response_ms=0.0,
+                error_message=None if live else "Live calls not enabled or terms not confirmed",
+            )
         return SourceHealthResult(
             source_code=self.source_code,
-            status="disabled",
+            status="healthy",
             response_ms=0.0,
-            error_message="Fixture-only spike — live calls not configured",
         )
 
     def build_queries(self, query: PriceQuery) -> list[dict[str, Any]]:
@@ -142,7 +156,7 @@ class JustTCGAdapter(PriceSourceAdapter):
         """Fetch from JustTCG. Gated — live calls require full access config.
 
         If a fixture_path is set, loads from fixture instead.
-        Otherwise, requires access gate and would make HTTP call.
+        Otherwise, requires access gate and makes HTTP call.
         """
         # Fixture path for testing
         if self._fixture_path and self._fixture_path.exists():
@@ -151,15 +165,51 @@ class JustTCGAdapter(PriceSourceAdapter):
             except (json.JSONDecodeError, OSError):
                 return None
 
-        # Live fetch — gated
-        if config is not None:
-            self.require_live_access(config)
+        # Live fetch — must have config
+        if config is None:
+            raise PermissionError(
+                f"Adapter '{self.source_code}' requires access gate config to make live API calls. "
+                f"No fixture path configured and no config provided."
+            )
 
-        # If we reach here without config, we can't make live calls
-        raise PermissionError(
-            f"Adapter '{self.source_code}' requires access gate config to make live API calls. "
-            f"No fixture path configured and no config provided."
-        )
+        # Check access gate before any network call
+        self.require_live_access(config)
+
+        # Build URL and make request
+        url = query.get("url") if isinstance(query, dict) and "url" in query else None
+        if url is None:
+            params = query.get("params", {}) if isinstance(query, dict) else {}
+            url = self._build_url(params)
+
+        api_key = config.get("POKEMON_PRICE_SOURCE_JUSTTCG_API_KEY", "")
+        req = urllib.request.Request(url)
+        req.add_header("x-api-key", api_key)
+        req.add_header("Accept", "application/json")
+        req.add_header("User-Agent", JUSTTCG_BROWSER_UA)
+
+        try:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp:
+                body = resp.read().decode("utf-8")
+                return json.loads(body)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace") if e.fp else ""
+            raise RuntimeError(
+                f"JustTCG HTTP {e.code}: {e.reason}. "
+                f"Response: {body[:500]}"
+            ) from e
+        except urllib.error.URLError as e:
+            raise RuntimeError(f"JustTCG network error: {e.reason}") from e
+
+    @staticmethod
+    def _build_url(params: dict[str, Any]) -> str:
+        """Build a JustTCG /v1/cards URL with query parameters."""
+        # Always include game=pokemon unless explicitly overridden
+        query_params = {"game": "pokemon"}
+        query_params.update(params)
+        # Remove None/empty values
+        query_params = {k: v for k, v in query_params.items() if v is not None and v != ""}
+        encoded = urllib.parse.urlencode(query_params, quote_via=urllib.parse.quote)
+        return f"{JUSTTCG_BASE_URL}/cards?{encoded}"
 
     def normalise(self, raw_response: dict[str, Any], query: PriceQuery) -> list[PriceObservationCandidate]:
         """Normalize a JustTCG response into observation candidates.
