@@ -91,9 +91,9 @@ def make_one_card_request(config: dict[str, str]) -> dict:
     api_key = config["POKEMON_PRICE_SOURCE_JUSTTCG_API_KEY"]
     base_url = "https://api.justtcg.com/v1"
 
-    # Use a targeted query: specific card (Charizard from Base Set)
-    # with condition/printing to avoid sealed products and loose matches.
-    url = f"{base_url}/cards?game=pokemon&set=base1&name=Charizard&condition=NM&printing=Normal&limit=1"
+    # Use a broader request with limit=10, then locally filter for
+    # individual cards (avoid sealed products like booster boxes).
+    url = f"{base_url}/cards?game=pokemon&name=Charizard&limit=10"
 
     print(f"Requesting: GET {url}")
     print("(API key is included in header but never printed)")
@@ -138,8 +138,12 @@ def save_raw(raw: dict) -> Path:
 
 # ── Sanitize ──────────────────────────────────────────────────────────
 
-def sanitize(raw: dict) -> dict:
-    """Create a sanitized copy suitable for future fixture use."""
+def sanitize(raw: dict, selected_card: dict | None = None) -> dict:
+    """Create a sanitized copy suitable for future fixture use.
+
+    If selected_card is provided, only that card is included in the
+    sanitized output (not all returned records).
+    """
     # Deep copy
     sanitized = json.loads(json.dumps(raw))
 
@@ -162,6 +166,15 @@ def sanitize(raw: dict) -> dict:
                 strip_meta(v)
 
     strip_meta(sanitized)
+
+    # If a specific card was selected, keep only that one
+    if selected_card is not None:
+        selected_uuid = selected_card.get("uuid")
+        cards = sanitized.get("data", [])
+        if isinstance(cards, list) and selected_uuid:
+            sanitized["data"] = [c for c in cards if isinstance(c, dict) and c.get("uuid") == selected_uuid]
+            sanitized["meta"]["total"] = len(sanitized["data"])
+            sanitized["meta"]["hasMore"] = False
 
     # Add provenance label
     sanitized["_sanitized"] = {
@@ -186,8 +199,8 @@ def save_sanitized(sanitized: dict) -> Path:
 
 # ── Inspect ───────────────────────────────────────────────────────────
 
-def inspect(raw: dict) -> None:
-    """Print non-secret metadata about the response."""
+def inspect(raw: dict) -> dict | None:
+    """Print non-secret metadata about the response. Returns selected card or None."""
     print("\n" + "=" * 60)
     print("RESPONSE INSPECTION")
     print("=" * 60)
@@ -242,31 +255,69 @@ def inspect(raw: dict) -> None:
             if k in acct_meta:
                 print(f"    {k}: {acct_meta[k]}")
 
-    # ── Sealed-product detection ─────────────────────────────────────
-    print("\n  Sealed-product check:")
-    SEALED_CONDITIONS = {"Sealed"}
-    SEALED_NAME_MARKERS = [
-        "booster box", "booster pack", "etb", "elite trainer box",
-        "display", "tin", "blister", "bundle",
-    ]
-    for card in cards:
-        if not isinstance(card, dict):
-            continue
-        name = str(card.get("name", "")).lower()
-        variants = card.get("variants", [])
-        for v in variants:
-            if not isinstance(v, dict):
-                continue
-            condition = str(v.get("condition", ""))
-            is_sealed_condition = condition in SEALED_CONDITIONS
-            is_sealed_name = any(marker in name for marker in SEALED_NAME_MARKERS)
-            if is_sealed_condition or is_sealed_name:
-                print(f"    WARNING: Result appears to be sealed product, not an individual card.")
-                print(f"    Card: {card.get('name')} | Condition: {condition}")
-                print(f"    Do not use as card fixture.")
-                return
+    # ── Card selection ───────────────────────────────────────────────
+    print(f"\n  Raw results returned: {len(cards)}")
+    usable = select_usable_cards(cards)
+    print(f"  Usable individual-card candidates: {len(usable)}")
+    selected = None
+    if usable:
+        selected = usable[0]
+        variants = selected.get("variants", [])
+        first_variant = next((v for v in variants if isinstance(v, dict)), {})
+        print(f"  Selected candidate: {selected.get('name')} / {selected.get('set_name')} / {selected.get('number')}")
+        print(f"    Variant: condition={first_variant.get('condition')} printing={first_variant.get('printing')}")
+    else:
+        print("  NO USABLE INDIVIDUAL CARD FOUND — query needs refinement.")
 
-    print("    OK: Result appears to be individual card(s).")
+    return selected
+
+
+# ── Card selection helpers ───────────────────────────────────────────
+
+SEALED_CONDITIONS = {"Sealed"}
+SEALED_NAME_MARKERS = [
+    "booster box", "booster pack", "etb", "elite trainer box",
+    "display", "tin", "blister", "bundle",
+]
+
+
+def _is_sealed(card: dict) -> bool:
+    """Check if a card record looks like sealed product."""
+    name = str(card.get("name", "")).lower()
+    if any(marker in name for marker in SEALED_NAME_MARKERS):
+        return True
+    for v in card.get("variants", []):
+        if isinstance(v, dict) and str(v.get("condition", "")) in SEALED_CONDITIONS:
+            return True
+    return False
+
+
+def _is_usable(card: dict) -> bool:
+    """Check if a card is a usable individual-card candidate."""
+    if not isinstance(card, dict):
+        return False
+    if _is_sealed(card):
+        return False
+    if not card.get("uuid"):
+        return False
+    if not card.get("name"):
+        return False
+    variants = card.get("variants", [])
+    if not variants:
+        return False
+    for v in variants:
+        if not isinstance(v, dict):
+            continue
+        if str(v.get("condition", "")) in SEALED_CONDITIONS:
+            continue
+        if v.get("uuid") and v.get("tcgplayerSkuId") and v.get("price") is not None:
+            return True
+    return False
+
+
+def select_usable_cards(cards: list) -> list:
+    """Filter raw card list to usable individual-card candidates."""
+    return [c for c in cards if _is_usable(c)]
 
 
 # ── Main ──────────────────────────────────────────────────────────────
@@ -290,13 +341,17 @@ def main():
     raw_path = save_raw(raw)
     print(f"   Saved to: {raw_path}")
 
-    # Step 4: Inspect
+    # Step 4: Inspect and select
     print("\n4. Inspecting response...")
-    inspect(raw)
+    selected = inspect(raw)
 
-    # Step 5: Sanitize
+    if selected is None:
+        print("\n  ABORTING: No usable individual card found. Do not use as fixture.")
+        return
+
+    # Step 5: Sanitize (selected card only)
     print("\n5. Creating sanitized candidate...")
-    sanitized = sanitize(raw)
+    sanitized = sanitize(raw, selected_card=selected)
     sanitized_path = save_sanitized(sanitized)
     print(f"   Saved to: {sanitized_path}")
 
