@@ -34,8 +34,11 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
+
+# Ensure project root is on path so pricing_sources can be imported
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 
