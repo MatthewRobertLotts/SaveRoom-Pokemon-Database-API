@@ -55,3 +55,4 @@ tests/fixtures/pricing_sources/justtcg/
 - Related: `docs/V11_2_PROVIDER_ACCESS_READINESS.md`
 - Related: `docs/V11_2_PREFLIGHT.md`
 - Gate module: `pricing_sources/provider_access.py`
+- JustTCG fixture adapter: `docs/V12_JUSTTCG_FIXTURE_ADAPTER_SPIKE.md`
