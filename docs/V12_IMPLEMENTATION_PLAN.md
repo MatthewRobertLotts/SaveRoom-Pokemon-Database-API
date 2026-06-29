@@ -2,9 +2,9 @@
 
 Tags: #type/project #status/needs-review
 
-Status: PLANNING
-Date: 2026-06-28
-Branch: v12-app-readiness-next
+Status: UPDATED
+Date: 2026-06-29
+Branch: v11-pricing-intelligence-foundation
 
 ## Overview
 
@@ -55,12 +55,14 @@ Scanner, POS, inventory, web tracker and listing assistant all need one reliable
 - **Depends on:** nothing
 - **Unblocks:** all consumer surfaces
 
-### Slice 2: Batch pricing endpoint
+### Slice 2: Batch app-ready card detail endpoint
 
-- **Endpoint:** `POST /api/v1/prices/batch/`
+- **Endpoint:** `POST /api/v1/cards/detail/batch`
+- **Status:** IMPLEMENTED
 - **Effort:** small
-- **Depends on:** Slice 1 (pricing summary logic)
+- **Depends on:** Slice 1 (calls `v12_app_ready_card_detail` per item)
 - **Unblocks:** scanner multi-card, inventory bulk, web collection view
+- **Notes:** Implemented by reusing the single-card function directly. No shared helper refactor. Include flags (pricing/commercial/images) control per-item null masking.
 
 ### Slice 3: Chart-ready price history
 
@@ -87,8 +89,8 @@ Scanner, POS, inventory, web tracker and listing assistant all need one reliable
 
 | Slice | New endpoints | New models | New tests | Code risk |
 |---|---|---|---|---|
-| 1. Card detail | 1 | 3-4 | 10-15 | low |
-| 2. Batch pricing | 0 | 1 | 4-6 | low |
+|| 1. Card detail | 1 | 3-4 | 10-15 | low |
+|| 2. Batch detail | 1 | 7 | 22 | low |
 | 3. Chart history | 0 | 1 | 4-6 | low |
 | 4. Listing endpoint | 0 | 1 | 4-6 | low |
 | 5. Live adapter | 0 | 3-5 | 10-15 | medium |

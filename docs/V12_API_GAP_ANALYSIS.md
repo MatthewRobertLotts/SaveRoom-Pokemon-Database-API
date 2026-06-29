@@ -2,9 +2,9 @@
 
 Tags: #type/project #status/needs-review
 
-Status: DRAFT
-Date: 2026-06-28
-Branch: v12-app-readiness-next
+Status: UPDATED
+Date: 2026-06-29
+Branch: v11-pricing-intelligence-foundation
 
 ## Overview
 
@@ -82,13 +82,13 @@ Identify gaps between what the current API provides and what the six app-ready c
 
 **Required:** `provider_status` section in the card detail response.
 
-### Gap 5: No batch pricing endpoint
+### Gap 5: No batch card detail endpoint
 
 **Consumers affected:** scanner (multi-card), inventory (bulk refresh), web (collection view).
 
-**Current state:** pricing is queried per-card. No batch endpoint.
+**Current state:** RESOLVED. `POST /api/v1/cards/detail/batch` accepts up to 50 card keys and returns per-item results with partial success semantics. Each item returns the same detail payload shape as the single-card endpoint. Include flags (`include_pricing`, `include_commercial`, `include_images`) allow per-request section masking.
 
-**Required:** `POST /api/v1/prices/batch/` with array of card IDs, returning pricing summaries for each.
+**Required:** ~~batch endpoint for multi-card lookups.~~
 
 ### Gap 6: No chart-ready price history
 

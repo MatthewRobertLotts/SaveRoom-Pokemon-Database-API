@@ -36,6 +36,7 @@ Initial v1 resources:
 - `GET /api/v1/search/cards` — paginated card search.
 - `GET /api/v1/images/cards/{card_key}` — future card image metadata/redirect endpoint.
 - `GET /api/v1/cards/{card_key}/detail` — v12 app-ready card detail (identity + set + images + commercial + pricing summary + provider status + warnings).
+- `POST /api/v1/cards/detail/batch` — v12 batch app-ready card detail (up to 50 card keys, partial success, include_pricing/include_commercial/include_images flags).
 - `GET /api/v1/prices/cards/{card_key}` — future local price summary endpoint.
 - `GET /api/v1/prices/history/cards/{card_key}` — future local price evidence history endpoint.
 

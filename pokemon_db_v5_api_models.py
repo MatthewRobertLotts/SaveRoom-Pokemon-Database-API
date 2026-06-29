@@ -952,3 +952,42 @@ class AppReadyCardDetailDataV1(BaseModel):
     commercial: AppReadyCommercialV1 | None = None
     pricing: AppReadyPricingV1 | None = None
     provider_status: AppReadyProviderStatusMapV1 | None = None
+
+
+# ── v12 batch app-ready card detail contract ───────────────────────────
+
+
+class AppReadyBatchRequestV1(BaseModel):
+    card_keys: list[str] = Field(..., min_length=1, max_length=50, description='List of card keys to look up.')
+    include_pricing: bool = True
+    include_commercial: bool = True
+    include_images: bool = True
+
+
+class AppReadyBatchItemErrorV1(BaseModel):
+    code: str
+    message: str
+
+
+class AppReadyBatchItemV1(BaseModel):
+    card_key: str
+    status: str
+    detail: AppReadyCardDetailDataV1 | None = None
+    error: AppReadyBatchItemErrorV1 | None = None
+
+
+class AppReadyBatchSummaryV1(BaseModel):
+    requested: int = 0
+    returned: int = 0
+    errors: int = 0
+
+
+class AppReadyBatchResponseV1(BaseModel):
+    data: Any  # Will be set to AppReadyBatchDataV1 in practice
+    warnings: list[str] | None = None
+    metadata: Any | None = None
+
+
+class AppReadyBatchDataV1(BaseModel):
+    items: list[AppReadyBatchItemV1]
+    summary: AppReadyBatchSummaryV1

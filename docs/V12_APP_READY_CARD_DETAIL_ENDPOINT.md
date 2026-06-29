@@ -3,8 +3,8 @@
 Tags: #type/project #status/implemented
 
 Status: IMPLEMENTED
-Date: 2026-06-28
-Branch: v12-app-readiness-next
+Date: 2026-06-29
+Branch: v11-pricing-intelligence-foundation
 
 ## Endpoint
 
@@ -67,6 +67,7 @@ No provider has `terms_confirmed: true`.
 - Declared BEFORE the catch-all `GET /api/v1/cards/{card_key}` route so the `/detail` suffix is not swallowed by the path converter.
 - Uses existing v10 identity tables (canonical_printings, commercial_variants, sellable_skus, external_references) and v2 card detail cache.
 - 18 new tests added. Full suite: 618 passed, 1 skipped.
+- The assembly logic is extracted into `_build_app_ready_card_detail(conn, card_key, settings)` which is shared with the batch endpoint `POST /api/v1/cards/detail/batch`.
 
 ## Links
 
