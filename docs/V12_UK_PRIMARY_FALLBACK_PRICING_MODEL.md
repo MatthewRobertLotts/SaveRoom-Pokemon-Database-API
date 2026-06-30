@@ -56,7 +56,7 @@ Current classification:
 | `ebay_uk` / `uk_ebay_sold` | `uk_sold_completed` | 1 | Yes | Primary UK evidence |
 | `cardmarket` | `eu_market_reference` | 3 | No | Converted to GBP and UK-adjusted |
 | `totaltcg` | `global_market_reference` | 4 | No | Separate provider from JustTCG |
-| `justtcg` | `global_market_reference` | 4 | No | SaveRoom ecosystem apps only; no standalone external developer pricing API resale |
+| `justtcg` | `global_market_reference` | 4 | No | Market Price: volume-weighted average of completed marketplace sales; SaveRoom-owned app use allowed; no standalone external developer pricing API/data feed |
 | `tcgplayer` | `global_market_reference` | 4 | No | USD/global reference |
 | unknown/active listing sources | `unknown_reference` | 5 | No | Reference only |
 
@@ -213,7 +213,22 @@ uk_adjusted_fallback_price = null
 adjustment_multiplier fields = null
 ```
 
-JustTCG provider status may remain visible as metadata, but JustTCG USD pricing is not used in the recommendation. `_get_justtcg_price_data()` is not called by the recommendation builder. Fallback provider blending remains a future v12 milestone.
+JustTCG provider status may remain visible as metadata, but JustTCG pricing is not used in the recommendation. JustTCG price fields should be labelled as **Market Price** because JustTCG clarified they represent a volume-weighted average of completed marketplace sales. They must not be labelled as UK sold price, UK market price, active listing price, or live listing price. `_get_justtcg_price_data()` is not called by the recommendation builder. Fallback provider blending remains a future v12 milestone.
+
+## JustTCG final terms clarification
+
+JustTCG confirmed SaveRoom-owned apps and tools may use JustTCG-derived pricing through the SaveRoom backend, including paid SaveRoom products such as scanner app, POS system, inventory desktop app, web tracker, listing assistant, admin panel, and customer-facing SaveRoom app.
+
+The external restriction remains strict: SaveRoom must not expose a public standalone pricing API, data feed, or competing data product for third-party developers to fetch JustTCG-derived pricing. External developer API fields derived from JustTCG must be blocked, omitted, or redacted by `pricing_sources/exposure_policy.py`.
+
+Attribution:
+
+```text
+Pricing data provided by JustTCG
+```
+
+If the JustTCG subscription is cancelled, normalized and aggregate JustTCG-derived data already stored in the SaveRoom database may remain permanently, but live updates should stop.
+
 ## How listing assistant should consume this later
 
 The listing assistant should not implement its own pricing model. It should consume:

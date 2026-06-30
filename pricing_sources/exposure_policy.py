@@ -1,9 +1,10 @@
 """Pricing-source exposure policy guard.
 
 Enforces JustTCG terms restriction: JustTCG-derived pricing may be used
-within SaveRoom ecosystem apps (internal, customer-facing) but must NOT
-be exposed through a standalone external developer pricing API or
-competing data product.
+within SaveRoom-owned apps and tools (internal/admin, paid SaveRoom apps,
+and customer-facing SaveRoom apps) but must NOT be exposed through a
+public standalone pricing API, data feed, or competing data product for
+third-party developers.
 
 This policy is enforced in code, not just by documentation. The
 JUSTTCG_EXTERNAL_RESALE_PERMANENTLY_BLOCKED constant makes the
@@ -21,12 +22,33 @@ from typing import Any
 
 SURFACE_SAVEROOM_INTERNAL = "saveroom_internal"
 SURFACE_SAVEROOM_CUSTOMER_APP = "saveroom_customer_app"
+SURFACE_INTERNAL_ADMIN = "internal_admin"
+SURFACE_CUSTOMER_SAVEROOM_APP = "customer_saveroom_app"
+SURFACE_SAVEROOM_OWNED_PAID_APPS = "saveroom_owned_paid_apps"
 SURFACE_EXTERNAL_DEVELOPER_API = "external_developer_api"
+SURFACE_STANDALONE_PRICING_API = "standalone_pricing_api"
 
 ALL_SURFACES = {
     SURFACE_SAVEROOM_INTERNAL,
     SURFACE_SAVEROOM_CUSTOMER_APP,
+    SURFACE_INTERNAL_ADMIN,
+    SURFACE_CUSTOMER_SAVEROOM_APP,
+    SURFACE_SAVEROOM_OWNED_PAID_APPS,
     SURFACE_EXTERNAL_DEVELOPER_API,
+    SURFACE_STANDALONE_PRICING_API,
+}
+
+SAVEROOM_ALLOWED_APP_SURFACES = {
+    SURFACE_SAVEROOM_INTERNAL,
+    SURFACE_SAVEROOM_CUSTOMER_APP,
+    SURFACE_INTERNAL_ADMIN,
+    SURFACE_CUSTOMER_SAVEROOM_APP,
+    SURFACE_SAVEROOM_OWNED_PAID_APPS,
+}
+
+EXTERNAL_BLOCKED_PRICING_SURFACES = {
+    SURFACE_EXTERNAL_DEVELOPER_API,
+    SURFACE_STANDALONE_PRICING_API,
 }
 
 # ── Source constants ──────────────────────────────────────────────────
@@ -40,9 +62,10 @@ SOURCE_TCGPLAYER = "tcgplayer"
 
 # ── Permanent restriction ─────────────────────────────────────────────
 
-# JustTCG terms state that "the integration cannot be wrapped into a
-# secondary API that acts as a standalone pricing service or competing
-# data product for external parties."
+# JustTCG terms allow SaveRoom-owned apps and tools to show JustTCG-derived
+# pricing through the SaveRoom backend, including paid SaveRoom products.
+# The same clarification blocks a public standalone pricing API, data feed,
+# or competing data product for third-party developers.
 # This constant is True and MUST remain True. It cannot be overridden
 # by env flags or config. If JustTCG's terms change in the future,
 # this constant requires an explicit code change + test update + docs
@@ -63,7 +86,11 @@ _SOURCE_RULES: dict[str, dict[str, bool]] = {
     SOURCE_JUSTTCG: {
         SURFACE_SAVEROOM_INTERNAL: True,
         SURFACE_SAVEROOM_CUSTOMER_APP: True,
+        SURFACE_INTERNAL_ADMIN: True,
+        SURFACE_CUSTOMER_SAVEROOM_APP: True,
+        SURFACE_SAVEROOM_OWNED_PAID_APPS: True,
         SURFACE_EXTERNAL_DEVELOPER_API: False,  # permanent restriction
+        SURFACE_STANDALONE_PRICING_API: False,  # permanent restriction
     },
 }
 
@@ -99,12 +126,12 @@ def can_expose_source(
             return allowed
 
     # Default policy:
-    # - Restricted sources are blocked for external developer API
+    # - Restricted sources are blocked for external pricing/API surfaces
     # - All other sources are allowed on all surfaces
-    if surface == SURFACE_EXTERNAL_DEVELOPER_API:
+    if surface in EXTERNAL_BLOCKED_PRICING_SURFACES:
         if source_code in _RESTRICTED_SOURCES:
             return False
-        # Unknown sources are blocked for external developer API by default
+        # Unknown sources are blocked for external pricing/API surfaces by default
         # unless they are in the explicit rules (handled above)
         # Known unrestricted sources pass through
         known_unrestricted = {SOURCE_TCGDEX, SOURCE_UK_EBAY_SOLD, SOURCE_EBAY_UK,
@@ -115,8 +142,8 @@ def can_expose_source(
         # Unknown source — conservative default: block
         return False
 
-    # Internal and customer app surfaces allow all sources by default
-    return True
+    # Internal/admin/customer/SaveRoom-owned paid app surfaces allow all sources by default
+    return surface in SAVEROOM_ALLOWED_APP_SURFACES
 
 
 def filter_price_payload_for_surface(
@@ -129,8 +156,8 @@ def filter_price_payload_for_surface(
     derived from restricted sources. Adds warnings when redaction
     occurs.
 
-    For SaveRoom internal/customer surfaces, returns the payload
-    unchanged (preserving source labels and attribution).
+    For SaveRoom internal/admin/customer/owned-app surfaces, returns the
+    payload unchanged (preserving source labels and attribution).
 
     Args:
         payload: The pricing payload dict to filter.
@@ -139,11 +166,11 @@ def filter_price_payload_for_surface(
     Returns:
         A (possibly modified) copy of the payload.
     """
-    if surface in (SURFACE_SAVEROOM_INTERNAL, SURFACE_SAVEROOM_CUSTOMER_APP):
+    if surface in SAVEROOM_ALLOWED_APP_SURFACES:
         # Internal surfaces see everything — no filtering
         return payload
 
-    if surface == SURFACE_EXTERNAL_DEVELOPER_API:
+    if surface in EXTERNAL_BLOCKED_PRICING_SURFACES:
         result = copy.deepcopy(payload)
         redacted = _redact_blocked_sources_recursive(result, surface)
         if redacted:
@@ -272,8 +299,9 @@ def apply_pricing_exposure_policy(
     This is the main entry point for endpoint code. It filters pricing
     fields based on the requesting surface and adds appropriate warnings.
 
-    For now, all v12 endpoints default to SaveRoom internal/customer
-    surfaces. External developer API mode must be explicitly requested.
+    For now, all v12 endpoints default to SaveRoom internal/admin/customer
+    app surfaces. External developer API or standalone pricing API mode must
+    be explicitly requested and tested.
 
     Args:
         payload: The API response payload.
@@ -294,6 +322,10 @@ def get_source_exposure_metadata(source_code: str) -> dict[str, Any]:
         "source_code": source_code,
         "saveroom_internal_allowed": can_expose_source(source_code, SURFACE_SAVEROOM_INTERNAL),
         "saveroom_customer_app_allowed": can_expose_source(source_code, SURFACE_SAVEROOM_CUSTOMER_APP),
+        "internal_admin_allowed": can_expose_source(source_code, SURFACE_INTERNAL_ADMIN),
+        "customer_saveroom_app_allowed": can_expose_source(source_code, SURFACE_CUSTOMER_SAVEROOM_APP),
+        "saveroom_owned_paid_apps_allowed": can_expose_source(source_code, SURFACE_SAVEROOM_OWNED_PAID_APPS),
         "external_developer_api_allowed": can_expose_source(source_code, SURFACE_EXTERNAL_DEVELOPER_API),
+        "standalone_pricing_api_allowed": can_expose_source(source_code, SURFACE_STANDALONE_PRICING_API),
         "attribution": JUSTTCG_ATTRIBUTION_TEXT if source_code == SOURCE_JUSTTCG else None,
     }

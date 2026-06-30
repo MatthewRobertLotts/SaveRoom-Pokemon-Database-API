@@ -178,7 +178,31 @@ Shape:
 }
 ```
 
-JustTCG provider status may remain visible as metadata elsewhere in the prices response, but JustTCG USD pricing must not influence `data.recommendation` until explicit fallback blending is implemented and covered by exposure policy tests.
+JustTCG provider status may remain visible as metadata elsewhere in the prices response, but JustTCG pricing must not influence `data.recommendation` until explicit fallback blending is implemented and covered by exposure policy tests.
+
+### JustTCG final terms and exposure policy
+
+JustTCG confirmed SaveRoom-owned apps and tools may use JustTCG-derived pricing through the SaveRoom backend, including scanner app, POS system, inventory desktop app, web tracker, listing assistant, admin panel, and customer-facing SaveRoom app. These SaveRoom apps may be paid products.
+
+External developer API and standalone pricing API/data-feed surfaces remain blocked for JustTCG-derived pricing. The API contract must therefore keep the split explicit:
+
+```text
+internal_admin: allowed
+customer_saveroom_app: allowed
+saveroom_owned_paid_apps: allowed
+external_developer_api: blocked/redacted
+standalone_pricing_api: blocked
+```
+
+Attribution wording:
+
+```text
+Pricing data provided by JustTCG
+```
+
+JustTCG price fields should be labelled as **Market Price**. JustTCG clarified this represents a volume-weighted average of completed marketplace sales. Do not label it as UK sold price, UK market price, active listing price, or live listing price.
+
+If the JustTCG subscription is cancelled, normalized and aggregate JustTCG-derived data already stored in the SaveRoom database may remain permanently. Live updates should stop after cancellation.
 
 ## v12 Listing Assistant Endpoint
 

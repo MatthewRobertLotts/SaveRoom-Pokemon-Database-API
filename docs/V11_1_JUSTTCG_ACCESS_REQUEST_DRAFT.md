@@ -8,6 +8,8 @@ Branch: v11.1-market-evidence-next
 
 ## Terms Approval (2026-06-29)
 
+Final clarification is now recorded in `docs/JUSTTCG_TERMS_AND_USAGE.md`. That document is the current terms summary for JustTCG usage. This older access-request draft remains as historical/procurement context.
+
 Matthew received a direct written reply from JustTCG confirming approved access with restriction. Summary:
 
 | Permission | Status |
