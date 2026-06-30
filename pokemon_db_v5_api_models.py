@@ -7,7 +7,7 @@ can change without breaking external clients.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -994,6 +994,34 @@ class AppReadyBatchDataV1(BaseModel):
     items: list[AppReadyBatchItemV1]
     summary: AppReadyBatchSummaryV1
 
+
+# ── v12 Listing Assistant contract ────────────────────────────────────
+
+
+class ListingAssistantRequestV1(BaseModel):
+    platform: Literal['whatnot', 'ebay', 'shopify', 'generic'] = 'generic'
+    condition: str | None = None
+    finish: str | None = None
+    quantity: int = Field(default=1, ge=1)
+    include_images: bool = True
+    include_pricing: bool = True
+    include_commercial: bool = True
+    pricing_strategy: Literal['conservative', 'balanced', 'premium'] = 'balanced'
+    title_style: Literal['compact', 'seo', 'marketplace'] = 'marketplace'
+    notes: str | None = None
+
+
+class ListingAssistantMetadataV1(BaseModel):
+    api_version: str = 'v1'
+    contract: str = 'v12-listing-assistant'
+    generated_at: str
+    request: dict[str, Any] | None = None
+
+
+class ListingAssistantResponseV1(BaseModel):
+    data: dict[str, Any]
+    warnings: list[str] | None = None
+    metadata: ListingAssistantMetadataV1
 
 # ── v12 Chart-ready price history models ─────────────────────────────
 

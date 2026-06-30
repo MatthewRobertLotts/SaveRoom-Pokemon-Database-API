@@ -90,6 +90,8 @@ from pokemon_db_v5_api_models import (
     InventoryValuationBreakdown,
     InventoryValuationResponse,
     LanguageListResponseV1,
+    ListingAssistantRequestV1,
+    ListingAssistantResponseV1,
     PhysicalItemResponse,
     PriceHistoryResponseV1,
     PriceSummaryResponseV1,
@@ -610,6 +612,152 @@ def build_v1_price_recommendation(summary: dict[str, Any], provider_status_summa
         'adjustment_multiplier_sample_size': None,
         'adjustment_basis': None,
         'provider_status_summary': provider_status_summary or {},
+    }
+
+
+PLATFORM_GUIDANCE_V1: dict[str, dict[str, Any]] = {
+    'whatnot': {
+        'title_limit': 80,
+        'description_limit': 500,
+        'required_fields': ['title', 'condition', 'quantity'],
+        'optional_fields': ['subtitle', 'tags', 'images', 'price'],
+        'notes': 'Short stream-safe title; mention condition clearly.',
+    },
+    'ebay': {
+        'title_limit': 80,
+        'description_limit': 4000,
+        'required_fields': ['title', 'condition', 'item specifics', 'price'],
+        'optional_fields': ['subtitle', 'tags', 'images'],
+        'notes': 'SEO title; include set, number, rarity, language.',
+    },
+    'shopify': {
+        'title_limit': 120,
+        'description_limit': 5000,
+        'required_fields': ['title', 'product_type', 'tags', 'price'],
+        'optional_fields': ['subtitle', 'images', 'variant mapping'],
+        'notes': 'Clean product title; useful tags and SKU/variant mapping.',
+    },
+    'generic': {
+        'title_limit': 120,
+        'description_limit': 2000,
+        'required_fields': ['title', 'description', 'condition'],
+        'optional_fields': ['subtitle', 'tags', 'images', 'price'],
+        'notes': 'Reusable listing copy.',
+    },
+}
+
+
+def _clean_listing_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _join_listing_parts(parts: list[Any]) -> str:
+    return ' '.join(str(part).strip() for part in parts if _clean_listing_text(part))
+
+
+def _build_listing_title(*, platform: str, title_style: str, name: str, number: str | None,
+                         set_name: str | None, rarity: str | None) -> str:
+    base_parts = [name, number, set_name, rarity]
+    if platform == 'shopify':
+        right = _join_listing_parts([set_name, number])
+        return f'{name} — {right}' if right else name
+    if platform == 'ebay' or title_style == 'seo':
+        return _join_listing_parts(base_parts + ['Pokémon Card'])
+    if platform == 'whatnot':
+        return _join_listing_parts(base_parts)
+    return _join_listing_parts([name, number, set_name])
+
+
+def _listing_tags(*, name: str, set_name: str | None, rarity: str | None, language_code: str | None,
+                  platform: str, finish: str | None) -> list[str]:
+    tags = ['pokemon-card', platform]
+    for value in (name, set_name, rarity, language_code, finish):
+        text = _clean_listing_text(value)
+        if text:
+            tags.append(text.lower().replace(' ', '-'))
+    return list(dict.fromkeys(tags))
+
+
+def _description_bullets(*, card: dict[str, Any], set_section: dict[str, Any], quantity: int,
+                         condition: str | None, finish: str | None,
+                         pricing: dict[str, Any] | None) -> list[str]:
+    bullets = [
+        f"Card name: {card.get('name') or 'Unknown'}",
+        f"Set: {set_section.get('name') or 'Unknown'}",
+        f"Number: {card.get('number') or 'Unknown'}",
+        f"Rarity: {card.get('rarity') or 'Unknown'}",
+        f"Language: {card.get('language_code') or 'Unknown'}",
+    ]
+    if condition:
+        bullets.append(f'Condition: {condition}')
+    if finish:
+        bullets.append(f'Finish: {finish}')
+    bullets.append(f'Quantity: {quantity}')
+    if pricing:
+        bullets.append(f"Pricing confidence: {pricing.get('confidence') or 'none'}")
+        for warning in pricing.get('warnings') or []:
+            bullets.append(f'Pricing note: {warning}')
+    return bullets
+
+
+def _listing_pricing_from_recommendation(recommendation: dict[str, Any], *, pricing_strategy: str) -> dict[str, Any]:
+    recommended = recommendation.get('recommended_listing_price') or {}
+    general = recommendation.get('general_market_estimate') or {}
+    primary = recommendation.get('primary_uk_price') or {}
+    warnings_out = list(recommendation.get('warnings') or [])
+    if pricing_strategy != 'balanced':
+        warnings_out.append(
+            f"Pricing strategy {pricing_strategy!r} requested, but this v12 milestone exposes balanced recommendation only."
+        )
+    return {
+        'currency': recommended.get('currency') or general.get('currency') or primary.get('currency') or recommendation.get('currency') or 'GBP',
+        'suggested_price': recommended.get('amount'),
+        'floor_price': None,
+        'ceiling_price': None,
+        'confidence': recommendation.get('confidence'),
+        'source_summary': {
+            'region_basis': recommendation.get('region_basis'),
+            'calculation_method': recommendation.get('calculation_method'),
+            'evidence_count': recommendation.get('evidence_count', 0),
+            'source_breakdown': recommendation.get('source_breakdown') or [],
+        },
+        'warnings': warnings_out,
+        'based_on_recommendation': {
+            'recommended_listing_price': recommended or None,
+            'general_market_estimate': general or None,
+            'primary_uk_price': primary or None,
+            'confidence': recommendation.get('confidence'),
+        },
+    }
+
+
+def _listing_platform_guidance(platform: str) -> dict[str, Any]:
+    return {'platform': platform, **PLATFORM_GUIDANCE_V1[platform]}
+
+
+def _safe_listing_provider_status() -> dict[str, Any]:
+    return {
+        'recommendation': {
+            'role': 'local_uk_pricing_recommendation',
+            'status': 'used',
+            'live_enabled': False,
+            'notes': 'Listing assistant uses data.recommendation derived from local GBP evidence only.',
+        },
+        'justtcg': {
+            'role': 'fallback_metadata_only',
+            'status': 'not_used_for_listing_assistant',
+            'live_enabled': False,
+            'notes': 'JustTCG pricing is not fetched or used by this endpoint.',
+        },
+        'totaltcg': {
+            'role': 'fallback_future_milestone',
+            'status': 'not_used_for_listing_assistant',
+            'live_enabled': False,
+            'notes': 'TotalTCG pricing is not fetched or used by this endpoint.',
+        },
     }
 
 
@@ -2584,6 +2732,174 @@ LIMIT ? OFFSET ?
             pass  # Never let exposure policy break the endpoint
 
         return response
+
+    # ── /api/v1/listings/assist (v12 listing assistant) ───────────────
+
+    @app.post('/api/v1/listings/assist/cards/{card_key:path}', response_model=ListingAssistantResponseV1)
+    def v12_listing_assistant(
+        card_key: str,
+        body: ListingAssistantRequestV1,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        """Build deterministic listing-ready data from local v1 card/pricing state.
+
+        This endpoint does not call marketplace APIs, provider APIs, HTTP
+        endpoints, or LLMs. Pricing is derived from the local v12
+        ``data.recommendation`` shape only.
+        """
+        language_code, card_id = parse_card_key(card_key)
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        card_k = canonical_card_key(language_code, card_id)
+
+        try:
+            cur.execute('SELECT 1 FROM v2_card_detail_api_cache WHERE language_code=? AND card_id=? LIMIT 1', (language_code, card_id))
+            if not cur.fetchone():
+                raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': card_k})
+
+            detail, _elapsed_ms = get_card_detail(conn, language_code, card_id)
+            if detail is None:
+                raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': card_k})
+
+            card_info = detail.get('card') or {}
+            set_info = detail.get('set') or {}
+            images = detail.get('images') or {}
+            en_name = get_en_name(conn, language_code, card_id, detail.get('name'))
+
+            cur.execute('''
+                SELECT cp.* FROM v10_canonical_printings cp
+                JOIN v10_canonical_printing_cards l ON cp.canonical_printing_id = l.canonical_printing_id
+                WHERE l.card_key = ?
+                LIMIT 1
+            ''', (card_k,))
+            cp_row = cur.fetchone()
+            cp_dict = dict(cp_row) if cp_row else None
+            variants: list[dict[str, Any]] = []
+            skus: list[dict[str, Any]] = []
+            if cp_dict:
+                cur.execute('SELECT * FROM v10_commercial_variants WHERE canonical_printing_id = ?', (cp_dict.get('canonical_printing_id'),))
+                variants = [dict(r) for r in cur.fetchall()]
+                if variants:
+                    cv_ids = [v['commercial_variant_id'] for v in variants]
+                    placeholders = ','.join('?' * len(cv_ids))
+                    cur.execute(f'SELECT * FROM v10_sellable_skus WHERE commercial_variant_id IN ({placeholders})', cv_ids)
+                    skus = [dict(r) for r in cur.fetchall()]
+
+            card_name = en_name or detail.get('name') or card_id
+            set_name = set_info.get('resolved_set_name') or set_info.get('core_set_name') or set_info.get('raw_set_id')
+            rarity = card_info.get('rarity') or (cp_dict or {}).get('rarity')
+            number = detail.get('collector_number') or detail.get('local_id')
+            card_section = {
+                'card_key': card_k,
+                'name': card_name,
+                'language_code': language_code,
+                'set_id': set_info.get('resolved_set_id') or set_info.get('raw_set_id') or set_info.get('core_set_id'),
+                'set_name': set_name,
+                'number': number,
+                'rarity': rarity,
+            }
+
+            recommendation: dict[str, Any] | None = None
+            pricing_section: dict[str, Any] | None = None
+            if body.include_pricing:
+                price_summary = v1_price_summary(conn, language_code, card_id)
+                recommendation = build_v1_price_recommendation(price_summary, {})
+                pricing_section = _listing_pricing_from_recommendation(
+                    recommendation,
+                    pricing_strategy=body.pricing_strategy,
+                )
+
+            title = _build_listing_title(
+                platform=body.platform,
+                title_style=body.title_style,
+                name=card_name,
+                number=number,
+                set_name=set_name,
+                rarity=rarity,
+            )
+            condition = _clean_listing_text(body.condition)
+            finish = _clean_listing_text(body.finish)
+            subtitle = _join_listing_parts([set_name, number, rarity, condition]) or None
+            listing_section = {
+                'title': title[:PLATFORM_GUIDANCE_V1[body.platform]['title_limit']],
+                'subtitle': subtitle,
+                'description_bullets': _description_bullets(
+                    card=card_section,
+                    set_section={'name': set_name},
+                    quantity=body.quantity,
+                    condition=condition,
+                    finish=finish,
+                    pricing=pricing_section,
+                ),
+                'condition_note': condition,
+                'tags': _listing_tags(
+                    name=card_name,
+                    set_name=set_name,
+                    rarity=rarity,
+                    language_code=language_code,
+                    platform=body.platform,
+                    finish=finish,
+                ),
+            }
+
+            images_section = None
+            if body.include_images:
+                signed_url = _generate_card_signed_url(conn, card_k, app.state.settings) if app.state.settings else None
+                gateway_url = f'/api/v1/images/card/{card_k}/content?size=medium'
+                primary_image = signed_url or gateway_url if bool(images.get('has_exact_image') or images.get('has_display_image')) else None
+                image_candidates = [url for url in [signed_url, gateway_url if primary_image else None] if url]
+                images_section = {
+                    'primary_image': primary_image,
+                    'image_candidates': list(dict.fromkeys(image_candidates)),
+                }
+
+            commercial_section = None
+            if body.include_commercial:
+                commercial_section = {
+                    'canonical_printing_id': (cp_dict or {}).get('canonical_printing_id'),
+                    'commercial_variant_id': variants[0].get('commercial_variant_id') if variants else None,
+                    'sellable_sku_id': skus[0].get('sellable_sku_id') if skus else None,
+                }
+
+            warnings_out = list((pricing_section or {}).get('warnings') or [])
+            if not body.include_pricing:
+                warnings_out.append('Pricing omitted because include_pricing=false.')
+            if body.notes:
+                warnings_out.append('Request notes are retained only as metadata; listing copy remains deterministic.')
+
+            metadata = {
+                'api_version': 'v1',
+                'contract': 'v12-listing-assistant',
+                'generated_at': now_utc(),
+                'request': {
+                    'card_key': card_k,
+                    'platform': body.platform,
+                    'pricing_strategy': body.pricing_strategy,
+                    'title_style': body.title_style,
+                    'quantity': body.quantity,
+                    'include_images': body.include_images,
+                    'include_pricing': body.include_pricing,
+                    'include_commercial': body.include_commercial,
+                },
+            }
+
+            return {
+                'data': {
+                    'card': card_section,
+                    'listing': listing_section,
+                    'pricing': pricing_section,
+                    'images': images_section,
+                    'commercial': commercial_section,
+                    'platform_guidance': _listing_platform_guidance(body.platform),
+                    'provider_status': _safe_listing_provider_status(),
+                    'warnings': warnings_out,
+                    'metadata': metadata,
+                },
+                'warnings': warnings_out,
+                'metadata': metadata,
+            }
+        finally:
+            conn.close()
 
     @app.get('/api/v1/prices/history/cards/{card_key:path}', response_model=PriceHistoryResponseV1)
     def v1_card_price_history(

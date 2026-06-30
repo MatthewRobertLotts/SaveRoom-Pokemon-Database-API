@@ -37,6 +37,7 @@ Initial v1 resources:
 - `GET /api/v1/images/cards/{card_key}` — future card image metadata/redirect endpoint.
 - `GET /api/v1/cards/{card_key}/detail` — v12 app-ready card detail (identity + set + images + commercial + pricing summary + provider status + warnings).
 - `POST /api/v1/cards/detail/batch` — v12 batch app-ready card detail (up to 50 card keys, partial success, include_pricing/include_commercial/include_images flags).
+- `POST /api/v1/listings/assist/cards/{card_key}` — v12 deterministic listing assistant output for Whatnot, eBay, Shopify, and generic workflows.
 - `GET /api/v1/prices/cards/{card_key}` — future local price summary endpoint.
 - `GET /api/v1/prices/history/cards/{card_key}` — future local price evidence history endpoint.
 - `GET /api/v1/prices/chart/cards/{card_key}` — v12 chart-ready price history (time-bucketed series, day/week/month, per-source percentiles, confidence labels).
@@ -173,6 +174,150 @@ Shape:
 ```
 
 JustTCG provider status may remain visible as metadata elsewhere in the prices response, but JustTCG USD pricing must not influence `data.recommendation` until explicit fallback blending is implemented and covered by exposure policy tests.
+
+## v12 Listing Assistant Endpoint
+
+`POST /api/v1/listings/assist/cards/{card_key}` returns deterministic listing-ready data for marketplace and generic workflows. It is an app-readiness endpoint, not a publishing endpoint.
+
+Supported platforms:
+
+- `whatnot`
+- `ebay`
+- `shopify`
+- `generic`
+
+Request fields:
+
+```json
+{
+  "platform": "generic",
+  "condition": null,
+  "finish": null,
+  "quantity": 1,
+  "include_images": true,
+  "include_pricing": true,
+  "include_commercial": true,
+  "pricing_strategy": "balanced",
+  "title_style": "marketplace",
+  "notes": null
+}
+```
+
+Validation:
+
+- `quantity >= 1`
+- `platform` must be `whatnot`, `ebay`, `shopify`, or `generic`
+- `pricing_strategy` must be `conservative`, `balanced`, or `premium`
+- `title_style` must be `compact`, `seo`, or `marketplace`
+
+Current v12 milestone behaviour:
+
+- does not call marketplace APIs;
+- does not publish listings;
+- does not call JustTCG, TotalTCG, TCGplayer, Cardmarket, eBay, Whatnot, or Shopify APIs;
+- does not use an LLM;
+- uses local card detail, image gateway metadata, commercial identity/SKU mapping, and `data.recommendation`-compatible pricing only;
+- defaults to balanced pricing;
+- accepts conservative/premium request values but returns the balanced recommendation until the recommendation layer exposes those strategies safely;
+- does not use raw provider fallback data, USD/global pricing, API keys, account metadata, raw payloads, or filesystem paths.
+
+Response shape:
+
+```json
+{
+  "data": {
+    "card": {
+      "card_key": "en:sv03-223",
+      "name": "Charizard ex",
+      "language_code": "en",
+      "set_id": "sv03",
+      "set_name": "Obsidian Flames",
+      "number": "223",
+      "rarity": "Special Illustration Rare"
+    },
+    "listing": {
+      "title": "Charizard ex 223 Obsidian Flames Special Illustration Rare",
+      "subtitle": "Obsidian Flames 223 Special Illustration Rare",
+      "description_bullets": [
+        "Card name: Charizard ex",
+        "Set: Obsidian Flames",
+        "Number: 223",
+        "Rarity: Special Illustration Rare",
+        "Language: en",
+        "Quantity: 1",
+        "Pricing confidence: medium"
+      ],
+      "condition_note": null,
+      "tags": ["pokemon-card", "generic"]
+    },
+    "pricing": {
+      "currency": "GBP",
+      "suggested_price": 18.64,
+      "floor_price": null,
+      "ceiling_price": null,
+      "confidence": "medium",
+      "source_summary": {
+        "region_basis": "uk_primary",
+        "calculation_method": "local_uk_only; ...",
+        "evidence_count": 12,
+        "source_breakdown": []
+      },
+      "warnings": [],
+      "based_on_recommendation": {
+        "recommended_listing_price": {},
+        "general_market_estimate": {},
+        "primary_uk_price": {},
+        "confidence": "medium"
+      }
+    },
+    "images": {
+      "primary_image": "/api/v1/images/card/en:sv03-223/content?size=medium",
+      "image_candidates": ["/api/v1/images/card/en:sv03-223/content?size=medium"]
+    },
+    "commercial": {
+      "canonical_printing_id": "...",
+      "commercial_variant_id": "...",
+      "sellable_sku_id": "..."
+    },
+    "platform_guidance": {
+      "platform": "generic",
+      "title_limit": 120,
+      "description_limit": 2000,
+      "required_fields": ["title", "description", "condition"],
+      "optional_fields": ["subtitle", "tags", "images", "price"],
+      "notes": "Reusable listing copy."
+    },
+    "provider_status": {},
+    "warnings": [],
+    "metadata": {
+      "api_version": "v1",
+      "contract": "v12-listing-assistant",
+      "generated_at": "..."
+    }
+  },
+  "warnings": [],
+  "metadata": {
+    "api_version": "v1",
+    "contract": "v12-listing-assistant",
+    "generated_at": "..."
+  }
+}
+```
+
+Include flags:
+
+- `include_images=false` returns `data.images = null`.
+- `include_pricing=false` returns `data.pricing = null`.
+- `include_commercial=false` returns `data.commercial = null`.
+
+Pricing contract:
+
+- `pricing.suggested_price` maps from `data.recommendation.recommended_listing_price.amount`.
+- `pricing.based_on_recommendation.general_market_estimate` carries the recommendation estimate.
+- `pricing.based_on_recommendation.primary_uk_price` carries the local UK primary evidence object.
+- `pricing.source_summary.source_breakdown` carries the recommendation source breakdown.
+- No raw JustTCG/TotalTCG/TCGplayer/Cardmarket/eBay/Whatnot/Shopify provider data is exposed.
+- No live provider calls are made by the listing assistant endpoint.
 
 ## v11 Market Evidence Endpoints (2026-06-27)
 
