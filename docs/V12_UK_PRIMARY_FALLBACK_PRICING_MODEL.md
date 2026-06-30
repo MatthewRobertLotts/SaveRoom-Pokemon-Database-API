@@ -2,7 +2,7 @@
 
 Tags: #type/project #status/needs-review
 
-Status: IMPLEMENTED PURE LOGIC ONLY
+Status: IMPLEMENTED PURE LOGIC + PRICES ENDPOINT LOCAL-UK WIRING
 Date: 2026-06-30
 Branch: v12-app-readiness-next
 Target release: v12.0.0
@@ -13,7 +13,7 @@ Use **v12 milestones**, not “v12 slices”. Earlier references to “slices”
 
 ## Purpose
 
-This document defines the pure pricing recommendation foundation for v12. The first implementation is deterministic calculation logic only: no FastAPI wiring, no DB migrations, no live provider calls, no environment reads, and no API credits.
+This document defines the pricing recommendation foundation for v12. The first implementation added deterministic calculation logic only. The current v12 milestone wires that pure model into `GET /api/v1/prices/cards/{card_key:path}` using existing local UK/GBP evidence only: no DB migrations, no live provider calls, no new provider fetching, no environment reads for recommendation calculation, and no API credits.
 
 The model exists so listing assistant, scanner, POS, inventory, and API consumers can use a safe UK-primary pricing recommendation instead of blindly mixing UK sold evidence with foreign/global reference prices.
 
@@ -161,7 +161,7 @@ Warnings explicitly state when fallback/global data influenced the recommendatio
 
 ## Output shape
 
-The pure recommendation object is designed to serialize later with fields:
+The pure recommendation object is designed to serialize with fields:
 
 ```text
 currency
@@ -185,6 +185,35 @@ adjustment_basis
 provider_status_summary
 ```
 
+## Prices endpoint wiring milestone
+
+`GET /api/v1/prices/cards/{card_key:path}` now includes a `data.recommendation` section. This milestone uses only the existing local GBP price summary fields:
+
+```text
+raw_median
+recommended_raw_count
+evidence_count
+raw_min
+raw_max
+latest_fetched_at
+source
+currency
+```
+
+Mapping:
+
+```text
+primary_uk_price.amount = raw_median when recommended/local UK evidence exists
+primary_uk_price.currency = GBP
+primary_uk_price.evidence_count = recommended_raw_count, falling back to evidence_count only when raw_median exists
+primary_uk_price.source_type = local_uk_evidence
+general_market_estimate = primary_uk_price for this local-only milestone
+recommended_listing_price = balanced general_market_estimate
+uk_adjusted_fallback_price = null
+adjustment_multiplier fields = null
+```
+
+JustTCG provider status may remain visible as metadata, but JustTCG USD pricing is not used in the recommendation. `_get_justtcg_price_data()` is not called by the recommendation builder. Fallback provider blending remains a future v12 milestone.
 ## How listing assistant should consume this later
 
 The listing assistant should not implement its own pricing model. It should consume:
@@ -220,9 +249,10 @@ Implemented tests:
 
 ```text
 tests/test_v12_uk_pricing_model.py
+tests/test_v12_prices_endpoint_recommendation_model.py
 ```
 
-This milestone does not wire the model into FastAPI endpoints, does not add DB migrations, and does not call live providers.
+This milestone wires the model into the prices endpoint using local UK evidence only. It does not add DB migrations and does not call live providers for recommendation calculation.
 
 ## Links
 

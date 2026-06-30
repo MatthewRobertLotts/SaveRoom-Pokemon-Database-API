@@ -148,6 +148,7 @@ from pokemon_db_v5_api_models import (
     ChartReadyPointV1,
     ChartReadySummaryV1,
 )
+from pricing_sources.uk_pricing_model import build_pricing_recommendation
 
 # DEFAULT_SETTINGS removed in v9.1 — call settings_from_env() directly
 STARTED_AT = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
@@ -528,6 +529,87 @@ def _query_price_summary(cur: sqlite3.Cursor, card_id: str, language_code: str) 
         'bundle_count': int(row[5] or 0), 'noise_count': int(row[6] or 0),
         'latest_fetched_at': row[7], 'source': row[8], 'no_evidence_reason': None,
         'by_condition': by_condition, 'with_postage': False,
+    }
+
+
+def _price_object(amount: float | None, *, currency: str = 'GBP', **extra: Any) -> dict[str, Any] | None:
+    """Return a small serializable price object for v1 pricing recommendations."""
+    if amount is None:
+        return None
+    # Put amount/currency last so optional metadata (e.g. raw_min/raw_max) can
+    # never accidentally overwrite the price object's identity fields.
+    return {**extra, 'amount': amount, 'currency': currency}
+
+
+def build_v1_price_recommendation(summary: dict[str, Any], provider_status_summary: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build a v1-safe local UK-only pricing recommendation section.
+
+    This v12 milestone maps existing local GBP price-summary evidence into the
+    pure pricing model. It does not call JustTCG, TotalTCG, TCGplayer,
+    Cardmarket, HTTP, DB, or environment helpers. Fallback provider blending is
+    a future milestone.
+    """
+    currency = summary.get('currency') or 'GBP'
+    raw_median = summary.get('raw_median')
+    recommended_raw_count = int(summary.get('recommended_raw_count') or 0)
+    evidence_count = int(summary.get('evidence_count') or 0)
+    uk_evidence_count = recommended_raw_count or (evidence_count if raw_median is not None else 0)
+    primary_uk_price = raw_median if raw_median is not None and uk_evidence_count > 0 else None
+
+    recommendation = build_pricing_recommendation(
+        primary_uk_price=primary_uk_price,
+        uk_evidence_count=uk_evidence_count,
+        fallback_converted_price_gbp=None,
+        fallback_provider=None,
+        candidate_multipliers=None,
+        listing_strategy='balanced',
+        provider_status_summary=provider_status_summary or {},
+    )
+    data = recommendation.to_dict()
+
+    raw_source = summary.get('source')
+    primary_obj = _price_object(
+        data['primary_uk_price'],
+        currency=currency,
+        evidence_count=uk_evidence_count,
+        source='ebay_uk_sold',
+        raw_source=raw_source,
+        source_type='local_uk_evidence',
+        price_type='sold_completed',
+        raw_min=summary.get('raw_min'),
+        raw_max=summary.get('raw_max'),
+        latest_fetched_at=summary.get('latest_fetched_at'),
+    )
+    general_obj = _price_object(
+        data['general_market_estimate'],
+        currency=currency,
+        source_type='local_uk_evidence' if data['general_market_estimate'] is not None else None,
+    )
+    listing_obj = _price_object(
+        data['recommended_listing_price'],
+        currency=currency,
+        strategy='balanced',
+    )
+
+    return {
+        'currency': currency,
+        'region_basis': data['region_basis'],
+        'primary_uk_price': primary_obj,
+        'uk_adjusted_fallback_price': None,
+        'general_market_estimate': general_obj,
+        'recommended_listing_price': listing_obj,
+        'source_breakdown': data['source_breakdown'],
+        'evidence_count': uk_evidence_count,
+        'confidence': data['confidence'],
+        'confidence_score': data['confidence_score'],
+        'confidence_reasons': data['confidence_reasons'],
+        'warnings': data['warnings'],
+        'calculation_method': 'local_uk_only; ' + data['calculation_method'],
+        'adjustment_multiplier': None,
+        'adjustment_multiplier_level': None,
+        'adjustment_multiplier_sample_size': None,
+        'adjustment_basis': None,
+        'provider_status_summary': provider_status_summary or {},
     }
 
 
@@ -2474,6 +2556,7 @@ LIMIT ? OFFSET ?
         except Exception:
             pass  # Never let JustTCG failures break the endpoint
         justtcg_status = _get_justtcg_provider_status()
+        summary['recommendation'] = build_v1_price_recommendation(summary, {'justtcg': justtcg_status})
 
         # If JustTCG returned data, add to source_breakdown as supporting source
         if justtcg_data is not None:

@@ -73,6 +73,7 @@ class PriceSummaryV1(BaseModel):
     no_evidence_reason: str | None = None
     by_condition: dict = {}
     with_postage: bool = False
+    recommendation: dict[str, Any] | None = Field(default=None, description="v12 UK-primary pricing recommendation derived from local GBP evidence only. Fallback provider blending is not wired in this milestone.")
 
 
 class PriceEvidenceV1(BaseModel):

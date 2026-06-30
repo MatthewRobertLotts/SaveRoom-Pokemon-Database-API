@@ -115,6 +115,65 @@ Price summaries should prefer recommended raw inputs, excluding graded/bundles/n
 
 Live RapidAPI fetches are deliberately out of scope for read-only public v1 endpoints. Fetching/updating prices remains under internal `/api/prices/*` until pricing auth, quota, billing, and abuse controls are production-grade.
 
+### v12 prices recommendation field
+
+`GET /api/v1/prices/cards/{card_key}` includes a `data.recommendation` object for app-ready pricing consumers. This field is additive and keeps existing price summary fields unchanged.
+
+Current v12 milestone behaviour:
+
+- uses existing local UK/GBP evidence only;
+- maps `raw_median` to `primary_uk_price.amount` when recommended local evidence exists;
+- maps `recommended_raw_count` to `primary_uk_price.evidence_count`;
+- sets `general_market_estimate` to the local UK primary price for now;
+- sets `recommended_listing_price` to the balanced local estimate;
+- leaves `uk_adjusted_fallback_price` and adjustment multiplier fields null;
+- does not use JustTCG / TotalTCG / TCGplayer / Cardmarket prices in the recommendation yet;
+- does not make live provider calls for recommendation calculation.
+
+Shape:
+
+```json
+{
+  "recommendation": {
+    "currency": "GBP",
+    "region_basis": "uk_primary",
+    "primary_uk_price": {
+      "amount": 18.64,
+      "currency": "GBP",
+      "evidence_count": 12,
+      "source": "ebay_uk_sold",
+      "source_type": "local_uk_evidence",
+      "price_type": "sold_completed"
+    },
+    "uk_adjusted_fallback_price": null,
+    "general_market_estimate": {
+      "amount": 18.64,
+      "currency": "GBP",
+      "source_type": "local_uk_evidence"
+    },
+    "recommended_listing_price": {
+      "amount": 18.64,
+      "currency": "GBP",
+      "strategy": "balanced"
+    },
+    "source_breakdown": [],
+    "evidence_count": 12,
+    "confidence": "high",
+    "confidence_score": 0.92,
+    "confidence_reasons": [],
+    "warnings": [],
+    "calculation_method": "local_uk_only; strong_uk_100_0_blend; listing_strategy=balanced; uk_weight=1.00; fallback_weight=0.00",
+    "adjustment_multiplier": null,
+    "adjustment_multiplier_level": null,
+    "adjustment_multiplier_sample_size": null,
+    "adjustment_basis": null,
+    "provider_status_summary": {}
+  }
+}
+```
+
+JustTCG provider status may remain visible as metadata elsewhere in the prices response, but JustTCG USD pricing must not influence `data.recommendation` until explicit fallback blending is implemented and covered by exposure policy tests.
+
 ## v11 Market Evidence Endpoints (2026-06-27)
 
 v11 adds a new pricing evidence pipeline under `/api/v1/prices/`. These endpoints provide structured, source-attached pricing evidence from the TCGdex market API.
