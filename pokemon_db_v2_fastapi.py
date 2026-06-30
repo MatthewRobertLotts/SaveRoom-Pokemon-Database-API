@@ -26,6 +26,7 @@ import sqlite3
 import sys
 import time
 import threading
+import uuid
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -92,6 +93,10 @@ from pokemon_db_v5_api_models import (
     LanguageListResponseV1,
     ListingAssistantRequestV1,
     ListingAssistantResponseV1,
+    ListingDraftCreateRequestV1,
+    ListingDraftListResponseV1,
+    ListingDraftResponseV1,
+    ListingDraftUpdateRequestV1,
     PhysicalItemResponse,
     PriceHistoryResponseV1,
     PriceSummaryResponseV1,
@@ -758,6 +763,132 @@ def _safe_listing_provider_status() -> dict[str, Any]:
             'live_enabled': False,
             'notes': 'TotalTCG pricing is not fetched or used by this endpoint.',
         },
+    }
+
+
+LISTING_DRAFT_COLUMNS = [
+    'draft_id',
+    'card_key',
+    'language_code',
+    'card_id',
+    'platform',
+    'status',
+    'title',
+    'subtitle',
+    'description_json',
+    'tags_json',
+    'condition',
+    'finish',
+    'quantity',
+    'pricing_json',
+    'images_json',
+    'commercial_json',
+    'platform_guidance_json',
+    'provider_status_json',
+    'warnings_json',
+    'assistant_payload_json',
+    'source_assistant_contract',
+    'notes',
+    'created_at',
+    'updated_at',
+    'archived_at',
+]
+
+
+def _json_dumps_safe(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+
+def _json_loads_safe(value: str | None, default: Any) -> Any:
+    if value in (None, ''):
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def _ensure_listing_drafts_table(conn: sqlite3.Connection) -> None:
+    """Create the local listing draft table if needed."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS listing_drafts (
+            draft_id TEXT PRIMARY KEY,
+            card_key TEXT NOT NULL,
+            language_code TEXT,
+            card_id TEXT,
+            platform TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            title TEXT,
+            subtitle TEXT,
+            description_json TEXT,
+            tags_json TEXT,
+            condition TEXT,
+            finish TEXT,
+            quantity INTEGER NOT NULL DEFAULT 1,
+            pricing_json TEXT,
+            images_json TEXT,
+            commercial_json TEXT,
+            platform_guidance_json TEXT,
+            provider_status_json TEXT,
+            warnings_json TEXT,
+            assistant_payload_json TEXT NOT NULL,
+            source_assistant_contract TEXT NOT NULL,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            archived_at TEXT
+        )
+    """)
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_listing_drafts_card_key ON listing_drafts(card_key)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_listing_drafts_status_updated ON listing_drafts(status, updated_at)')
+    conn.commit()
+
+
+def _listing_draft_id() -> str:
+    return f'ld_{uuid.uuid4().hex}'
+
+
+def _listing_draft_row_to_response(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    d = dict(row)
+    assistant_payload = _json_loads_safe(d.get('assistant_payload_json'), {})
+    listing = {
+        'title': d.get('title'),
+        'subtitle': d.get('subtitle'),
+        'description_bullets': _json_loads_safe(d.get('description_json'), []),
+        'condition_note': d.get('condition'),
+        'tags': _json_loads_safe(d.get('tags_json'), []),
+        'notes': d.get('notes'),
+    }
+    return {
+        'draft_id': d.get('draft_id'),
+        'card_key': d.get('card_key'),
+        'language_code': d.get('language_code'),
+        'card_id': d.get('card_id'),
+        'platform': d.get('platform'),
+        'status': d.get('status'),
+        'listing': listing,
+        'pricing': _json_loads_safe(d.get('pricing_json'), None),
+        'images': _json_loads_safe(d.get('images_json'), None),
+        'commercial': _json_loads_safe(d.get('commercial_json'), None),
+        'platform_guidance': _json_loads_safe(d.get('platform_guidance_json'), None),
+        'provider_status': _json_loads_safe(d.get('provider_status_json'), {}),
+        'warnings': _json_loads_safe(d.get('warnings_json'), []),
+        'assistant_payload': assistant_payload,
+        'source_assistant_contract': d.get('source_assistant_contract'),
+        'condition': d.get('condition'),
+        'finish': d.get('finish'),
+        'quantity': d.get('quantity'),
+        'created_at': d.get('created_at'),
+        'updated_at': d.get('updated_at'),
+        'archived_at': d.get('archived_at'),
+    }
+
+
+def _listing_draft_metadata() -> dict[str, Any]:
+    return {
+        'api_version': 'v1',
+        'contract': 'v12-listing-draft',
+        'generated_at': now_utc(),
     }
 
 
@@ -2900,6 +3031,195 @@ LIMIT ? OFFSET ?
             }
         finally:
             conn.close()
+
+
+    # ── /api/v1/listings/drafts (v12 local draft persistence) ──────────
+
+    @app.post('/api/v1/listings/drafts/cards/{card_key:path}', response_model=ListingDraftResponseV1, status_code=201)
+    def v12_create_listing_draft(
+        card_key: str,
+        body: ListingDraftCreateRequestV1,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        '''Generate listing assistant output and persist it as a local draft.'''
+        assistant_response = v12_listing_assistant(card_key, body, _)
+        assistant_data = assistant_response['data']
+        card = assistant_data.get('card') or {}
+        listing = assistant_data.get('listing') or {}
+        draft_id = _listing_draft_id()
+        created_at = now_utc()
+        conn = connect(app.state.db)
+        try:
+            _ensure_listing_drafts_table(conn)
+            conn.execute(
+                '''
+                INSERT INTO listing_drafts (
+                    draft_id, card_key, language_code, card_id, platform, status,
+                    title, subtitle, description_json, tags_json, condition, finish, quantity,
+                    pricing_json, images_json, commercial_json, platform_guidance_json,
+                    provider_status_json, warnings_json, assistant_payload_json,
+                    source_assistant_contract, notes, created_at, updated_at, archived_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    draft_id,
+                    card.get('card_key'),
+                    card.get('language_code'),
+                    (card.get('card_key') or '').split(':', 1)[1] if ':' in (card.get('card_key') or '') else None,
+                    body.platform,
+                    'draft',
+                    listing.get('title'),
+                    listing.get('subtitle'),
+                    _json_dumps_safe(listing.get('description_bullets') or []),
+                    _json_dumps_safe(listing.get('tags') or []),
+                    listing.get('condition_note') or _clean_listing_text(body.condition),
+                    _clean_listing_text(body.finish),
+                    body.quantity,
+                    _json_dumps_safe(assistant_data.get('pricing')),
+                    _json_dumps_safe(assistant_data.get('images')),
+                    _json_dumps_safe(assistant_data.get('commercial')),
+                    _json_dumps_safe(assistant_data.get('platform_guidance')),
+                    _json_dumps_safe(assistant_data.get('provider_status') or {}),
+                    _json_dumps_safe(assistant_data.get('warnings') or []),
+                    _json_dumps_safe(assistant_data),
+                    (assistant_data.get('metadata') or {}).get('contract') or 'v12-listing-assistant',
+                    _clean_listing_text(body.notes),
+                    created_at,
+                    created_at,
+                    None,
+                ),
+            )
+            conn.commit()
+            row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+            return {'data': _listing_draft_row_to_response(row), 'metadata': _listing_draft_metadata()}
+        finally:
+            conn.close()
+
+    @app.get('/api/v1/listings/drafts', response_model=ListingDraftListResponseV1)
+    def v12_list_listing_drafts(
+        include_archived: bool = Query(True, description='Include archived local drafts.'),
+        limit: int = Query(50, ge=1, le=100),
+        offset: int = Query(0, ge=0),
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            _ensure_listing_drafts_table(conn)
+            where = '' if include_archived else "WHERE status != 'archived'"
+            total = int(conn.execute(f'SELECT COUNT(*) FROM listing_drafts {where}').fetchone()[0])
+            rows = conn.execute(
+                f'SELECT * FROM listing_drafts {where} ORDER BY updated_at DESC, created_at DESC LIMIT ? OFFSET ?',
+                (limit, offset),
+            ).fetchall()
+            data = [_listing_draft_row_to_response(row) for row in rows]
+            return {
+                'data': data,
+                'pagination': {
+                    'limit': limit,
+                    'offset': offset,
+                    'count': len(data),
+                    'total': total,
+                    'has_more': offset + len(data) < total,
+                },
+                'metadata': _listing_draft_metadata(),
+            }
+        finally:
+            conn.close()
+
+    @app.get('/api/v1/listings/drafts/{draft_id}', response_model=ListingDraftResponseV1)
+    def v12_get_listing_draft(
+        draft_id: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            _ensure_listing_drafts_table(conn)
+            row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+            if row is None:
+                raise v1_error(404, 'listing_draft_not_found', 'Listing draft not found.', {'draft_id': draft_id})
+            return {'data': _listing_draft_row_to_response(row), 'metadata': _listing_draft_metadata()}
+        finally:
+            conn.close()
+
+    @app.patch('/api/v1/listings/drafts/{draft_id}', response_model=ListingDraftResponseV1)
+    def v12_update_listing_draft(
+        draft_id: str,
+        body: ListingDraftUpdateRequestV1,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            _ensure_listing_drafts_table(conn)
+            row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+            if row is None:
+                raise v1_error(404, 'listing_draft_not_found', 'Listing draft not found.', {'draft_id': draft_id})
+            current = dict(row)
+            assistant_payload = _json_loads_safe(current.get('assistant_payload_json'), {})
+            listing_payload = assistant_payload.setdefault('listing', {}) if isinstance(assistant_payload, dict) else {}
+
+            updates: dict[str, Any] = {}
+            if body.title is not None:
+                updates['title'] = _clean_listing_text(body.title)
+                listing_payload['title'] = updates['title']
+            if body.subtitle is not None:
+                updates['subtitle'] = _clean_listing_text(body.subtitle)
+                listing_payload['subtitle'] = updates['subtitle']
+            if body.description_bullets is not None:
+                updates['description_json'] = _json_dumps_safe(body.description_bullets)
+                listing_payload['description_bullets'] = body.description_bullets
+            if body.tags is not None:
+                updates['tags_json'] = _json_dumps_safe(body.tags)
+                listing_payload['tags'] = body.tags
+            if body.condition is not None:
+                updates['condition'] = _clean_listing_text(body.condition)
+                listing_payload['condition_note'] = updates['condition']
+            if body.finish is not None:
+                updates['finish'] = _clean_listing_text(body.finish)
+            if body.quantity is not None:
+                updates['quantity'] = body.quantity
+                if isinstance(assistant_payload, dict):
+                    assistant_payload.setdefault('metadata', {}).setdefault('draft_updates', {})['quantity'] = body.quantity
+            if body.notes is not None:
+                updates['notes'] = _clean_listing_text(body.notes)
+            if body.status is not None:
+                updates['status'] = body.status
+                updates['archived_at'] = now_utc() if body.status == 'archived' else None
+
+            updates['assistant_payload_json'] = _json_dumps_safe(assistant_payload)
+            updates['updated_at'] = now_utc()
+            assignments = ', '.join(f'{key} = ?' for key in updates)
+            conn.execute(
+                f'UPDATE listing_drafts SET {assignments} WHERE draft_id = ?',
+                [*updates.values(), draft_id],
+            )
+            conn.commit()
+            updated = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+            return {'data': _listing_draft_row_to_response(updated), 'metadata': _listing_draft_metadata()}
+        finally:
+            conn.close()
+
+    @app.post('/api/v1/listings/drafts/{draft_id}/archive', response_model=ListingDraftResponseV1)
+    def v12_archive_listing_draft(
+        draft_id: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            _ensure_listing_drafts_table(conn)
+            row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+            if row is None:
+                raise v1_error(404, 'listing_draft_not_found', 'Listing draft not found.', {'draft_id': draft_id})
+            archived_at = now_utc()
+            conn.execute(
+                'UPDATE listing_drafts SET status = ?, archived_at = ?, updated_at = ? WHERE draft_id = ?',
+                ('archived', archived_at, archived_at, draft_id),
+            )
+            conn.commit()
+            updated = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+            return {'data': _listing_draft_row_to_response(updated), 'metadata': _listing_draft_metadata()}
+        finally:
+            conn.close()
+
 
     @app.get('/api/v1/prices/history/cards/{card_key:path}', response_model=PriceHistoryResponseV1)
     def v1_card_price_history(

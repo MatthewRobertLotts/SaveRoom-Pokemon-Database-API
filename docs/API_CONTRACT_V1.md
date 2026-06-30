@@ -38,6 +38,11 @@ Initial v1 resources:
 - `GET /api/v1/cards/{card_key}/detail` — v12 app-ready card detail (identity + set + images + commercial + pricing summary + provider status + warnings).
 - `POST /api/v1/cards/detail/batch` — v12 batch app-ready card detail (up to 50 card keys, partial success, include_pricing/include_commercial/include_images flags).
 - `POST /api/v1/listings/assist/cards/{card_key}` — v12 deterministic listing assistant output for Whatnot, eBay, Shopify, and generic workflows.
+- `POST /api/v1/listings/drafts/cards/{card_key}` — v12 local listing draft creation from deterministic listing assistant output.
+- `GET /api/v1/listings/drafts/{draft_id}` — v12 local listing draft retrieval.
+- `GET /api/v1/listings/drafts` — v12 recent local listing draft list.
+- `PATCH /api/v1/listings/drafts/{draft_id}` — v12 local listing draft editable-field update.
+- `POST /api/v1/listings/drafts/{draft_id}/archive` — v12 local listing draft archive transition.
 - `GET /api/v1/prices/cards/{card_key}` — future local price summary endpoint.
 - `GET /api/v1/prices/history/cards/{card_key}` — future local price evidence history endpoint.
 - `GET /api/v1/prices/chart/cards/{card_key}` — v12 chart-ready price history (time-bucketed series, day/week/month, per-source percentiles, confidence labels).
@@ -318,6 +323,115 @@ Pricing contract:
 - `pricing.source_summary.source_breakdown` carries the recommendation source breakdown.
 - No raw JustTCG/TotalTCG/TCGplayer/Cardmarket/eBay/Whatnot/Shopify provider data is exposed.
 - No live provider calls are made by the listing assistant endpoint.
+
+## v12 Listing Draft Persistence
+
+Local listing draft persistence stores deterministic listing assistant output as local app/API draft records. It is not marketplace publishing and it does not integrate with eBay, Whatnot, Shopify, or any provider API.
+
+Endpoints:
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/v1/listings/drafts/cards/{card_key}` | Generate listing assistant output locally and save it as a draft. |
+| GET | `/api/v1/listings/drafts/{draft_id}` | Return one saved local draft. |
+| GET | `/api/v1/listings/drafts` | List recent local drafts, including archived drafts by default. |
+| PATCH | `/api/v1/listings/drafts/{draft_id}` | Update safe editable local draft fields. |
+| POST | `/api/v1/listings/drafts/{draft_id}/archive` | Mark a local draft archived without deleting it. |
+
+Persistence table:
+
+```text
+listing_drafts
+```
+
+Stored fields include:
+
+```text
+draft_id, card_key, language_code, card_id, platform, status,
+title, subtitle, description_json, tags_json, condition, finish, quantity,
+pricing_json, images_json, commercial_json, platform_guidance_json,
+provider_status_json, warnings_json, assistant_payload_json,
+source_assistant_contract, notes, created_at, updated_at, archived_at
+```
+
+Status lifecycle:
+
+- `draft` — newly created local draft.
+- `ready` — local draft has been reviewed/edited and is ready for future workflow use.
+- `archived` — local draft hidden from active-only views but retained.
+
+Create request reuses the listing assistant request fields:
+
+```json
+{
+  "platform": "generic",
+  "condition": null,
+  "finish": null,
+  "quantity": 1,
+  "include_images": true,
+  "include_pricing": true,
+  "include_commercial": true,
+  "pricing_strategy": "balanced",
+  "title_style": "marketplace",
+  "notes": null
+}
+```
+
+Update request allows safe local editable fields only:
+
+```json
+{
+  "title": "Updated title",
+  "subtitle": "Updated subtitle",
+  "description_bullets": ["Card name: Charizard ex"],
+  "tags": ["pokemon-card"],
+  "condition": "Near Mint",
+  "finish": "Holo",
+  "quantity": 1,
+  "status": "ready",
+  "notes": "Local note"
+}
+```
+
+Response shape:
+
+```json
+{
+  "data": {
+    "draft_id": "ld_...",
+    "card_key": "en:sv03-223",
+    "platform": "ebay",
+    "status": "draft",
+    "listing": {},
+    "pricing": {},
+    "images": {},
+    "commercial": {},
+    "platform_guidance": {},
+    "provider_status": {},
+    "warnings": [],
+    "assistant_payload": {},
+    "source_assistant_contract": "v12-listing-assistant",
+    "created_at": "...",
+    "updated_at": "...",
+    "archived_at": null
+  },
+  "metadata": {
+    "api_version": "v1",
+    "contract": "v12-listing-draft",
+    "generated_at": "..."
+  }
+}
+```
+
+Safety contract:
+
+- draft creation reuses the listing assistant function internally; it does not call the listing assistant endpoint over HTTP;
+- no live provider calls are made;
+- no marketplace APIs are called;
+- no LLMs are called;
+- no listings are published;
+- no API keys, headers, account metadata, raw provider payloads, private provider paths, sanitized candidates, or raw filesystem paths are stored or returned;
+- `include_images=false`, `include_pricing=false`, and `include_commercial=false` persist null sections in the draft payload.
 
 ## v11 Market Evidence Endpoints (2026-06-27)
 

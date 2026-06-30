@@ -1023,6 +1023,39 @@ class ListingAssistantResponseV1(BaseModel):
     warnings: list[str] | None = None
     metadata: ListingAssistantMetadataV1
 
+
+class ListingDraftCreateRequestV1(ListingAssistantRequestV1):
+    pass
+
+
+class ListingDraftUpdateRequestV1(BaseModel):
+    title: str | None = None
+    subtitle: str | None = None
+    description_bullets: list[str] | None = None
+    tags: list[str] | None = None
+    condition: str | None = None
+    finish: str | None = None
+    quantity: int | None = Field(default=None, ge=1)
+    status: Literal['draft', 'ready', 'archived'] | None = None
+    notes: str | None = None
+
+
+class ListingDraftMetadataV1(BaseModel):
+    api_version: str = 'v1'
+    contract: str = 'v12-listing-draft'
+    generated_at: str | None = None
+
+
+class ListingDraftResponseV1(BaseModel):
+    data: dict[str, Any]
+    metadata: ListingDraftMetadataV1
+
+
+class ListingDraftListResponseV1(BaseModel):
+    data: list[dict[str, Any]]
+    pagination: PaginationMeta
+    metadata: ListingDraftMetadataV1
+
 # ── v12 Chart-ready price history models ─────────────────────────────
 
 class ChartReadyPointV1(BaseModel):

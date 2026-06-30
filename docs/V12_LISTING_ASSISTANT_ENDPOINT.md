@@ -12,6 +12,14 @@ The endpoint prepares listing copy, platform guidance, optional image metadata, 
 
 It is not a publishing endpoint.
 
+The companion local draft persistence milestone stores this deterministic output through:
+
+```text
+POST /api/v1/listings/drafts/cards/{card_key:path}
+```
+
+Draft persistence reuses the listing assistant logic internally; it does not call this endpoint over HTTP and it still does not publish listings.
+
 ## Safety boundaries
 
 The listing assistant does not:
@@ -178,3 +186,9 @@ tests/test_v12_listing_assistant_api.py
 ```
 
 The tests cover endpoint existence, 200/404 behavior, include flags, platform support, condition handling, deterministic bullets, recommendation-based pricing, JustTCG fetch guard, no live provider calls, no USD/fallback leakage, no filesystem path leakage, and request validation.
+
+## Local draft persistence companion
+
+See `docs/V12_LISTING_DRAFTS.md` for the v12 local listing draft persistence milestone.
+
+Draft persistence stores listing assistant output locally as `listing_drafts` rows with `draft`, `ready`, and `archived` statuses. It remains local app/API persistence only: no marketplace publishing, no provider calls, no API keys, and no LLMs.
