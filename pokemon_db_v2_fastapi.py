@@ -531,6 +531,107 @@ def _query_price_summary(cur: sqlite3.Cursor, card_id: str, language_code: str) 
     }
 
 
+def _get_justtcg_price_data(card_key: str) -> dict[str, Any] | None:
+    """Fetch JustTCG market price data for a card if access gate allows.
+
+    Returns None if JustTCG is not configured, gate fails, or fetch errors.
+    Never raises — failures are logged internally and None is returned.
+    """
+    try:
+        from pricing_sources.justtcg import JustTCGAdapter
+        from pricing_sources.provider_access import get_provider_access_status
+        from pricing_sources.base import PriceQuery
+
+        config = dict(os.environ)
+        decision = get_provider_access_status("justtcg", config)
+
+        if not decision.live_calls_allowed:
+            return None
+
+        adapter = JustTCGAdapter()
+        query = PriceQuery(
+            target_type="sellable_sku",
+            target_id=card_key,
+        )
+        queries = adapter.build_queries(query)
+        if not queries:
+            return None
+
+        raw = adapter.fetch(queries[0], config=config)
+        if not raw:
+            return None
+
+        observations = adapter.normalise(raw, query)
+        if not observations:
+            return None
+
+        # Pick the first observation with the highest confidence match
+        matches = adapter.match_observations(observations, query)
+        if not matches:
+            return None
+
+        best_match = max(matches, key=lambda m: {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "UNUSABLE": 0}.get(m.match_confidence.value, 0))
+        obs = best_match.observation
+
+        return {
+            "source_code": "justtcg",
+            "currency": obs.currency,
+            "amount": obs.amount,
+            "condition": obs.condition,
+            "finish": obs.finish,
+            "printing_label": obs.printing_label,
+            "listing_type": obs.listing_type.value,
+            "observation_type": obs.observation_type,
+            "match_confidence": best_match.match_confidence.value,
+            "match_method": best_match.match_method,
+            "attribution": "Pricing data provided by JustTCG",
+        }
+    except Exception:
+        # Never let JustTCG failures break the endpoint
+        return None
+
+
+def _get_justtcg_provider_status() -> dict[str, Any]:
+    """Return current JustTCG provider status based on access gate."""
+    try:
+        from pricing_sources.provider_access import get_provider_access_status
+        config = dict(os.environ)
+        decision = get_provider_access_status("justtcg", config)
+
+        if decision.live_calls_allowed:
+            return {
+                "role": "supporting_usd_fallback",
+                "status": "enabled",
+                "live_enabled": True,
+                "terms_confirmed": True,
+                "notes": "USD market/current pricing. SaveRoom ecosystem apps only. Not for external developer API resale.",
+            }
+        elif decision.status == "NOT_CONFIGURED":
+            return {
+                "role": "supporting_usd_fallback",
+                "status": "not_configured",
+                "live_enabled": False,
+                "terms_confirmed": False,
+                "notes": "Not configured. Set POKEMON_PRICE_SOURCE_JUSTTCG_API_KEY to enable.",
+            }
+        else:
+            return {
+                "role": "supporting_usd_fallback",
+                "status": "disabled",
+                "live_enabled": False,
+                "terms_confirmed": decision.status == "ENABLED_TERMS_CONFIRMED",
+                "notes": f"Access gate: {decision.status}. {'; '.join(decision.reasons)}",
+            }
+    except Exception:
+        return {
+            "role": "supporting_usd_fallback",
+            "status": "disabled",
+            "live_enabled": False,
+            "terms_confirmed": False,
+            "notes": "Access gate check failed.",
+        }
+
+
 def get_en_name(conn: sqlite3.Connection, language_code: str, card_id: str, local_name: str) -> str | None:
     """Look up the English name for a card from the translation table."""
     if language_code == 'en':
@@ -2067,13 +2168,7 @@ LIMIT ? OFFSET ?
                 'terms_confirmed': False,
                 'notes': 'Free keyless source. Current local evidence base. Not UK sold evidence.',
             },
-            'justtcg': {
-                'role': 'supporting_usd_fallback',
-                'status': 'blocked_pending_terms',
-                'live_enabled': False,
-                'terms_confirmed': False,
-                'notes': 'USD external market/current pricing. Blocked pending approved access/terms/caching/fixture/display permissions.',
-            },
+            "justtcg": _get_justtcg_provider_status(),
             'cardmarket': {
                 'role': 'supporting_eu_fallback',
                 'status': 'blocked_access_closed',
@@ -2369,12 +2464,43 @@ LIMIT ? OFFSET ?
         cur.execute('SELECT 1 FROM v2_card_detail_api_cache WHERE language_code=? AND card_id=? LIMIT 1', (language_code, card_id))
         if not cur.fetchone():
             raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': canonical_card_key(language_code, card_id)})
-        return {
-            'data': v1_price_summary(conn, language_code, card_id),
+
+        summary = v1_price_summary(conn, language_code, card_id)
+
+        # Attempt JustTCG fetch (disabled by default, gated)
+        justtcg_data = None
+        try:
+            justtcg_data = _get_justtcg_price_data(canonical_card_key(language_code, card_id))
+        except Exception:
+            pass  # Never let JustTCG failures break the endpoint
+        justtcg_status = _get_justtcg_provider_status()
+
+        # If JustTCG returned data, add to source_breakdown as supporting source
+        if justtcg_data is not None:
+            summary.setdefault("justtcg_fallback", justtcg_data)
+            summary["justtcg_provider_status"] = justtcg_status
+
+        response = {
+            'data': summary,
             'card_key': canonical_card_key(language_code, card_id),
             'language_code': language_code,
             'card_id': card_id,
+            'justtcg_provider_status': justtcg_status,
         }
+
+        # Apply exposure policy — conservative default: treat all v1 API
+        # traffic as external developer surface. Internal/customer app
+        # exposure can be enabled later via trusted surface detection.
+        try:
+            from pricing_sources.exposure_policy import (
+                apply_pricing_exposure_policy,
+                SURFACE_EXTERNAL_DEVELOPER_API,
+            )
+            response = apply_pricing_exposure_policy(response, SURFACE_EXTERNAL_DEVELOPER_API)
+        except Exception:
+            pass  # Never let exposure policy break the endpoint
+
+        return response
 
     @app.get('/api/v1/prices/history/cards/{card_key:path}', response_model=PriceHistoryResponseV1)
     def v1_card_price_history(

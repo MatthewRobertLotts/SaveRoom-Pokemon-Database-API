@@ -210,6 +210,7 @@ class PriceSummaryResponseV1(BaseModel):
     card_key: str
     language_code: str
     card_id: str
+    justtcg_provider_status: dict[str, Any] | None = None
 
 
 class PriceHistoryResponseV1(BaseModel):
