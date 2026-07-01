@@ -53,7 +53,8 @@ Related existing inventory routes are also app-relevant:
 |---|---|---|
 | `GET /api/v1/inventory/items` | Read-only | Existing list with `limit`, `offset`, `status`, `location_code`, and `q`. |
 | `POST /api/v1/inventory/items` | Mutating | Existing item creation; not changed in v12.1 milestone 1. |
-| `GET /api/v1/inventory/items/{item_id}` | Read-only | Existing item detail. Good base for POS item pages but lacks workflow summary. |
+| `GET /api/v1/inventory/items/{item_id}` | Read-only | Existing item detail. Good base for POS item pages. |
+| `GET /api/v1/inventory/items/{item_id}/workflow` | Read-only | Implemented in v12.1 milestone 2; composes inventory item, latest draft link, draft, reservation, sale, and summary state for POS/frontends. |
 | `PUT /api/v1/inventory/items/{item_id}` | Mutating metadata | Existing safe metadata update; location changes intentionally rejected here. |
 | `PATCH /api/v1/inventory/items/{item_id}/status` | Mutating inventory status | Existing direct status mutation. POS workflow should prefer explicit complete-sale when selling a draft-linked item. |
 | `PATCH /api/v1/inventory/items/{item_id}/location` | Mutating location | Existing location transaction path. |
@@ -94,8 +95,8 @@ Stable enough now:
 
 Awkward/inconsistent for app clients:
 
-- The inventory item response does not include listing workflow state: linked draft IDs, active reservation, completed sale, or whether the item is already part of a local listing workflow.
-- A frontend must manually call draft list/read, reservation read, sales list, and inventory transactions to reconstruct one item's workflow state.
+- Base inventory item detail remains focused on physical item data; v12.1 adds `GET /api/v1/inventory/items/{item_id}/workflow` for linked draft/reservation/sale state.
+- Before v12.1 milestone 2, a frontend had to manually call draft list/read, reservation read, sales list, and inventory transactions to reconstruct one item's workflow state; the new workflow endpoint now composes that view read-only.
 - The item image/photos model is separate from card app-ready image metadata; clients need clearer guidance on when to use card image fields vs physical item photos.
 - `GET /api/v1/inventory/items` has general inventory filters but no workflow filters such as `has_draft`, `has_reservation`, `has_sale`, or `card_key`.
 
@@ -200,8 +201,8 @@ What is awkward:
 
 Highest-value missing reads/filters:
 
-1. `GET /api/v1/inventory/items/{item_id}/workflow` — read-only composed workflow state for one physical item.
-2. `GET /api/v1/listings/drafts/{draft_id}/workflow` — read-only composed workflow state for one draft.
+1. Implemented in v12.1 milestone 2: `GET /api/v1/inventory/items/{item_id}/workflow` — read-only composed workflow state for one physical item.
+2. Next candidate: `GET /api/v1/listings/drafts/{draft_id}/workflow` — read-only composed workflow state for one draft.
 3. `GET /api/v1/listings/drafts` filters: `status`, `platform`, `card_key`, `inventory_item_id`, `has_reservation`, `has_sale`.
 4. `GET /api/v1/sales/summary` — read-only summary totals by date/platform/status/card/inventory item.
 5. Dedicated inventory history alias only if the existing `GET /api/v1/inventory/items/{item_id}/transactions` is not app-friendly enough.
@@ -231,13 +232,13 @@ Important mutation boundary: `POST /api/v1/listings/drafts/{draft_id}/complete-s
 
 Ranked candidates:
 
-### 1. Recommended: inventory item workflow summary endpoint
+### 1. Implemented: inventory item workflow summary endpoint
 
 ```text
 GET /api/v1/inventory/items/{item_id}/workflow
 ```
 
-Why this should be next:
+Why this was selected first:
 
 - It is read-only and therefore lower risk than new mutations.
 - It directly answers the hardest POS question: "what is the current workflow state for this physical item?"
@@ -336,10 +337,10 @@ Do not include in this milestone:
 
 ## Recommended next action
 
-Ask Matthew to approve the first v12.1 implementation milestone:
+After v12.1 milestone 2, the recommended next task is the read-only companion endpoint:
 
 ```text
-GET /api/v1/inventory/items/{item_id}/workflow
+GET /api/v1/listings/drafts/{draft_id}/workflow
 ```
 
-Scope should be read-only composition of existing local data, with fixture-backed tests and explicit no-provider/no-marketplace/no-LLM guards.
+Scope should remain read-only composition of existing local data, with fixture-backed tests and explicit no-provider/no-marketplace/no-LLM guards.

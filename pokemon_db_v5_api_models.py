@@ -539,6 +539,17 @@ class InventoryItemResponse(BaseModel):
     data: PhysicalItemResponse
 
 
+class InventoryItemWorkflowMetadataV1(BaseModel):
+    api_version: str = 'v1'
+    contract: str = 'v12.1-inventory-item-workflow'
+    generated_at: str | None = None
+
+
+class InventoryItemWorkflowResponseV1(BaseModel):
+    data: dict[str, Any]
+    metadata: InventoryItemWorkflowMetadataV1
+
+
 class TransactionListResponse(BaseModel):
     data: list[TransactionResponse]
     pagination: dict[str, Any]

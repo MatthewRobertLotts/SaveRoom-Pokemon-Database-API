@@ -40,6 +40,7 @@ Initial v1 resources:
 - `POST /api/v1/listings/assist/cards/{card_key}` — v12 deterministic listing assistant output for Whatnot, eBay, Shopify, and generic workflows.
 - `POST /api/v1/listings/drafts/cards/{card_key}` — v12 local listing draft creation from deterministic listing assistant output.
 - `POST /api/v1/inventory/items/{item_id}/listing-draft` — v12 local inventory-to-listing draft bridge for owned physical inventory items.
+- `GET /api/v1/inventory/items/{item_id}/workflow` — v12.1 read-only POS/inventory workflow summary for one physical item.
 - `GET /api/v1/listings/drafts/{draft_id}` — v12 local listing draft retrieval.
 - `GET /api/v1/listings/drafts` — v12 recent local listing draft list.
 - `PATCH /api/v1/listings/drafts/{draft_id}` — v12 local listing draft editable-field update.
@@ -362,6 +363,7 @@ Endpoints:
 |---|---|---|
 | POST | `/api/v1/listings/drafts/cards/{card_key}` | Generate listing assistant output locally and save it as a draft. |
 | POST | `/api/v1/inventory/items/{item_id}/listing-draft` | Create a local listing draft from an owned physical inventory item. |
+| GET | `/api/v1/inventory/items/{item_id}/workflow` | Return read-only local workflow state for a physical inventory item. |
 | GET | `/api/v1/listings/drafts/{draft_id}` | Return one saved local draft. |
 | GET | `/api/v1/listings/drafts` | List recent local drafts, including archived drafts by default. |
 | PATCH | `/api/v1/listings/drafts/{draft_id}` | Update safe editable local draft fields. |
@@ -628,6 +630,75 @@ Response shape:
 ```
 
 The bridge writes a local link record in `inventory_listing_draft_links` with `inventory_item_id`, `draft_id`, `card_key`, `quantity`, and `created_at`. It stores no marketplace IDs, account IDs, provider payloads, headers, API keys, or raw filesystem paths.
+
+### v12.1 Inventory Item Workflow Summary
+
+Endpoint:
+
+```text
+GET /api/v1/inventory/items/{item_id}/workflow
+```
+
+This read-only endpoint composes existing local workflow state for one physical inventory item. It reads from `physical_items`, `inventory_listing_draft_links`, `listing_drafts`, `listing_draft_inventory_reservations`, `listing_draft_sales`, and existing inventory transaction/detail helpers where useful. It does not mutate inventory, drafts, reservations, or sales. It does not call providers, marketplaces, network APIs, or LLMs.
+
+Response model:
+
+```text
+InventoryItemWorkflowResponseV1
+```
+
+Response shape:
+
+```json
+{
+  "data": {
+    "item_id": "item_...",
+    "current_state": "available",
+    "inventory_item": {},
+    "listing_draft_link": null,
+    "draft": null,
+    "reservation": null,
+    "sale": null,
+    "summary": {
+      "has_listing_draft": false,
+      "has_active_reservation": false,
+      "has_completed_sale": false,
+      "is_available_for_listing": true,
+      "is_sold": false
+    }
+  },
+  "metadata": {
+    "api_version": "v1",
+    "contract": "v12.1-inventory-item-workflow",
+    "generated_at": "..."
+  }
+}
+```
+
+Allowed `current_state` values:
+
+```text
+available
+draft_created
+ready
+reserved
+sold
+archived
+unavailable
+unknown
+```
+
+State derivation follows existing inventory/listing workflow conventions: sold item or completed sale wins; active reservation means reserved; linked ready draft means ready; linked archived draft means archived; any other linked draft means draft_created; owned/consigned item with no workflow is available; other physical item statuses are unavailable or unknown.
+
+Safety contract:
+
+- read-only;
+- no inventory state changes;
+- no draft/reservation/sale creation or mutation;
+- no provider or marketplace calls;
+- no LLM calls;
+- no marketplace publishing, order import, or payment capture;
+- no API keys, headers, account metadata, raw provider payloads, sanitized candidates, private provider paths, or raw filesystem paths in the response.
 
 ## v11 Market Evidence Endpoints (2026-06-27)
 
