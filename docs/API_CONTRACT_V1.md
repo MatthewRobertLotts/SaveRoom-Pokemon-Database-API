@@ -41,6 +41,7 @@ Initial v1 resources:
 - `POST /api/v1/listings/drafts/cards/{card_key}` — v12 local listing draft creation from deterministic listing assistant output.
 - `POST /api/v1/inventory/items/{item_id}/listing-draft` — v12 local inventory-to-listing draft bridge for owned physical inventory items.
 - `GET /api/v1/inventory/items/{item_id}/workflow` — v12.1 read-only POS/inventory workflow summary for one physical item.
+- `GET /api/v1/listings/drafts/{draft_id}/workflow` — v12.1 read-only listing draft workflow summary for one local draft.
 - `GET /api/v1/listings/drafts/{draft_id}` — v12 local listing draft retrieval.
 - `GET /api/v1/listings/drafts` — v12 recent local listing draft list.
 - `PATCH /api/v1/listings/drafts/{draft_id}` — v12 local listing draft editable-field update.
@@ -364,6 +365,7 @@ Endpoints:
 | POST | `/api/v1/listings/drafts/cards/{card_key}` | Generate listing assistant output locally and save it as a draft. |
 | POST | `/api/v1/inventory/items/{item_id}/listing-draft` | Create a local listing draft from an owned physical inventory item. |
 | GET | `/api/v1/inventory/items/{item_id}/workflow` | Return read-only local workflow state for a physical inventory item. |
+| GET | `/api/v1/listings/drafts/{draft_id}/workflow` | Return read-only local workflow state for one listing draft. |
 | GET | `/api/v1/listings/drafts/{draft_id}` | Return one saved local draft. |
 | GET | `/api/v1/listings/drafts` | List recent local drafts, including archived drafts by default. |
 | PATCH | `/api/v1/listings/drafts/{draft_id}` | Update safe editable local draft fields. |
@@ -689,6 +691,89 @@ unknown
 ```
 
 State derivation follows existing inventory/listing workflow conventions: sold item or completed sale wins; active reservation means reserved; linked ready draft means ready; linked archived draft means archived; any other linked draft means draft_created; owned/consigned item with no workflow is available; other physical item statuses are unavailable or unknown.
+
+Safety contract:
+
+- read-only;
+- no inventory state changes;
+- no draft/reservation/sale creation or mutation;
+- no provider or marketplace calls;
+- no LLM calls;
+- no marketplace publishing, order import, or payment capture;
+- no API keys, headers, account metadata, raw provider payloads, sanitized candidates, private provider paths, or raw filesystem paths in the response.
+
+### v12.1 Listing Draft Workflow Summary
+
+Endpoint:
+
+```text
+GET /api/v1/listings/drafts/{draft_id}/workflow
+```
+
+This read-only endpoint composes existing local workflow state for one listing draft. It reads from `listing_drafts`, `inventory_listing_draft_links`, `physical_items`, `listing_draft_inventory_reservations`, `listing_draft_sales`, and inventory transaction/detail helpers where useful. It does not mutate drafts, inventory, reservations, or sales. It does not call providers, marketplaces, network APIs, or LLMs.
+
+Response model:
+
+```text
+ListingDraftWorkflowResponseV1
+```
+
+Response shape:
+
+```json
+{
+  "data": {
+    "draft_id": "ld_...",
+    "current_state": "ready",
+    "draft": {},
+    "listing_draft_link": null,
+    "inventory_item": null,
+    "reservation": null,
+    "sale": null,
+    "summary": {
+      "is_inventory_linked": false,
+      "has_active_reservation": false,
+      "has_completed_sale": false,
+      "is_ready": true,
+      "is_archived": false,
+      "is_sold": false,
+      "can_reserve": false,
+      "can_complete_sale": false
+    }
+  },
+  "metadata": {
+    "api_version": "v1",
+    "contract": "v12.1-listing-draft-workflow",
+    "generated_at": "..."
+  }
+}
+```
+
+Allowed `current_state` values:
+
+```text
+draft
+ready
+reserved
+sold
+archived
+unlinked
+unavailable
+unknown
+```
+
+State derivation follows existing local workflow conventions: completed sale or linked sold inventory wins as sold; archived draft is archived; active reservation is reserved; ready draft is ready; linked unavailable/lost inventory is unavailable; draft status is draft; an unlinked draft with an unknown non-draft/non-ready/non-archived status is unlinked; otherwise unknown. A card-only draft with `status=draft` returns `current_state=draft`; the unlinked status is reserved for unlinked drafts whose draft status does not already explain the state.
+
+Summary booleans:
+
+- `is_inventory_linked`: latest inventory-to-draft link exists.
+- `has_active_reservation`: active `reserved` reservation exists.
+- `has_completed_sale`: completed local sale exists.
+- `is_ready`: draft status is `ready`.
+- `is_archived`: draft status is `archived`.
+- `is_sold`: derived state is `sold`.
+- `can_reserve`: inventory-linked draft in `draft` or `ready` state, with no active reservation and no completed sale.
+- `can_complete_sale`: inventory-linked draft has an active reservation, no completed sale, and is not archived.
 
 Safety contract:
 

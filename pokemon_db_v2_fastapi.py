@@ -101,6 +101,7 @@ from pokemon_db_v5_api_models import (
     ListingDraftCreateRequestV1,
     ListingDraftListResponseV1,
     ListingDraftReadyRequestV1,
+    ListingDraftWorkflowResponseV1,
     ListingDraftReservationResponseV1,
     ListingDraftReserveRequestV1,
     ListingDraftResponseV1,
@@ -995,6 +996,14 @@ def _inventory_item_workflow_metadata() -> dict[str, Any]:
     }
 
 
+def _listing_draft_workflow_metadata() -> dict[str, Any]:
+    return {
+        'api_version': 'v1',
+        'contract': 'v12.1-listing-draft-workflow',
+        'generated_at': now_utc(),
+    }
+
+
 def _workflow_link_row_to_response(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
     if row is None:
         return None
@@ -1031,6 +1040,35 @@ def _derive_inventory_item_workflow_state(
     if status in {'owned', 'consigned'}:
         return 'available'
     if status:
+        return 'unavailable'
+    return 'unknown'
+
+
+def _derive_listing_draft_workflow_state(
+    *,
+    draft_status: str | None,
+    inventory_status: str | None,
+    linked: bool,
+    active_reservation: dict[str, Any] | None,
+    sale: dict[str, Any] | None,
+) -> str:
+    draft_status_normalized = (draft_status or '').strip().lower()
+    inventory_status_normalized = (inventory_status or '').strip().lower()
+    if sale is not None or inventory_status_normalized == 'sold':
+        return 'sold'
+    if draft_status_normalized == 'archived':
+        return 'archived'
+    if active_reservation is not None:
+        return 'reserved'
+    if draft_status_normalized == 'ready':
+        return 'ready'
+    if linked and inventory_status_normalized in {'lost', 'unavailable', 'damaged', 'removed', 'missing'}:
+        return 'unavailable'
+    if draft_status_normalized == 'draft':
+        return 'draft'
+    if not linked:
+        return 'unlinked'
+    if inventory_status_normalized and inventory_status_normalized not in {'owned', 'consigned'}:
         return 'unavailable'
     return 'unknown'
 
@@ -3362,6 +3400,98 @@ LIMIT ? OFFSET ?
                     'has_more': offset + len(data) < total,
                 },
                 'metadata': _listing_draft_metadata(),
+            }
+        finally:
+            conn.close()
+
+    @app.get('/api/v1/listings/drafts/{draft_id}/workflow', response_model=ListingDraftWorkflowResponseV1)
+    def v12_1_get_listing_draft_workflow(
+        draft_id: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        '''Return a read-only local workflow summary for one listing draft.'''
+        conn = connect(app.state.db)
+        try:
+            ensure_inventory_support(conn)
+            cur = conn.cursor()
+            tenant_id = get_tenant_from_key(_)
+            draft_row = _get_listing_draft_row_or_404(conn, draft_id)
+            draft = _listing_draft_row_to_response(draft_row)
+
+            link_row = _get_inventory_link_for_draft(conn, draft_id)
+            link = _workflow_link_row_to_response(link_row)
+
+            inventory_item = None
+            inventory_status = None
+            if link is not None:
+                inventory_row = cur.execute(
+                    'SELECT * FROM physical_items WHERE item_id = ? AND tenant_id = ?',
+                    (link['inventory_item_id'], tenant_id),
+                ).fetchone()
+                if inventory_row is not None:
+                    inventory_item = _inventory_item_row_to_workflow_response(conn, inventory_row, tenant_id)
+                    inventory_status = inventory_item.get('status')
+
+            active_reservation_row = _get_active_reservation_for_draft(conn, draft_id)
+            latest_reservation_row = conn.execute(
+                '''
+                SELECT * FROM listing_draft_inventory_reservations
+                WHERE draft_id = ?
+                ORDER BY updated_at DESC, created_at DESC
+                LIMIT 1
+                ''',
+                (draft_id,),
+            ).fetchone()
+            reservation = _reservation_row_to_response(active_reservation_row or latest_reservation_row)
+            active_reservation = _reservation_row_to_response(active_reservation_row)
+
+            _ensure_listing_draft_sales_table(conn)
+            sale_row = conn.execute(
+                '''
+                SELECT * FROM listing_draft_sales
+                WHERE draft_id = ? AND status = 'completed'
+                ORDER BY sold_at DESC, created_at DESC, sale_id DESC
+                LIMIT 1
+                ''',
+                (draft_id,),
+            ).fetchone()
+            sale = _sale_row_to_response(sale_row) if sale_row is not None else None
+
+            current_state = _derive_listing_draft_workflow_state(
+                draft_status=draft.get('status'),
+                inventory_status=inventory_status,
+                linked=link is not None,
+                active_reservation=active_reservation,
+                sale=sale,
+            )
+            is_archived = draft.get('status') == 'archived'
+            is_sold = current_state == 'sold'
+            summary = {
+                'is_inventory_linked': link is not None,
+                'has_active_reservation': active_reservation is not None,
+                'has_completed_sale': sale is not None,
+                'is_ready': draft.get('status') == 'ready',
+                'is_archived': is_archived,
+                'is_sold': is_sold,
+                'can_reserve': link is not None
+                and current_state in {'draft', 'ready'}
+                and active_reservation is None
+                and sale is None,
+                'can_complete_sale': link is not None and active_reservation is not None and sale is None and not is_archived,
+            }
+
+            return {
+                'data': {
+                    'draft_id': draft_id,
+                    'current_state': current_state,
+                    'draft': draft,
+                    'listing_draft_link': link,
+                    'inventory_item': inventory_item,
+                    'reservation': reservation,
+                    'sale': sale,
+                    'summary': summary,
+                },
+                'metadata': _listing_draft_workflow_metadata(),
             }
         finally:
             conn.close()
@@ -6385,6 +6515,60 @@ LIMIT ? OFFSET ?
             'name_english': row[6],
         }
 
+    def _inventory_item_row_to_workflow_response(
+        conn: sqlite3.Connection,
+        row: sqlite3.Row | dict[str, Any],
+        tenant_id: int,
+    ) -> dict[str, Any]:
+        d = dict(row)
+        cur = conn.cursor()
+        sku_identity = build_sku_identity(conn, d['sku_id'])
+        last_txn = cur.execute(
+            "SELECT * FROM inventory_transactions WHERE item_id=? AND tenant_id=? ORDER BY transaction_id DESC LIMIT 1",
+            (d['item_id'], tenant_id),
+        ).fetchone()
+        images = cur.execute(
+            "SELECT * FROM item_images WHERE item_id=? ORDER BY is_primary DESC, image_id",
+            (d['item_id'],),
+        ).fetchall()
+        snapshot = cur.execute(
+            """
+            SELECT recommended_price FROM price_snapshots
+            WHERE sku_id=? AND price_type='raw'
+            ORDER BY calculated_at DESC LIMIT 1
+            """,
+            (d['sku_id'],),
+        ).fetchone()
+        current_value = snapshot['recommended_price'] if snapshot else None
+        return {
+            'item_id': d['item_id'],
+            'sku_id': d['sku_id'],
+            'sku_identity': sku_identity,
+            'revision': d.get('revision', 0),
+            'certification_number': d['certification_number'],
+            'certification_company': d['certification_company'],
+            'certification_grade': d['certification_grade'],
+            'certification_qualifier': d['certification_qualifier'],
+            'item_condition': d['item_condition'],
+            'acquired_date': d['acquired_date'],
+            'acquired_price': d['acquired_price'],
+            'acquired_currency': d['acquired_currency'],
+            'acquired_source': d['acquired_source'],
+            'acquired_source_reference': d['acquired_source_reference'],
+            'location_code': d['location_code'],
+            'location_detail': d['location_detail'],
+            'status': d['status'],
+            'notes': d['notes'],
+            'current_value': current_value,
+            'current_value_currency': 'GBP',
+            'images': [dict(img) for img in images],
+            'last_transaction': dict(last_txn) if last_txn else None,
+            'tenant_id': d['tenant_id'],
+            'created_by': d['created_by'],
+            'created_at': d['created_at'],
+            'updated_at': d['updated_at'],
+        }
+
     def resolve_inventory_listing_source(conn: sqlite3.Connection, item_id: str, tenant_id: int) -> dict[str, Any]:
         """Resolve a physical inventory item to local listing-draft source data."""
         cur = conn.cursor()
@@ -6887,52 +7071,7 @@ LIMIT ? OFFSET ?
                 raise v1_error(404, 'item_not_found', 'Physical item not found.', {'item_id': item_id})
 
             d = dict(row)
-            sku_identity = build_sku_identity(conn, d['sku_id'])
-            last_txn = cur.execute(
-                "SELECT * FROM inventory_transactions WHERE item_id=? AND tenant_id=? ORDER BY transaction_id DESC LIMIT 1",
-                (item_id, tenant_id),
-            ).fetchone()
-            images = cur.execute(
-                "SELECT * FROM item_images WHERE item_id=? ORDER BY is_primary DESC, image_id",
-                (item_id,),
-            ).fetchall()
-            snapshot = cur.execute(
-                """
-                SELECT recommended_price FROM price_snapshots
-                WHERE sku_id=? AND price_type='raw'
-                ORDER BY calculated_at DESC LIMIT 1
-                """,
-                (d['sku_id'],),
-            ).fetchone()
-            current_value = snapshot['recommended_price'] if snapshot else None
-            inventory_item = {
-                'item_id': d['item_id'],
-                'sku_id': d['sku_id'],
-                'sku_identity': sku_identity,
-                'revision': d.get('revision', 0),
-                'certification_number': d['certification_number'],
-                'certification_company': d['certification_company'],
-                'certification_grade': d['certification_grade'],
-                'certification_qualifier': d['certification_qualifier'],
-                'item_condition': d['item_condition'],
-                'acquired_date': d['acquired_date'],
-                'acquired_price': d['acquired_price'],
-                'acquired_currency': d['acquired_currency'],
-                'acquired_source': d['acquired_source'],
-                'acquired_source_reference': d['acquired_source_reference'],
-                'location_code': d['location_code'],
-                'location_detail': d['location_detail'],
-                'status': d['status'],
-                'notes': d['notes'],
-                'current_value': current_value,
-                'current_value_currency': 'GBP',
-                'images': [dict(img) for img in images],
-                'last_transaction': dict(last_txn) if last_txn else None,
-                'tenant_id': d['tenant_id'],
-                'created_by': d['created_by'],
-                'created_at': d['created_at'],
-                'updated_at': d['updated_at'],
-            }
+            inventory_item = _inventory_item_row_to_workflow_response(conn, row, tenant_id)
 
             link_row = None
             if object_exists(cur, 'inventory_listing_draft_links'):

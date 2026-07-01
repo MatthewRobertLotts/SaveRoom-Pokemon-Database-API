@@ -1068,6 +1068,17 @@ class ListingDraftListResponseV1(BaseModel):
     metadata: ListingDraftMetadataV1
 
 
+class ListingDraftWorkflowMetadataV1(BaseModel):
+    api_version: str = 'v1'
+    contract: str = 'v12.1-listing-draft-workflow'
+    generated_at: str | None = None
+
+
+class ListingDraftWorkflowResponseV1(BaseModel):
+    data: dict[str, Any]
+    metadata: ListingDraftWorkflowMetadataV1
+
+
 class InventoryListingDraftCreateRequestV1(BaseModel):
     platform: Literal['whatnot', 'ebay', 'shopify', 'generic'] = 'generic'
     quantity: int | None = Field(default=None, ge=1)
