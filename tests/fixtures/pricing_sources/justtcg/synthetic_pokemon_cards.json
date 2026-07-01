@@ -1,0 +1,87 @@
+{
+  "_metadata": {
+    "provider_code": "justtcg",
+    "fixture_type": "synthetic_schema_shape",
+    "permission_basis": "internally generated synthetic payload based on documented schema, not real JustTCG data",
+    "allowed_for_unit_tests": true,
+    "contains_real_provider_data": false,
+    "generated_at": "2026-06-29T00:00:00Z",
+    "note": "This is a synthetic fixture matching the documented JustTCG API schema shape. It contains no real provider data, no API keys, and no account metadata."
+  },
+  "data": [
+    {
+      "uuid": "synthetic-001-card-uuid-v5",
+      "id": "pokemon-scarlet-violet-017-charizard-v-synthetic",
+      "name": "Charizard V",
+      "game": "Pokemon",
+      "set": "scarlet-violet",
+      "set_name": "Scarlet & Violet",
+      "number": "017",
+      "tcgplayerId": "synthetic-219042",
+      "rarity": "Ultra Rare",
+      "variants": [
+        {
+          "uuid": "synthetic-001-variant-nm-normal-uuid",
+          "id": "pokemon-scarlet-violet-017-charizard-v-near-mint-synthetic",
+          "condition": "Near Mint",
+          "printing": "Normal",
+          "language": "English",
+          "tcgplayerSkuId": "synthetic-1234567",
+          "price": 4.99,
+          "lastUpdated": 1748899200,
+          "priceChange24hr": 0.10,
+          "priceChange7d": -0.20,
+          "avgPrice": 5.10,
+          "priceHistory": [
+            {"p": 4.80, "t": 1748640000},
+            {"p": 5.00, "t": 1748726400},
+            {"p": 4.99, "t": 1748812800}
+          ]
+        },
+        {
+          "uuid": "synthetic-001-variant-nm-foil-uuid",
+          "id": "pokemon-scarlet-violet-017-charizard-v-near-mint-foil-synthetic",
+          "condition": "Near Mint",
+          "printing": "Foil",
+          "language": "English",
+          "tcgplayerSkuId": "synthetic-1234568",
+          "price": 12.50,
+          "lastUpdated": 1748899200,
+          "priceChange24hr": 0.50,
+          "priceChange7d": -1.00,
+          "avgPrice": 13.20
+        }
+      ]
+    },
+    {
+      "uuid": "synthetic-002-card-uuid-v5",
+      "id": "pokemon-base1-4-charizard-synthetic",
+      "name": "Charizard",
+      "game": "Pokemon",
+      "set": "base1",
+      "set_name": "Base Set",
+      "number": "4",
+      "tcgplayerId": "synthetic-56543",
+      "rarity": "Holo Rare",
+      "variants": [
+        {
+          "uuid": "synthetic-002-variant-lp-normal-uuid",
+          "id": "pokemon-base1-4-charizard-lightly-played-synthetic",
+          "condition": "Lightly Played",
+          "printing": "Normal",
+          "language": "English",
+          "tcgplayerSkuId": "synthetic-7654321",
+          "price": 185.00,
+          "lastUpdated": 1748899200,
+          "avgPrice": 190.50
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "total": 2,
+    "limit": 20,
+    "offset": 0,
+    "hasMore": false
+  }
+}

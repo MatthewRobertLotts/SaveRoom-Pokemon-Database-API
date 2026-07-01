@@ -7,7 +7,7 @@ can change without breaking external clients.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -73,6 +73,7 @@ class PriceSummaryV1(BaseModel):
     no_evidence_reason: str | None = None
     by_condition: dict = {}
     with_postage: bool = False
+    recommendation: dict[str, Any] | None = Field(default=None, description="v12 UK-primary pricing recommendation derived from local GBP evidence only. Fallback provider blending is not wired in this milestone.")
 
 
 class PriceEvidenceV1(BaseModel):
@@ -210,6 +211,7 @@ class PriceSummaryResponseV1(BaseModel):
     card_key: str
     language_code: str
     card_id: str
+    justtcg_provider_status: dict[str, Any] | None = None
 
 
 class PriceHistoryResponseV1(BaseModel):
@@ -825,3 +827,367 @@ class IdentityBuildRunSummaryV1(BaseModel):
     commercial_variants_created: int = 0
     sellable_skus_created: int = 0
     notes: str | None = None
+
+
+# ── v12 app-ready card detail contract ──────────────────────────────────
+
+
+class AppReadyProviderStatusV1(BaseModel):
+    role: str
+    status: str
+    live_enabled: bool = False
+    terms_confirmed: bool = False
+    notes: str | None = None
+
+
+class AppReadyProviderStatusMapV1(BaseModel):
+    uk_ebay_sold: AppReadyProviderStatusV1 | None = None
+    tcgdex: AppReadyProviderStatusV1 | None = None
+    justtcg: AppReadyProviderStatusV1 | None = None
+    cardmarket: AppReadyProviderStatusV1 | None = None
+    tcgplayer: AppReadyProviderStatusV1 | None = None
+
+
+class AppReadyPriceV1(BaseModel):
+    amount: float | None = None
+    currency: str
+    region: str | None = None
+    price_type: str
+    source: str | None = None
+    evidence_count: int = 0
+    confidence: str | None = None
+    original_currency: str | None = None
+    original_amount: float | None = None
+    fx_rate: float | None = None
+    fx_rate_source: str | None = None
+    fx_rate_timestamp: str | None = None
+
+
+class AppReadySourceBreakdownV1(BaseModel):
+    tier: int | None = None
+    source: str
+    currency: str
+    price_type: str
+    evidence_count: int = 0
+    median_gbp: float | None = None
+    low_gbp: float | None = None
+    high_gbp: float | None = None
+    sample_date: str | None = None
+
+
+class AppReadyEvidenceSummaryV1(BaseModel):
+    total_evidence: int = 0
+    uk_evidence: int = 0
+    uk_tier_1_source: str | None = None
+    has_uk_sold_evidence: bool = False
+    has_converted_evidence: bool = False
+    oldest_evidence_date: str | None = None
+    newest_evidence_date: str | None = None
+
+
+class AppReadyCardV1(BaseModel):
+    card_key: str
+    card_id: str | None = None
+    canonical_printing_id: str | None = None
+    name: str | None = None
+    name_english: str | None = None
+    language_code: str | None = None
+    number: str | None = None
+    rarity: str | None = None
+    supertype: str | None = None
+    subtypes: list[str] | None = None
+
+
+class AppReadySetV1(BaseModel):
+    set_id: str | None = None
+    set_code: str | None = None
+    name: str | None = None
+    localized_name: str | None = None
+    release_date: str | None = None
+    language_code: str | None = None
+
+
+class AppReadyImageV1(BaseModel):
+    primary_image_url: str | None = None
+    thumbnail_url: str | None = None
+    signed_image_url: str | None = None
+    has_local_image: bool = False
+    image_policy_status: str | None = None
+    missing_image: bool = True
+    fallbacks: list[str] | None = None
+
+
+class AppReadyCommercialV1(BaseModel):
+    canonical_printing: dict[str, Any] | None = None
+    commercial_variants: list[dict[str, Any]] | None = None
+    sellable_skus: list[dict[str, Any]] | None = None
+    external_references: list[dict[str, Any]] | None = None
+
+
+class AppReadyPricingV1(BaseModel):
+    primary_price: AppReadyPriceV1 | None = None
+    fallback_price: AppReadyPriceV1 | None = None
+    source_breakdown: list[AppReadySourceBreakdownV1] | None = None
+    evidence_summary: AppReadyEvidenceSummaryV1 | None = None
+    confidence: str | None = None
+    warnings: list[str] | None = None
+    last_refresh: str | None = None
+
+
+class AppReadyMetadataV1(BaseModel):
+    api_version: str = "v1"
+    contract: str = "v12-app-ready-card-detail"
+    generated_at: str
+    request: dict[str, Any] | None = None
+
+
+class AppReadyCardDetailResponseV1(BaseModel):
+    data: AppReadyCardDetailDataV1
+    warnings: list[str] | None = None
+    metadata: AppReadyMetadataV1 | None = None
+
+
+class AppReadyCardDetailDataV1(BaseModel):
+    card: AppReadyCardV1
+    set: AppReadySetV1 | None = None
+    images: AppReadyImageV1 | None = None
+    commercial: AppReadyCommercialV1 | None = None
+    pricing: AppReadyPricingV1 | None = None
+    provider_status: AppReadyProviderStatusMapV1 | None = None
+
+
+# ── v12 batch app-ready card detail contract ───────────────────────────
+
+
+class AppReadyBatchRequestV1(BaseModel):
+    card_keys: list[str] = Field(..., min_length=1, max_length=50, description='List of card keys to look up.')
+    include_pricing: bool = True
+    include_commercial: bool = True
+    include_images: bool = True
+
+
+class AppReadyBatchItemErrorV1(BaseModel):
+    code: str
+    message: str
+
+
+class AppReadyBatchItemV1(BaseModel):
+    card_key: str
+    status: str
+    detail: AppReadyCardDetailDataV1 | None = None
+    error: AppReadyBatchItemErrorV1 | None = None
+
+
+class AppReadyBatchSummaryV1(BaseModel):
+    requested: int = 0
+    returned: int = 0
+    errors: int = 0
+
+
+class AppReadyBatchResponseV1(BaseModel):
+    data: Any  # Will be set to AppReadyBatchDataV1 in practice
+    warnings: list[str] | None = None
+    metadata: Any | None = None
+
+
+class AppReadyBatchDataV1(BaseModel):
+    items: list[AppReadyBatchItemV1]
+    summary: AppReadyBatchSummaryV1
+
+
+# ── v12 Listing Assistant contract ────────────────────────────────────
+
+
+class ListingAssistantRequestV1(BaseModel):
+    platform: Literal['whatnot', 'ebay', 'shopify', 'generic'] = 'generic'
+    condition: str | None = None
+    finish: str | None = None
+    quantity: int = Field(default=1, ge=1)
+    include_images: bool = True
+    include_pricing: bool = True
+    include_commercial: bool = True
+    pricing_strategy: Literal['conservative', 'balanced', 'premium'] = 'balanced'
+    title_style: Literal['compact', 'seo', 'marketplace'] = 'marketplace'
+    notes: str | None = None
+
+
+class ListingAssistantMetadataV1(BaseModel):
+    api_version: str = 'v1'
+    contract: str = 'v12-listing-assistant'
+    generated_at: str
+    request: dict[str, Any] | None = None
+
+
+class ListingAssistantResponseV1(BaseModel):
+    data: dict[str, Any]
+    warnings: list[str] | None = None
+    metadata: ListingAssistantMetadataV1
+
+
+class ListingDraftCreateRequestV1(ListingAssistantRequestV1):
+    pass
+
+
+class ListingDraftUpdateRequestV1(BaseModel):
+    title: str | None = None
+    subtitle: str | None = None
+    description_bullets: list[str] | None = None
+    tags: list[str] | None = None
+    condition: str | None = None
+    finish: str | None = None
+    quantity: int | None = Field(default=None, ge=1)
+    status: Literal['draft', 'ready', 'archived'] | None = None
+    notes: str | None = None
+
+
+class ListingDraftMetadataV1(BaseModel):
+    api_version: str = 'v1'
+    contract: str = 'v12-listing-draft'
+    generated_at: str | None = None
+
+
+class ListingDraftResponseV1(BaseModel):
+    data: dict[str, Any]
+    metadata: ListingDraftMetadataV1
+
+
+class ListingDraftListResponseV1(BaseModel):
+    data: list[dict[str, Any]]
+    pagination: PaginationMeta
+    metadata: ListingDraftMetadataV1
+
+
+class InventoryListingDraftCreateRequestV1(BaseModel):
+    platform: Literal['whatnot', 'ebay', 'shopify', 'generic'] = 'generic'
+    quantity: int | None = Field(default=None, ge=1)
+    condition: str | None = None
+    finish: str | None = None
+    include_images: bool = True
+    include_pricing: bool = True
+    include_commercial: bool = True
+    pricing_strategy: Literal['conservative', 'balanced', 'premium'] = 'balanced'
+    title_style: Literal['compact', 'seo', 'marketplace'] = 'marketplace'
+    notes: str | None = None
+
+
+class InventoryListingDraftSourceV1(BaseModel):
+    item_id: str
+    card_key: str
+    quantity_requested: int
+    quantity_available: int | None = None
+    condition: str | None = None
+    finish: str | None = None
+    linked: bool = False
+
+
+class InventoryListingDraftBridgeMetadataV1(BaseModel):
+    api_version: str = 'v1'
+    contract: str = 'v12-inventory-listing-draft-bridge'
+    generated_at: str | None = None
+
+
+class InventoryListingDraftResponseV1(BaseModel):
+    data: dict[str, Any]
+    metadata: InventoryListingDraftBridgeMetadataV1
+
+
+class ListingDraftReadyRequestV1(BaseModel):
+    reserve_inventory: bool = True
+    notes: str | None = None
+
+
+class ListingDraftReserveRequestV1(BaseModel):
+    quantity: int | None = Field(default=None, ge=1)
+    notes: str | None = None
+
+
+class ListingDraftUnreserveRequestV1(BaseModel):
+    release_reason: str | None = None
+    set_status: Literal['draft', 'ready'] | None = None
+
+
+class ListingDraftCompleteSaleRequestV1(BaseModel):
+    confirm_completion: bool = False
+    sale_price: float | None = Field(default=None, ge=0)
+    currency: str = 'GBP'
+    platform: Literal['whatnot', 'ebay', 'shopify', 'generic', 'offline'] = 'generic'
+    sold_at: str | None = None
+    buyer_reference: str | None = None
+    external_order_reference: str | None = None
+    notes: str | None = None
+
+
+class ListingDraftReservationMetadataV1(BaseModel):
+    api_version: str = 'v1'
+    contract: str = 'v12-listing-draft-reservation'
+    generated_at: str | None = None
+
+
+class ListingDraftReservationResponseV1(BaseModel):
+    data: dict[str, Any]
+    metadata: ListingDraftReservationMetadataV1
+
+
+class ListingDraftSaleCompletionMetadataV1(BaseModel):
+    api_version: str = 'v1'
+    contract: str = 'v12-listing-draft-sale-completion'
+    generated_at: str | None = None
+
+
+class ListingDraftCompleteSaleResponseV1(BaseModel):
+    data: dict[str, Any]
+    metadata: ListingDraftSaleCompletionMetadataV1
+
+
+class LocalSaleMetadataV1(BaseModel):
+    api_version: str = 'v1'
+    contract: str = 'v12-local-sales-read'
+    generated_at: str | None = None
+
+
+class LocalSaleResponseV1(BaseModel):
+    data: dict[str, Any]
+    metadata: LocalSaleMetadataV1
+
+
+class LocalSaleListResponseV1(BaseModel):
+    data: list[dict[str, Any]]
+    pagination: PaginationMeta
+    metadata: LocalSaleMetadataV1
+
+# ── v12 Chart-ready price history models ─────────────────────────────
+
+class ChartReadyPointV1(BaseModel):
+    date: str
+    median: float | None = None
+    low: float | None = None
+    high: float | None = None
+    evidence_count: int = 0
+    confidence: str = 'VERY_LOW'
+
+
+class ChartReadySeriesV1(BaseModel):
+    source: str
+    currency: str = 'GBP'
+    price_type: str = 'market_existing_local'
+    region: str | None = None
+    points: list[ChartReadyPointV1] = []
+
+
+class ChartReadySummaryV1(BaseModel):
+    has_uk_sold_evidence: bool = False
+    has_fallback_evidence: bool = False
+    primary_source_live: bool = False
+    point_count: int = 0
+
+
+class ChartReadyPriceHistoryDataV1(BaseModel):
+    card_key: str
+    series: list[ChartReadySeriesV1] = []
+    summary: ChartReadySummaryV1
+
+
+class ChartReadyPriceHistoryResponseV1(BaseModel):
+    data: Any
+    warnings: list[str] | None = None
+    metadata: Any | None = None

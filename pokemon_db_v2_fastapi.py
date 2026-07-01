@@ -26,6 +26,7 @@ import sqlite3
 import sys
 import time
 import threading
+import uuid
 from contextlib import closing
 from pathlib import Path
 from typing import Any
@@ -78,6 +79,8 @@ from pokemon_db_v5_api_models import (
     IdentityBuildRunSummaryV1,
     IdentityHealthResponseV1,
     ImageDetailResponseV1,
+    InventoryListingDraftCreateRequestV1,
+    InventoryListingDraftResponseV1,
     InventoryItemCreate,
     InventoryItemResponse,
     InventoryItemUpdate,
@@ -90,6 +93,20 @@ from pokemon_db_v5_api_models import (
     InventoryValuationBreakdown,
     InventoryValuationResponse,
     LanguageListResponseV1,
+    ListingAssistantRequestV1,
+    ListingAssistantResponseV1,
+    ListingDraftCompleteSaleRequestV1,
+    ListingDraftCompleteSaleResponseV1,
+    ListingDraftCreateRequestV1,
+    ListingDraftListResponseV1,
+    ListingDraftReadyRequestV1,
+    ListingDraftReservationResponseV1,
+    ListingDraftReserveRequestV1,
+    ListingDraftResponseV1,
+    ListingDraftUpdateRequestV1,
+    ListingDraftUnreserveRequestV1,
+    LocalSaleListResponseV1,
+    LocalSaleResponseV1,
     PhysicalItemResponse,
     PriceHistoryResponseV1,
     PriceSummaryResponseV1,
@@ -123,7 +140,32 @@ from pokemon_db_v5_api_models import (
     PhysicalPhotoDetailResponse,
     PhysicalPhotoItem,
     ScannerScanResponse,  # v7 scanner
+    AppReadyCardDetailResponseV1,
+    AppReadyCardDetailDataV1,
+    AppReadyCardV1,
+    AppReadySetV1,
+    AppReadyImageV1,
+    AppReadyCommercialV1,
+    AppReadyPricingV1,
+    AppReadyPriceV1,
+    AppReadySourceBreakdownV1,
+    AppReadyEvidenceSummaryV1,
+    AppReadyProviderStatusMapV1,
+    AppReadyProviderStatusV1,
+    AppReadyMetadataV1,
+    AppReadyBatchRequestV1,
+    AppReadyBatchResponseV1,
+    AppReadyBatchItemV1,
+    AppReadyBatchItemErrorV1,
+    AppReadyBatchSummaryV1,
+    AppReadyBatchDataV1,
+    ChartReadyPriceHistoryResponseV1,
+    ChartReadyPriceHistoryDataV1,
+    ChartReadySeriesV1,
+    ChartReadyPointV1,
+    ChartReadySummaryV1,
 )
+from pricing_sources.uk_pricing_model import build_pricing_recommendation
 
 # DEFAULT_SETTINGS removed in v9.1 — call settings_from_env() directly
 STARTED_AT = dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat()
@@ -505,6 +547,684 @@ def _query_price_summary(cur: sqlite3.Cursor, card_id: str, language_code: str) 
         'latest_fetched_at': row[7], 'source': row[8], 'no_evidence_reason': None,
         'by_condition': by_condition, 'with_postage': False,
     }
+
+
+def _price_object(amount: float | None, *, currency: str = 'GBP', **extra: Any) -> dict[str, Any] | None:
+    """Return a small serializable price object for v1 pricing recommendations."""
+    if amount is None:
+        return None
+    # Put amount/currency last so optional metadata (e.g. raw_min/raw_max) can
+    # never accidentally overwrite the price object's identity fields.
+    return {**extra, 'amount': amount, 'currency': currency}
+
+
+def build_v1_price_recommendation(summary: dict[str, Any], provider_status_summary: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build a v1-safe local UK-only pricing recommendation section.
+
+    This v12 milestone maps existing local GBP price-summary evidence into the
+    pure pricing model. It does not call JustTCG, TotalTCG, TCGplayer,
+    Cardmarket, HTTP, DB, or environment helpers. Fallback provider blending is
+    a future milestone.
+    """
+    currency = summary.get('currency') or 'GBP'
+    raw_median = summary.get('raw_median')
+    recommended_raw_count = int(summary.get('recommended_raw_count') or 0)
+    evidence_count = int(summary.get('evidence_count') or 0)
+    uk_evidence_count = recommended_raw_count or (evidence_count if raw_median is not None else 0)
+    primary_uk_price = raw_median if raw_median is not None and uk_evidence_count > 0 else None
+
+    recommendation = build_pricing_recommendation(
+        primary_uk_price=primary_uk_price,
+        uk_evidence_count=uk_evidence_count,
+        fallback_converted_price_gbp=None,
+        fallback_provider=None,
+        candidate_multipliers=None,
+        listing_strategy='balanced',
+        provider_status_summary=provider_status_summary or {},
+    )
+    data = recommendation.to_dict()
+
+    raw_source = summary.get('source')
+    primary_obj = _price_object(
+        data['primary_uk_price'],
+        currency=currency,
+        evidence_count=uk_evidence_count,
+        source='ebay_uk_sold',
+        raw_source=raw_source,
+        source_type='local_uk_evidence',
+        price_type='sold_completed',
+        raw_min=summary.get('raw_min'),
+        raw_max=summary.get('raw_max'),
+        latest_fetched_at=summary.get('latest_fetched_at'),
+    )
+    general_obj = _price_object(
+        data['general_market_estimate'],
+        currency=currency,
+        source_type='local_uk_evidence' if data['general_market_estimate'] is not None else None,
+    )
+    listing_obj = _price_object(
+        data['recommended_listing_price'],
+        currency=currency,
+        strategy='balanced',
+    )
+
+    return {
+        'currency': currency,
+        'region_basis': data['region_basis'],
+        'primary_uk_price': primary_obj,
+        'uk_adjusted_fallback_price': None,
+        'general_market_estimate': general_obj,
+        'recommended_listing_price': listing_obj,
+        'source_breakdown': data['source_breakdown'],
+        'evidence_count': uk_evidence_count,
+        'confidence': data['confidence'],
+        'confidence_score': data['confidence_score'],
+        'confidence_reasons': data['confidence_reasons'],
+        'warnings': data['warnings'],
+        'calculation_method': 'local_uk_only; ' + data['calculation_method'],
+        'adjustment_multiplier': None,
+        'adjustment_multiplier_level': None,
+        'adjustment_multiplier_sample_size': None,
+        'adjustment_basis': None,
+        'provider_status_summary': provider_status_summary or {},
+    }
+
+
+PLATFORM_GUIDANCE_V1: dict[str, dict[str, Any]] = {
+    'whatnot': {
+        'title_limit': 80,
+        'description_limit': 500,
+        'required_fields': ['title', 'condition', 'quantity'],
+        'optional_fields': ['subtitle', 'tags', 'images', 'price'],
+        'notes': 'Short stream-safe title; mention condition clearly.',
+    },
+    'ebay': {
+        'title_limit': 80,
+        'description_limit': 4000,
+        'required_fields': ['title', 'condition', 'item specifics', 'price'],
+        'optional_fields': ['subtitle', 'tags', 'images'],
+        'notes': 'SEO title; include set, number, rarity, language.',
+    },
+    'shopify': {
+        'title_limit': 120,
+        'description_limit': 5000,
+        'required_fields': ['title', 'product_type', 'tags', 'price'],
+        'optional_fields': ['subtitle', 'images', 'variant mapping'],
+        'notes': 'Clean product title; useful tags and SKU/variant mapping.',
+    },
+    'generic': {
+        'title_limit': 120,
+        'description_limit': 2000,
+        'required_fields': ['title', 'description', 'condition'],
+        'optional_fields': ['subtitle', 'tags', 'images', 'price'],
+        'notes': 'Reusable listing copy.',
+    },
+}
+
+
+def _clean_listing_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _join_listing_parts(parts: list[Any]) -> str:
+    return ' '.join(str(part).strip() for part in parts if _clean_listing_text(part))
+
+
+def _build_listing_title(*, platform: str, title_style: str, name: str, number: str | None,
+                         set_name: str | None, rarity: str | None) -> str:
+    base_parts = [name, number, set_name, rarity]
+    if platform == 'shopify':
+        right = _join_listing_parts([set_name, number])
+        return f'{name} — {right}' if right else name
+    if platform == 'ebay' or title_style == 'seo':
+        return _join_listing_parts(base_parts + ['Pokémon Card'])
+    if platform == 'whatnot':
+        return _join_listing_parts(base_parts)
+    return _join_listing_parts([name, number, set_name])
+
+
+def _listing_tags(*, name: str, set_name: str | None, rarity: str | None, language_code: str | None,
+                  platform: str, finish: str | None) -> list[str]:
+    tags = ['pokemon-card', platform]
+    for value in (name, set_name, rarity, language_code, finish):
+        text = _clean_listing_text(value)
+        if text:
+            tags.append(text.lower().replace(' ', '-'))
+    return list(dict.fromkeys(tags))
+
+
+def _description_bullets(*, card: dict[str, Any], set_section: dict[str, Any], quantity: int,
+                         condition: str | None, finish: str | None,
+                         pricing: dict[str, Any] | None) -> list[str]:
+    bullets = [
+        f"Card name: {card.get('name') or 'Unknown'}",
+        f"Set: {set_section.get('name') or 'Unknown'}",
+        f"Number: {card.get('number') or 'Unknown'}",
+        f"Rarity: {card.get('rarity') or 'Unknown'}",
+        f"Language: {card.get('language_code') or 'Unknown'}",
+    ]
+    if condition:
+        bullets.append(f'Condition: {condition}')
+    if finish:
+        bullets.append(f'Finish: {finish}')
+    bullets.append(f'Quantity: {quantity}')
+    if pricing:
+        bullets.append(f"Pricing confidence: {pricing.get('confidence') or 'none'}")
+        for warning in pricing.get('warnings') or []:
+            bullets.append(f'Pricing note: {warning}')
+    return bullets
+
+
+def _listing_pricing_from_recommendation(recommendation: dict[str, Any], *, pricing_strategy: str) -> dict[str, Any]:
+    recommended = recommendation.get('recommended_listing_price') or {}
+    general = recommendation.get('general_market_estimate') or {}
+    primary = recommendation.get('primary_uk_price') or {}
+    warnings_out = list(recommendation.get('warnings') or [])
+    if pricing_strategy != 'balanced':
+        warnings_out.append(
+            f"Pricing strategy {pricing_strategy!r} requested, but this v12 milestone exposes balanced recommendation only."
+        )
+    return {
+        'currency': recommended.get('currency') or general.get('currency') or primary.get('currency') or recommendation.get('currency') or 'GBP',
+        'suggested_price': recommended.get('amount'),
+        'floor_price': None,
+        'ceiling_price': None,
+        'confidence': recommendation.get('confidence'),
+        'source_summary': {
+            'region_basis': recommendation.get('region_basis'),
+            'calculation_method': recommendation.get('calculation_method'),
+            'evidence_count': recommendation.get('evidence_count', 0),
+            'source_breakdown': recommendation.get('source_breakdown') or [],
+        },
+        'warnings': warnings_out,
+        'based_on_recommendation': {
+            'recommended_listing_price': recommended or None,
+            'general_market_estimate': general or None,
+            'primary_uk_price': primary or None,
+            'confidence': recommendation.get('confidence'),
+        },
+    }
+
+
+def _listing_platform_guidance(platform: str) -> dict[str, Any]:
+    return {'platform': platform, **PLATFORM_GUIDANCE_V1[platform]}
+
+
+def _safe_listing_provider_status() -> dict[str, Any]:
+    return {
+        'recommendation': {
+            'role': 'local_uk_pricing_recommendation',
+            'status': 'used',
+            'live_enabled': False,
+            'notes': 'Listing assistant uses data.recommendation derived from local GBP evidence only.',
+        },
+        'justtcg': {
+            'role': 'fallback_metadata_only',
+            'status': 'not_used_for_listing_assistant',
+            'live_enabled': False,
+            'notes': 'JustTCG pricing is not fetched or used by this endpoint.',
+        },
+        'totaltcg': {
+            'role': 'fallback_future_milestone',
+            'status': 'not_used_for_listing_assistant',
+            'live_enabled': False,
+            'notes': 'TotalTCG pricing is not fetched or used by this endpoint.',
+        },
+    }
+
+
+LISTING_DRAFT_COLUMNS = [
+    'draft_id',
+    'card_key',
+    'language_code',
+    'card_id',
+    'platform',
+    'status',
+    'title',
+    'subtitle',
+    'description_json',
+    'tags_json',
+    'condition',
+    'finish',
+    'quantity',
+    'pricing_json',
+    'images_json',
+    'commercial_json',
+    'platform_guidance_json',
+    'provider_status_json',
+    'warnings_json',
+    'assistant_payload_json',
+    'source_assistant_contract',
+    'notes',
+    'created_at',
+    'updated_at',
+    'archived_at',
+]
+
+
+def _json_dumps_safe(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+
+
+def _json_loads_safe(value: str | None, default: Any) -> Any:
+    if value in (None, ''):
+        return default
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return default
+
+
+def _ensure_listing_drafts_table(conn: sqlite3.Connection) -> None:
+    """Create the local listing draft table if needed."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS listing_drafts (
+            draft_id TEXT PRIMARY KEY,
+            card_key TEXT NOT NULL,
+            language_code TEXT,
+            card_id TEXT,
+            platform TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft',
+            title TEXT,
+            subtitle TEXT,
+            description_json TEXT,
+            tags_json TEXT,
+            condition TEXT,
+            finish TEXT,
+            quantity INTEGER NOT NULL DEFAULT 1,
+            pricing_json TEXT,
+            images_json TEXT,
+            commercial_json TEXT,
+            platform_guidance_json TEXT,
+            provider_status_json TEXT,
+            warnings_json TEXT,
+            assistant_payload_json TEXT NOT NULL,
+            source_assistant_contract TEXT NOT NULL,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            archived_at TEXT
+        )
+    """)
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_listing_drafts_card_key ON listing_drafts(card_key)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_listing_drafts_status_updated ON listing_drafts(status, updated_at)')
+    conn.commit()
+
+
+def _ensure_inventory_listing_draft_links_table(conn: sqlite3.Connection) -> None:
+    """Create the local inventory-to-listing-draft bridge table if needed."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS inventory_listing_draft_links (
+            id TEXT PRIMARY KEY,
+            inventory_item_id TEXT NOT NULL,
+            draft_id TEXT NOT NULL,
+            card_key TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_inventory_listing_draft_links_item ON inventory_listing_draft_links(inventory_item_id)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_inventory_listing_draft_links_draft ON inventory_listing_draft_links(draft_id)')
+    conn.commit()
+
+
+def _ensure_listing_draft_inventory_reservations_table(conn: sqlite3.Connection) -> None:
+    """Create the local draft inventory reservation table if needed."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS listing_draft_inventory_reservations (
+            reservation_id TEXT PRIMARY KEY,
+            draft_id TEXT NOT NULL,
+            inventory_item_id TEXT NOT NULL,
+            card_key TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            released_at TEXT,
+            release_reason TEXT
+        )
+    """)
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_listing_draft_reservations_draft '
+        'ON listing_draft_inventory_reservations(draft_id, status)'
+    )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_listing_draft_reservations_item '
+        'ON listing_draft_inventory_reservations(inventory_item_id, status)'
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_draft_reservations_active_draft "
+        "ON listing_draft_inventory_reservations(draft_id) WHERE status = 'reserved'"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_draft_reservations_active_item "
+        "ON listing_draft_inventory_reservations(inventory_item_id) WHERE status = 'reserved'"
+    )
+    conn.commit()
+
+
+def _ensure_listing_draft_sales_table(conn: sqlite3.Connection) -> None:
+    """Create the local listing draft sale completion table if needed."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS listing_draft_sales (
+            sale_id TEXT PRIMARY KEY,
+            draft_id TEXT NOT NULL,
+            reservation_id TEXT NOT NULL,
+            inventory_item_id TEXT NOT NULL,
+            card_key TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            platform TEXT NOT NULL,
+            sale_price REAL,
+            currency TEXT NOT NULL,
+            status TEXT NOT NULL,
+            sold_at TEXT NOT NULL,
+            buyer_reference TEXT,
+            external_order_reference TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_listing_draft_sales_draft ON listing_draft_sales(draft_id, status)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_listing_draft_sales_reservation ON listing_draft_sales(reservation_id, status)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_listing_draft_sales_item ON listing_draft_sales(inventory_item_id, status)')
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_draft_sales_completed_draft "
+        "ON listing_draft_sales(draft_id) WHERE status = 'completed'"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_draft_sales_completed_reservation "
+        "ON listing_draft_sales(reservation_id) WHERE status = 'completed'"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_draft_sales_completed_item "
+        "ON listing_draft_sales(inventory_item_id) WHERE status = 'completed'"
+    )
+    conn.commit()
+
+
+def _listing_draft_id() -> str:
+    return f'ld_{uuid.uuid4().hex}'
+
+
+def _inventory_listing_draft_link_id() -> str:
+    return f'ildl_{uuid.uuid4().hex}'
+
+
+def _listing_draft_reservation_id() -> str:
+    return f'ldr_{uuid.uuid4().hex}'
+
+
+def _listing_draft_sale_id() -> str:
+    return f'sale_{uuid.uuid4().hex}'
+
+
+def _listing_draft_reservation_metadata() -> dict[str, Any]:
+    return {
+        'api_version': 'v1',
+        'contract': 'v12-listing-draft-reservation',
+        'generated_at': now_utc(),
+    }
+
+
+def _listing_draft_sale_completion_metadata() -> dict[str, Any]:
+    return {
+        'api_version': 'v1',
+        'contract': 'v12-listing-draft-sale-completion',
+        'generated_at': now_utc(),
+    }
+
+
+def _local_sales_read_metadata() -> dict[str, Any]:
+    return {
+        'api_version': 'v1',
+        'contract': 'v12-local-sales-read',
+        'generated_at': now_utc(),
+    }
+
+
+def _reservation_row_to_response(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    d = dict(row)
+    return {
+        'reservation_id': d.get('reservation_id'),
+        'draft_id': d.get('draft_id'),
+        'inventory_item_id': d.get('inventory_item_id'),
+        'card_key': d.get('card_key'),
+        'quantity': d.get('quantity'),
+        'status': d.get('status'),
+        'created_at': d.get('created_at'),
+        'updated_at': d.get('updated_at'),
+        'released_at': d.get('released_at'),
+        'release_reason': d.get('release_reason'),
+    }
+
+
+def _sale_row_to_response(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    d = dict(row)
+    return {
+        'sale_id': d.get('sale_id'),
+        'draft_id': d.get('draft_id'),
+        'reservation_id': d.get('reservation_id'),
+        'inventory_item_id': d.get('inventory_item_id'),
+        'card_key': d.get('card_key'),
+        'quantity': d.get('quantity'),
+        'platform': d.get('platform'),
+        'sale_price': d.get('sale_price'),
+        'currency': d.get('currency'),
+        'status': d.get('status'),
+        'sold_at': d.get('sold_at'),
+        'buyer_reference': d.get('buyer_reference'),
+        'external_order_reference': d.get('external_order_reference'),
+        'notes': d.get('notes'),
+        'created_at': d.get('created_at'),
+        'updated_at': d.get('updated_at'),
+    }
+
+
+def _persist_listing_draft(
+    conn: sqlite3.Connection,
+    *,
+    assistant_data: dict[str, Any],
+    request_body: ListingDraftCreateRequestV1,
+    draft_id: str | None = None,
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    """Persist deterministic listing assistant output as a local draft."""
+    card = assistant_data.get('card') or {}
+    listing = assistant_data.get('listing') or {}
+    resolved_draft_id = draft_id or _listing_draft_id()
+    resolved_created_at = created_at or now_utc()
+    _ensure_listing_drafts_table(conn)
+    conn.execute(
+        '''
+        INSERT INTO listing_drafts (
+            draft_id, card_key, language_code, card_id, platform, status,
+            title, subtitle, description_json, tags_json, condition, finish, quantity,
+            pricing_json, images_json, commercial_json, platform_guidance_json,
+            provider_status_json, warnings_json, assistant_payload_json,
+            source_assistant_contract, notes, created_at, updated_at, archived_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''',
+        (
+            resolved_draft_id,
+            card.get('card_key'),
+            card.get('language_code'),
+            (card.get('card_key') or '').split(':', 1)[1] if ':' in (card.get('card_key') or '') else None,
+            request_body.platform,
+            'draft',
+            listing.get('title'),
+            listing.get('subtitle'),
+            _json_dumps_safe(listing.get('description_bullets') or []),
+            _json_dumps_safe(listing.get('tags') or []),
+            listing.get('condition_note') or _clean_listing_text(request_body.condition),
+            _clean_listing_text(request_body.finish),
+            request_body.quantity,
+            _json_dumps_safe(assistant_data.get('pricing')),
+            _json_dumps_safe(assistant_data.get('images')),
+            _json_dumps_safe(assistant_data.get('commercial')),
+            _json_dumps_safe(assistant_data.get('platform_guidance')),
+            _json_dumps_safe(assistant_data.get('provider_status') or {}),
+            _json_dumps_safe(assistant_data.get('warnings') or []),
+            _json_dumps_safe(assistant_data),
+            (assistant_data.get('metadata') or {}).get('contract') or 'v12-listing-assistant',
+            _clean_listing_text(request_body.notes),
+            resolved_created_at,
+            resolved_created_at,
+            None,
+        ),
+    )
+    row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (resolved_draft_id,)).fetchone()
+    return _listing_draft_row_to_response(row)
+
+
+def _listing_draft_row_to_response(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    d = dict(row)
+    assistant_payload = _json_loads_safe(d.get('assistant_payload_json'), {})
+    listing = {
+        'title': d.get('title'),
+        'subtitle': d.get('subtitle'),
+        'description_bullets': _json_loads_safe(d.get('description_json'), []),
+        'condition_note': d.get('condition'),
+        'tags': _json_loads_safe(d.get('tags_json'), []),
+        'notes': d.get('notes'),
+    }
+    return {
+        'draft_id': d.get('draft_id'),
+        'card_key': d.get('card_key'),
+        'language_code': d.get('language_code'),
+        'card_id': d.get('card_id'),
+        'platform': d.get('platform'),
+        'status': d.get('status'),
+        'listing': listing,
+        'pricing': _json_loads_safe(d.get('pricing_json'), None),
+        'images': _json_loads_safe(d.get('images_json'), None),
+        'commercial': _json_loads_safe(d.get('commercial_json'), None),
+        'platform_guidance': _json_loads_safe(d.get('platform_guidance_json'), None),
+        'provider_status': _json_loads_safe(d.get('provider_status_json'), {}),
+        'warnings': _json_loads_safe(d.get('warnings_json'), []),
+        'assistant_payload': assistant_payload,
+        'source_assistant_contract': d.get('source_assistant_contract'),
+        'condition': d.get('condition'),
+        'finish': d.get('finish'),
+        'quantity': d.get('quantity'),
+        'created_at': d.get('created_at'),
+        'updated_at': d.get('updated_at'),
+        'archived_at': d.get('archived_at'),
+    }
+
+
+def _listing_draft_metadata() -> dict[str, Any]:
+    return {
+        'api_version': 'v1',
+        'contract': 'v12-listing-draft',
+        'generated_at': now_utc(),
+    }
+
+
+def _get_justtcg_price_data(card_key: str) -> dict[str, Any] | None:
+    """Fetch JustTCG market price data for a card if access gate allows.
+
+    Returns None if JustTCG is not configured, gate fails, or fetch errors.
+    Never raises — failures are logged internally and None is returned.
+    """
+    try:
+        from pricing_sources.justtcg import JustTCGAdapter
+        from pricing_sources.provider_access import get_provider_access_status
+        from pricing_sources.base import PriceQuery
+
+        config = dict(os.environ)
+        decision = get_provider_access_status("justtcg", config)
+
+        if not decision.live_calls_allowed:
+            return None
+
+        adapter = JustTCGAdapter()
+        query = PriceQuery(
+            target_type="sellable_sku",
+            target_id=card_key,
+        )
+        queries = adapter.build_queries(query)
+        if not queries:
+            return None
+
+        raw = adapter.fetch(queries[0], config=config)
+        if not raw:
+            return None
+
+        observations = adapter.normalise(raw, query)
+        if not observations:
+            return None
+
+        # Pick the first observation with the highest confidence match
+        matches = adapter.match_observations(observations, query)
+        if not matches:
+            return None
+
+        best_match = max(matches, key=lambda m: {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "UNUSABLE": 0}.get(m.match_confidence.value, 0))
+        obs = best_match.observation
+
+        return {
+            "source_code": "justtcg",
+            "currency": obs.currency,
+            "amount": obs.amount,
+            "condition": obs.condition,
+            "finish": obs.finish,
+            "printing_label": obs.printing_label,
+            "listing_type": obs.listing_type.value,
+            "observation_type": obs.observation_type,
+            "match_confidence": best_match.match_confidence.value,
+            "match_method": best_match.match_method,
+            "attribution": "Pricing data provided by JustTCG",
+        }
+    except Exception:
+        # Never let JustTCG failures break the endpoint
+        return None
+
+
+def _get_justtcg_provider_status() -> dict[str, Any]:
+    """Return current JustTCG provider status based on access gate."""
+    try:
+        from pricing_sources.provider_access import get_provider_access_status
+        config = dict(os.environ)
+        decision = get_provider_access_status("justtcg", config)
+
+        if decision.live_calls_allowed:
+            return {
+                "role": "supporting_usd_fallback",
+                "status": "enabled",
+                "live_enabled": True,
+                "terms_confirmed": True,
+                "notes": "USD market/current pricing. SaveRoom ecosystem apps only. Not for external developer API resale.",
+            }
+        elif decision.status == "NOT_CONFIGURED":
+            return {
+                "role": "supporting_usd_fallback",
+                "status": "not_configured",
+                "live_enabled": False,
+                "terms_confirmed": False,
+                "notes": "Not configured. Set POKEMON_PRICE_SOURCE_JUSTTCG_API_KEY to enable.",
+            }
+        else:
+            return {
+                "role": "supporting_usd_fallback",
+                "status": "disabled",
+                "live_enabled": False,
+                "terms_confirmed": decision.status == "ENABLED_TERMS_CONFIRMED",
+                "notes": f"Access gate: {decision.status}. {'; '.join(decision.reasons)}",
+            }
+    except Exception:
+        return {
+            "role": "supporting_usd_fallback",
+            "status": "disabled",
+            "live_enabled": False,
+            "terms_confirmed": False,
+            "notes": "Access gate check failed.",
+        }
 
 
 def get_en_name(conn: sqlite3.Connection, language_code: str, card_id: str, local_name: str) -> str | None:
@@ -1887,6 +2607,302 @@ LIMIT ? OFFSET ?
         results = fuzzy_search_names(q, conn, limit=limit)
         return {'data': results}
 
+    # ── /api/v1/cards detail (v12 app-ready) ───────────────────────────
+    # Declared BEFORE the catch-all {card_key:path} route so /detail is not
+    # swallowed by the path converter.
+
+    @app.get('/api/v1/cards/{card_key:path}/detail', response_model=AppReadyCardDetailResponseV1)
+    def v12_app_ready_card_detail(
+        card_key: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        """v12 app-ready card detail endpoint.
+
+        Returns a consumer-ready payload combining canonical identity, set info,
+        image manifest, commercial variants/SKUs, UK-first pricing summary shell,
+        provider status, and warnings.
+
+        Pricing summary shape follows the corrected UK-first external pricing
+        strategy. Live UK eBay sold/completed pricing is not yet implemented —
+        primary_price will be null until a real UK external source is connected.
+        No external API calls are made by this endpoint.
+        """
+        language_code, card_id = parse_card_key(card_key)
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+
+        # ── card existence check ────────────────────────────────────────
+        cur.execute('SELECT 1 FROM v2_card_detail_api_cache WHERE language_code=? AND card_id=? LIMIT 1', (language_code, card_id))
+        if not cur.fetchone():
+            conn.close()
+            raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': canonical_card_key(language_code, card_id)})
+
+        detail, _elapsed_ms = get_card_detail(conn, language_code, card_id)
+        if detail is None:
+            conn.close()
+            raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': canonical_card_key(language_code, card_id)})
+
+        card_info = detail.get('card') or {}
+        set_info = detail.get('set') or {}
+        images = detail.get('images') or {}
+        card_k = canonical_card_key(language_code, card_id)
+        en_name = get_en_name(conn, language_code, card_id, detail.get('name'))
+
+        # ── canonical printing / identity ───────────────────────────────
+        cur.execute('''
+            SELECT cp.* FROM v10_canonical_printings cp
+            JOIN v10_canonical_printing_cards l ON cp.canonical_printing_id = l.canonical_printing_id
+            WHERE l.card_key = ?
+            LIMIT 1
+        ''', (card_k,))
+        cp_row = cur.fetchone()
+        cp_dict: dict[str, Any] | None = None
+        variants: list[dict[str, Any]] = []
+        skus: list[dict[str, Any]] = []
+        ext_refs: list[dict[str, Any]] = []
+        if cp_row:
+            cp_dict = dict(cp_row)
+            cp_id = cp_dict.get('canonical_printing_id')
+            cur.execute('SELECT * FROM v10_commercial_variants WHERE canonical_printing_id = ?', (cp_id,))
+            variants = [dict(r) for r in cur.fetchall()]
+            if variants:
+                cv_ids = [v['commercial_variant_id'] for v in variants]
+                placeholders = ','.join('?' * len(cv_ids))
+                cur.execute(f'SELECT * FROM v10_sellable_skus WHERE commercial_variant_id IN ({placeholders})', cv_ids)
+                skus = [dict(r) for r in cur.fetchall()]
+            cur.execute('''
+                SELECT * FROM v10_external_references
+                WHERE entity_type = 'canonical_printing' AND entity_id = ?
+            ''', (cp_id,))
+            ext_refs = [dict(r) for r in cur.fetchall()]
+
+        # ── image manifest ──────────────────────────────────────────────
+        signed_url = _generate_card_signed_url(conn, card_k, app.state.settings) if app.state.settings else None
+        image_out = {
+            'primary_image_url': images.get('exact_image_url') or images.get('display_image_url'),
+            'thumbnail_url': None,
+            'signed_image_url': signed_url,
+            'has_local_image': bool(images.get('has_exact_image') or images.get('has_display_image')),
+            'image_policy_status': 'signed_gateway' if signed_url else 'no_image',
+            'missing_image': not bool(images.get('has_exact_image') or images.get('has_display_image')),
+            'fallbacks': [],
+        }
+
+        # ── pricing summary (UK-first shell, no live source) ───────────
+        price_evidence = v1_price_summary(conn, language_code, card_id)
+        has_price_evidence = price_evidence.get('evidence_count', 0) > 0
+        warnings_list: list[str] = []
+        warnings_list.append('UK eBay sold/completed source is not yet live. No headline UK market estimate available.')
+
+        primary_price = None
+        fallback_price = None
+        source_breakdown: list[dict[str, Any]] = []
+        confidence: str | None = 'NONE'
+        existing_source: str | None = None
+
+        if has_price_evidence:
+            existing_source = price_evidence.get('source', 'tcgdex')
+            fallback_price = {
+                'amount': price_evidence.get('raw_median'),
+                'currency': price_evidence.get('currency', 'GBP'),
+                'region': 'UK' if existing_source == 'ebay_uk_sold' else None,
+                'price_type': 'market_existing_local',
+                'source': existing_source,
+                'evidence_count': price_evidence.get('evidence_count', 0),
+                'confidence': 'LOW',
+            }
+            source_breakdown.append({
+                'tier': 3 if existing_source == 'tcgdex' else 2,
+                'source': existing_source,
+                'currency': price_evidence.get('currency', 'GBP'),
+                'price_type': 'market',
+                'evidence_count': price_evidence.get('evidence_count', 0),
+                'median_gbp': price_evidence.get('raw_median'),
+                'low_gbp': price_evidence.get('raw_min'),
+                'high_gbp': price_evidence.get('raw_max'),
+                'sample_date': price_evidence.get('latest_fetched_at'),
+            })
+            confidence = 'LOW'
+            warnings_list.append(
+                'Fallback evidence is existing local data, not UK sold-market evidence.'
+            )
+
+        evidence_summary = {
+            'total_evidence': price_evidence.get('evidence_count', 0),
+            'uk_evidence': price_evidence.get('evidence_count', 0) if existing_source == 'ebay_uk_sold' else 0,
+            'uk_tier_1_source': 'ebay_uk' if existing_source == 'ebay_uk_sold' else None,
+            'has_uk_sold_evidence': existing_source == 'ebay_uk_sold',
+            'has_converted_evidence': False,
+            'oldest_evidence_date': None,
+            'newest_evidence_date': price_evidence.get('latest_fetched_at'),
+        }
+
+        pricing_out = {
+            'primary_price': primary_price,
+            'fallback_price': fallback_price,
+            'source_breakdown': source_breakdown,
+            'evidence_summary': evidence_summary,
+            'confidence': confidence,
+            'warnings': warnings_list,
+            'last_refresh': now_utc(),
+        }
+
+        # ── provider status ─────────────────────────────────────────────
+        provider_status = {
+            'uk_ebay_sold': {
+                'role': 'primary_uk_market_evidence',
+                'status': 'planned',
+                'live_enabled': False,
+                'terms_confirmed': False,
+                'notes': 'UK eBay sold/completed external evidence in GBP. Not yet implemented.',
+            },
+            'tcgdex': {
+                'role': 'existing_local_source',
+                'status': 'available',
+                'live_enabled': True,
+                'terms_confirmed': False,
+                'notes': 'Free keyless source. Current local evidence base. Not UK sold evidence.',
+            },
+            "justtcg": _get_justtcg_provider_status(),
+            'cardmarket': {
+                'role': 'supporting_eu_fallback',
+                'status': 'blocked_access_closed',
+                'live_enabled': False,
+                'terms_confirmed': False,
+                'notes': 'Cardmarket direct API not currently accepting applications.',
+            },
+            'tcgplayer': {
+                'role': 'supporting_usd_fallback',
+                'status': 'blocked_pending_access',
+                'live_enabled': False,
+                'terms_confirmed': False,
+                'notes': 'TCGplayer API access is partner/gated. Blocked pending approved access.',
+            },
+        }
+
+        # ── assemble response ───────────────────────────────────────────
+        card_section = {
+            'card_key': card_k,
+            'card_id': card_id,
+            'canonical_printing_id': cp_dict.get('canonical_printing_id') if cp_dict else None,
+            'name': detail.get('name'),
+            'name_english': en_name,
+            'language_code': language_code,
+            'number': detail.get('collector_number'),
+            'rarity': card_info.get('rarity') or cp_dict.get('rarity') if cp_dict else card_info.get('rarity'),
+            'supertype': card_info.get('category'),
+            'subtypes': None,
+        }
+        set_section = {
+            'set_id': set_info.get('resolved_set_id') or set_info.get('raw_set_id'),
+            'set_code': set_info.get('core_set_id'),
+            'name': set_info.get('resolved_set_name'),
+            'localized_name': set_info.get('core_set_name'),
+            'release_date': set_info.get('release_date'),
+            'language_code': language_code,
+        }
+        commercial_section = {
+            'canonical_printing': cp_dict,
+            'commercial_variants': variants,
+            'sellable_skus': skus,
+            'external_references': ext_refs,
+        }
+
+        metadata = {
+            'api_version': 'v1',
+            'contract': 'v12-app-ready-card-detail',
+            'generated_at': now_utc(),
+            'request': {'card_key': card_key},
+        }
+
+        conn.close()
+        return {
+            'data': {
+                'card': card_section,
+                'set': set_section,
+                'images': image_out,
+                'commercial': commercial_section,
+                'pricing': pricing_out,
+                'provider_status': provider_status,
+            },
+            'warnings': warnings_list,
+            'metadata': metadata,
+        }
+
+    # ── /api/v1/cards/detail/batch (v12 app-ready batch) ──────────────
+    # Declared BEFORE the catch-all {card_key:path} route so /detail/batch
+    # is not swallowed by the path converter.
+
+    @app.post('/api/v1/cards/detail/batch', response_model=AppReadyBatchResponseV1)
+    def v12_app_ready_card_detail_batch(
+        request: AppReadyBatchRequestV1,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        """v12 app-ready card detail batch endpoint.
+
+        Accepts up to 50 card keys and returns per-item detail payloads
+        with the same shape as the single-card /detail endpoint.
+        Item-level errors are reported inline so partial success is
+        representable. No external API calls are made.
+        """
+        items: list[dict[str, Any]] = []
+        for card_key in request.card_keys:
+            try:
+                single = v12_app_ready_card_detail(card_key, _)
+                detail = single['data']
+
+                if not request.include_pricing:
+                    detail['pricing'] = None
+                if not request.include_commercial:
+                    detail['commercial'] = None
+                if not request.include_images:
+                    detail['images'] = None
+
+                items.append({
+                    'card_key': card_key,
+                    'status': 'ok',
+                    'detail': detail,
+                    'error': None,
+                })
+            except HTTPException as exc:
+                items.append({
+                    'card_key': card_key,
+                    'status': 'error',
+                    'detail': None,
+                    'error': {
+                        'code': exc.detail.get('code', 'request_error') if isinstance(exc.detail, dict) else 'request_error',
+                        'message': exc.detail.get('message', str(exc.detail)) if isinstance(exc.detail, dict) else str(exc.detail),
+                    },
+                })
+
+        ok_count = sum(1 for i in items if i['status'] == 'ok')
+        err_count = sum(1 for i in items if i['status'] == 'error')
+        return {
+            'data': {
+                'items': items,
+                'summary': {
+                    'requested': len(request.card_keys),
+                    'returned': ok_count,
+                    'errors': err_count,
+                },
+            },
+            'warnings': [
+                'UK eBay sold/completed source is not yet live. Batch results may only include fallback/local evidence.',
+            ],
+            'metadata': {
+                'api_version': 'v1',
+                'contract': 'v12-app-ready-card-detail-batch',
+                'generated_at': now_utc(),
+                'max_batch_size': 50,
+                'request': {
+                    'count': len(request.card_keys),
+                    'include_pricing': request.include_pricing,
+                    'include_commercial': request.include_commercial,
+                    'include_images': request.include_images,
+                },
+            },
+        }
+
     @app.get('/api/v1/cards/{card_key:path}', response_model=CardDetailResponseV1)
     def v1_card_detail(card_key: str, _: dict[str, Any] = Depends(require_v1_api_key)) -> dict[str, Any]:
         language_code, card_id = parse_card_key(card_key)
@@ -2029,6 +3045,7 @@ LIMIT ? OFFSET ?
             'card_id': card_id,
         }
 
+
     # ── /api/v1/prices ────────────────────────────────────────────────
 
     @app.get('/api/v1/prices/cards/{card_key:path}', response_model=PriceSummaryResponseV1)
@@ -2042,12 +3059,856 @@ LIMIT ? OFFSET ?
         cur.execute('SELECT 1 FROM v2_card_detail_api_cache WHERE language_code=? AND card_id=? LIMIT 1', (language_code, card_id))
         if not cur.fetchone():
             raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': canonical_card_key(language_code, card_id)})
-        return {
-            'data': v1_price_summary(conn, language_code, card_id),
+
+        summary = v1_price_summary(conn, language_code, card_id)
+
+        # Attempt JustTCG fetch (disabled by default, gated)
+        justtcg_data = None
+        try:
+            justtcg_data = _get_justtcg_price_data(canonical_card_key(language_code, card_id))
+        except Exception:
+            pass  # Never let JustTCG failures break the endpoint
+        justtcg_status = _get_justtcg_provider_status()
+        summary['recommendation'] = build_v1_price_recommendation(summary, {'justtcg': justtcg_status})
+
+        # If JustTCG returned data, add to source_breakdown as supporting source
+        if justtcg_data is not None:
+            summary.setdefault("justtcg_fallback", justtcg_data)
+            summary["justtcg_provider_status"] = justtcg_status
+
+        response = {
+            'data': summary,
             'card_key': canonical_card_key(language_code, card_id),
             'language_code': language_code,
             'card_id': card_id,
+            'justtcg_provider_status': justtcg_status,
         }
+
+        # Apply exposure policy — conservative default: treat all v1 API
+        # traffic as external developer surface. Internal/customer app
+        # exposure can be enabled later via trusted surface detection.
+        try:
+            from pricing_sources.exposure_policy import (
+                apply_pricing_exposure_policy,
+                SURFACE_EXTERNAL_DEVELOPER_API,
+            )
+            response = apply_pricing_exposure_policy(response, SURFACE_EXTERNAL_DEVELOPER_API)
+        except Exception:
+            pass  # Never let exposure policy break the endpoint
+
+        return response
+
+    # ── /api/v1/listings/assist (v12 listing assistant) ───────────────
+
+    @app.post('/api/v1/listings/assist/cards/{card_key:path}', response_model=ListingAssistantResponseV1)
+    def v12_listing_assistant(
+        card_key: str,
+        body: ListingAssistantRequestV1,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        """Build deterministic listing-ready data from local v1 card/pricing state.
+
+        This endpoint does not call marketplace APIs, provider APIs, HTTP
+        endpoints, or LLMs. Pricing is derived from the local v12
+        ``data.recommendation`` shape only.
+        """
+        language_code, card_id = parse_card_key(card_key)
+        conn = connect(app.state.db)
+        cur = conn.cursor()
+        card_k = canonical_card_key(language_code, card_id)
+
+        try:
+            cur.execute('SELECT 1 FROM v2_card_detail_api_cache WHERE language_code=? AND card_id=? LIMIT 1', (language_code, card_id))
+            if not cur.fetchone():
+                raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': card_k})
+
+            detail, _elapsed_ms = get_card_detail(conn, language_code, card_id)
+            if detail is None:
+                raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': card_k})
+
+            card_info = detail.get('card') or {}
+            set_info = detail.get('set') or {}
+            images = detail.get('images') or {}
+            en_name = get_en_name(conn, language_code, card_id, detail.get('name'))
+
+            cur.execute('''
+                SELECT cp.* FROM v10_canonical_printings cp
+                JOIN v10_canonical_printing_cards l ON cp.canonical_printing_id = l.canonical_printing_id
+                WHERE l.card_key = ?
+                LIMIT 1
+            ''', (card_k,))
+            cp_row = cur.fetchone()
+            cp_dict = dict(cp_row) if cp_row else None
+            variants: list[dict[str, Any]] = []
+            skus: list[dict[str, Any]] = []
+            if cp_dict:
+                cur.execute('SELECT * FROM v10_commercial_variants WHERE canonical_printing_id = ?', (cp_dict.get('canonical_printing_id'),))
+                variants = [dict(r) for r in cur.fetchall()]
+                if variants:
+                    cv_ids = [v['commercial_variant_id'] for v in variants]
+                    placeholders = ','.join('?' * len(cv_ids))
+                    cur.execute(f'SELECT * FROM v10_sellable_skus WHERE commercial_variant_id IN ({placeholders})', cv_ids)
+                    skus = [dict(r) for r in cur.fetchall()]
+
+            card_name = en_name or detail.get('name') or card_id
+            set_name = set_info.get('resolved_set_name') or set_info.get('core_set_name') or set_info.get('raw_set_id')
+            rarity = card_info.get('rarity') or (cp_dict or {}).get('rarity')
+            number = detail.get('collector_number') or detail.get('local_id')
+            card_section = {
+                'card_key': card_k,
+                'name': card_name,
+                'language_code': language_code,
+                'set_id': set_info.get('resolved_set_id') or set_info.get('raw_set_id') or set_info.get('core_set_id'),
+                'set_name': set_name,
+                'number': number,
+                'rarity': rarity,
+            }
+
+            recommendation: dict[str, Any] | None = None
+            pricing_section: dict[str, Any] | None = None
+            if body.include_pricing:
+                price_summary = v1_price_summary(conn, language_code, card_id)
+                recommendation = build_v1_price_recommendation(price_summary, {})
+                pricing_section = _listing_pricing_from_recommendation(
+                    recommendation,
+                    pricing_strategy=body.pricing_strategy,
+                )
+
+            title = _build_listing_title(
+                platform=body.platform,
+                title_style=body.title_style,
+                name=card_name,
+                number=number,
+                set_name=set_name,
+                rarity=rarity,
+            )
+            condition = _clean_listing_text(body.condition)
+            finish = _clean_listing_text(body.finish)
+            subtitle = _join_listing_parts([set_name, number, rarity, condition]) or None
+            listing_section = {
+                'title': title[:PLATFORM_GUIDANCE_V1[body.platform]['title_limit']],
+                'subtitle': subtitle,
+                'description_bullets': _description_bullets(
+                    card=card_section,
+                    set_section={'name': set_name},
+                    quantity=body.quantity,
+                    condition=condition,
+                    finish=finish,
+                    pricing=pricing_section,
+                ),
+                'condition_note': condition,
+                'tags': _listing_tags(
+                    name=card_name,
+                    set_name=set_name,
+                    rarity=rarity,
+                    language_code=language_code,
+                    platform=body.platform,
+                    finish=finish,
+                ),
+            }
+
+            images_section = None
+            if body.include_images:
+                signed_url = _generate_card_signed_url(conn, card_k, app.state.settings) if app.state.settings else None
+                gateway_url = f'/api/v1/images/card/{card_k}/content?size=medium'
+                primary_image = signed_url or gateway_url if bool(images.get('has_exact_image') or images.get('has_display_image')) else None
+                image_candidates = [url for url in [signed_url, gateway_url if primary_image else None] if url]
+                images_section = {
+                    'primary_image': primary_image,
+                    'image_candidates': list(dict.fromkeys(image_candidates)),
+                }
+
+            commercial_section = None
+            if body.include_commercial:
+                commercial_section = {
+                    'canonical_printing_id': (cp_dict or {}).get('canonical_printing_id'),
+                    'commercial_variant_id': variants[0].get('commercial_variant_id') if variants else None,
+                    'sellable_sku_id': skus[0].get('sellable_sku_id') if skus else None,
+                }
+
+            warnings_out = list((pricing_section or {}).get('warnings') or [])
+            if not body.include_pricing:
+                warnings_out.append('Pricing omitted because include_pricing=false.')
+            if body.notes:
+                warnings_out.append('Request notes are retained only as metadata; listing copy remains deterministic.')
+
+            metadata = {
+                'api_version': 'v1',
+                'contract': 'v12-listing-assistant',
+                'generated_at': now_utc(),
+                'request': {
+                    'card_key': card_k,
+                    'platform': body.platform,
+                    'pricing_strategy': body.pricing_strategy,
+                    'title_style': body.title_style,
+                    'quantity': body.quantity,
+                    'include_images': body.include_images,
+                    'include_pricing': body.include_pricing,
+                    'include_commercial': body.include_commercial,
+                },
+            }
+
+            return {
+                'data': {
+                    'card': card_section,
+                    'listing': listing_section,
+                    'pricing': pricing_section,
+                    'images': images_section,
+                    'commercial': commercial_section,
+                    'platform_guidance': _listing_platform_guidance(body.platform),
+                    'provider_status': _safe_listing_provider_status(),
+                    'warnings': warnings_out,
+                    'metadata': metadata,
+                },
+                'warnings': warnings_out,
+                'metadata': metadata,
+            }
+        finally:
+            conn.close()
+
+
+    # ── /api/v1/listings/drafts (v12 local draft persistence) ──────────
+
+    @app.post('/api/v1/listings/drafts/cards/{card_key:path}', response_model=ListingDraftResponseV1, status_code=201)
+    def v12_create_listing_draft(
+        card_key: str,
+        body: ListingDraftCreateRequestV1,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        '''Generate listing assistant output and persist it as a local draft.'''
+        assistant_response = v12_listing_assistant(card_key, body, _)
+        assistant_data = assistant_response['data']
+        conn = connect(app.state.db)
+        try:
+            draft = _persist_listing_draft(conn, assistant_data=assistant_data, request_body=body)
+            conn.commit()
+            return {'data': draft, 'metadata': _listing_draft_metadata()}
+        finally:
+            conn.close()
+
+    @app.get('/api/v1/listings/drafts', response_model=ListingDraftListResponseV1)
+    def v12_list_listing_drafts(
+        include_archived: bool = Query(True, description='Include archived local drafts.'),
+        limit: int = Query(50, ge=1, le=100),
+        offset: int = Query(0, ge=0),
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            _ensure_listing_drafts_table(conn)
+            where = '' if include_archived else "WHERE status != 'archived'"
+            total = int(conn.execute(f'SELECT COUNT(*) FROM listing_drafts {where}').fetchone()[0])
+            rows = conn.execute(
+                f'SELECT * FROM listing_drafts {where} ORDER BY updated_at DESC, created_at DESC LIMIT ? OFFSET ?',
+                (limit, offset),
+            ).fetchall()
+            data = [_listing_draft_row_to_response(row) for row in rows]
+            return {
+                'data': data,
+                'pagination': {
+                    'limit': limit,
+                    'offset': offset,
+                    'count': len(data),
+                    'total': total,
+                    'has_more': offset + len(data) < total,
+                },
+                'metadata': _listing_draft_metadata(),
+            }
+        finally:
+            conn.close()
+
+    @app.get('/api/v1/listings/drafts/{draft_id}', response_model=ListingDraftResponseV1)
+    def v12_get_listing_draft(
+        draft_id: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            _ensure_listing_drafts_table(conn)
+            row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+            if row is None:
+                raise v1_error(404, 'listing_draft_not_found', 'Listing draft not found.', {'draft_id': draft_id})
+            return {'data': _listing_draft_row_to_response(row), 'metadata': _listing_draft_metadata()}
+        finally:
+            conn.close()
+
+    @app.patch('/api/v1/listings/drafts/{draft_id}', response_model=ListingDraftResponseV1)
+    def v12_update_listing_draft(
+        draft_id: str,
+        body: ListingDraftUpdateRequestV1,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            _ensure_listing_drafts_table(conn)
+            row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+            if row is None:
+                raise v1_error(404, 'listing_draft_not_found', 'Listing draft not found.', {'draft_id': draft_id})
+            current = dict(row)
+            assistant_payload = _json_loads_safe(current.get('assistant_payload_json'), {})
+            listing_payload = assistant_payload.setdefault('listing', {}) if isinstance(assistant_payload, dict) else {}
+
+            updates: dict[str, Any] = {}
+            if body.title is not None:
+                updates['title'] = _clean_listing_text(body.title)
+                listing_payload['title'] = updates['title']
+            if body.subtitle is not None:
+                updates['subtitle'] = _clean_listing_text(body.subtitle)
+                listing_payload['subtitle'] = updates['subtitle']
+            if body.description_bullets is not None:
+                updates['description_json'] = _json_dumps_safe(body.description_bullets)
+                listing_payload['description_bullets'] = body.description_bullets
+            if body.tags is not None:
+                updates['tags_json'] = _json_dumps_safe(body.tags)
+                listing_payload['tags'] = body.tags
+            if body.condition is not None:
+                updates['condition'] = _clean_listing_text(body.condition)
+                listing_payload['condition_note'] = updates['condition']
+            if body.finish is not None:
+                updates['finish'] = _clean_listing_text(body.finish)
+            if body.quantity is not None:
+                updates['quantity'] = body.quantity
+                if isinstance(assistant_payload, dict):
+                    assistant_payload.setdefault('metadata', {}).setdefault('draft_updates', {})['quantity'] = body.quantity
+            if body.notes is not None:
+                updates['notes'] = _clean_listing_text(body.notes)
+            if body.status is not None:
+                updates['status'] = body.status
+                updates['archived_at'] = now_utc() if body.status == 'archived' else None
+
+            updates['assistant_payload_json'] = _json_dumps_safe(assistant_payload)
+            updates['updated_at'] = now_utc()
+            assignments = ', '.join(f'{key} = ?' for key in updates)
+            conn.execute(
+                f'UPDATE listing_drafts SET {assignments} WHERE draft_id = ?',
+                [*updates.values(), draft_id],
+            )
+            conn.commit()
+            updated = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+            return {'data': _listing_draft_row_to_response(updated), 'metadata': _listing_draft_metadata()}
+        finally:
+            conn.close()
+
+    def _get_listing_draft_row_or_404(conn: sqlite3.Connection, draft_id: str) -> sqlite3.Row:
+        _ensure_listing_drafts_table(conn)
+        row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+        if row is None:
+            raise v1_error(404, 'listing_draft_not_found', 'Listing draft not found.', {'draft_id': draft_id})
+        return row
+
+    def _get_inventory_link_for_draft(conn: sqlite3.Connection, draft_id: str) -> sqlite3.Row | None:
+        _ensure_inventory_listing_draft_links_table(conn)
+        return conn.execute(
+            '''
+            SELECT * FROM inventory_listing_draft_links
+            WHERE draft_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            ''',
+            (draft_id,),
+        ).fetchone()
+
+    def _get_active_reservation_for_draft(conn: sqlite3.Connection, draft_id: str) -> sqlite3.Row | None:
+        _ensure_listing_draft_inventory_reservations_table(conn)
+        return conn.execute(
+            '''
+            SELECT * FROM listing_draft_inventory_reservations
+            WHERE draft_id = ? AND status = 'reserved'
+            ORDER BY created_at DESC
+            LIMIT 1
+            ''',
+            (draft_id,),
+        ).fetchone()
+
+    def _get_active_reservation_for_inventory_item(conn: sqlite3.Connection, inventory_item_id: str) -> sqlite3.Row | None:
+        _ensure_listing_draft_inventory_reservations_table(conn)
+        return conn.execute(
+            '''
+            SELECT * FROM listing_draft_inventory_reservations
+            WHERE inventory_item_id = ? AND status = 'reserved'
+            ORDER BY created_at DESC
+            LIMIT 1
+            ''',
+            (inventory_item_id,),
+        ).fetchone()
+
+    def _reserve_listing_draft_inventory(
+        conn: sqlite3.Connection,
+        *,
+        draft_row: sqlite3.Row,
+        quantity: int | None = None,
+    ) -> sqlite3.Row:
+        draft = dict(draft_row)
+        draft_id = draft['draft_id']
+        if draft.get('status') == 'archived':
+            raise v1_error(
+                409,
+                'listing_draft_archived',
+                'Archived listing drafts cannot reserve inventory.',
+                {'draft_id': draft_id},
+            )
+
+        link = _get_inventory_link_for_draft(conn, draft_id)
+        if link is None:
+            raise v1_error(
+                409,
+                'listing_draft_not_linked_to_inventory',
+                'Listing draft is not linked to an inventory item.',
+                {'draft_id': draft_id},
+            )
+        link_d = dict(link)
+        requested_quantity = quantity if quantity is not None else int(link_d.get('quantity') or 1)
+        linked_quantity = int(link_d.get('quantity') or 1)
+        if requested_quantity > linked_quantity:
+            raise v1_error(
+                409,
+                'reservation_quantity_unavailable',
+                'Requested reservation quantity exceeds linked inventory draft quantity.',
+                {
+                    'draft_id': draft_id,
+                    'quantity_requested': requested_quantity,
+                    'quantity_available': linked_quantity,
+                },
+            )
+
+        existing_for_draft = _get_active_reservation_for_draft(conn, draft_id)
+        if existing_for_draft is not None:
+            return existing_for_draft
+
+        existing_for_item = _get_active_reservation_for_inventory_item(conn, link_d['inventory_item_id'])
+        if existing_for_item is not None and existing_for_item['draft_id'] != draft_id:
+            raise v1_error(
+                409,
+                'inventory_already_reserved',
+                'Inventory item is already reserved by another listing draft.',
+                {
+                    'draft_id': draft_id,
+                    'inventory_item_id': link_d['inventory_item_id'],
+                    'reserved_by_draft_id': existing_for_item['draft_id'],
+                },
+            )
+
+        created_at = now_utc()
+        try:
+            conn.execute(
+                '''
+                INSERT INTO listing_draft_inventory_reservations (
+                    reservation_id, draft_id, inventory_item_id, card_key, quantity, status,
+                    created_at, updated_at, released_at, release_reason
+                ) VALUES (?, ?, ?, ?, ?, 'reserved', ?, ?, NULL, NULL)
+                ''',
+                (
+                    _listing_draft_reservation_id(),
+                    draft_id,
+                    link_d['inventory_item_id'],
+                    link_d['card_key'],
+                    requested_quantity,
+                    created_at,
+                    created_at,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            existing_for_draft = _get_active_reservation_for_draft(conn, draft_id)
+            if existing_for_draft is not None:
+                return existing_for_draft
+            existing_for_item = _get_active_reservation_for_inventory_item(conn, link_d['inventory_item_id'])
+            if existing_for_item is not None:
+                raise v1_error(
+                    409,
+                    'inventory_already_reserved',
+                    'Inventory item is already reserved by another listing draft.',
+                    {
+                        'draft_id': draft_id,
+                        'inventory_item_id': link_d['inventory_item_id'],
+                        'reserved_by_draft_id': existing_for_item['draft_id'],
+                    },
+                )
+            raise
+
+        return _get_active_reservation_for_draft(conn, draft_id)
+
+    def _set_listing_draft_status(
+        conn: sqlite3.Connection,
+        *,
+        draft_id: str,
+        status: str,
+        notes: str | None = None,
+    ) -> sqlite3.Row:
+        updated_at = now_utc()
+        assignments = ['status = ?', 'updated_at = ?', 'archived_at = ?']
+        values: list[Any] = [status, updated_at, None]
+        if notes is not None:
+            assignments.append('notes = ?')
+            values.append(_clean_listing_text(notes))
+        values.append(draft_id)
+        conn.execute(
+            f"UPDATE listing_drafts SET {', '.join(assignments)} WHERE draft_id = ?",
+            values,
+        )
+        return conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+
+    def _reservation_endpoint_payload(
+        draft_row: sqlite3.Row,
+        reservation_row: sqlite3.Row | None,
+    ) -> dict[str, Any]:
+        return {
+            'data': {
+                'draft': _listing_draft_row_to_response(draft_row),
+                'reservation': _reservation_row_to_response(reservation_row),
+            },
+            'metadata': _listing_draft_reservation_metadata(),
+        }
+
+    @app.post('/api/v1/listings/drafts/{draft_id}/ready', response_model=ListingDraftReservationResponseV1)
+    def v12_mark_listing_draft_ready(
+        draft_id: str,
+        body: ListingDraftReadyRequestV1,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            draft_row = _get_listing_draft_row_or_404(conn, draft_id)
+            if dict(draft_row).get('status') == 'archived':
+                raise v1_error(409, 'listing_draft_archived', 'Archived listing drafts cannot be marked ready.', {'draft_id': draft_id})
+            reservation_row = None
+            if body.reserve_inventory and _get_inventory_link_for_draft(conn, draft_id) is not None:
+                reservation_row = _reserve_listing_draft_inventory(conn, draft_row=draft_row)
+            updated_row = _set_listing_draft_status(conn, draft_id=draft_id, status='ready', notes=body.notes)
+            conn.commit()
+            return _reservation_endpoint_payload(updated_row, reservation_row)
+        finally:
+            conn.close()
+
+    @app.post('/api/v1/listings/drafts/{draft_id}/reserve', response_model=ListingDraftReservationResponseV1)
+    def v12_reserve_listing_draft_inventory(
+        draft_id: str,
+        body: ListingDraftReserveRequestV1,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            draft_row = _get_listing_draft_row_or_404(conn, draft_id)
+            reservation_row = _reserve_listing_draft_inventory(conn, draft_row=draft_row, quantity=body.quantity)
+            conn.commit()
+            updated_row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+            return _reservation_endpoint_payload(updated_row, reservation_row)
+        finally:
+            conn.close()
+
+    @app.post('/api/v1/listings/drafts/{draft_id}/unreserve', response_model=ListingDraftReservationResponseV1)
+    def v12_unreserve_listing_draft_inventory(
+        draft_id: str,
+        body: ListingDraftUnreserveRequestV1,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            draft_row = _get_listing_draft_row_or_404(conn, draft_id)
+            reservation_row = _get_active_reservation_for_draft(conn, draft_id)
+            released_row = None
+            if reservation_row is not None:
+                released_at = now_utc()
+                conn.execute(
+                    '''
+                    UPDATE listing_draft_inventory_reservations
+                    SET status = 'released', updated_at = ?, released_at = ?, release_reason = ?
+                    WHERE reservation_id = ?
+                    ''',
+                    (
+                        released_at,
+                        released_at,
+                        _clean_listing_text(body.release_reason),
+                        reservation_row['reservation_id'],
+                    ),
+                )
+                released_row = conn.execute(
+                    'SELECT * FROM listing_draft_inventory_reservations WHERE reservation_id = ?',
+                    (reservation_row['reservation_id'],),
+                ).fetchone()
+            updated_row = draft_row
+            if body.set_status is not None:
+                updated_row = _set_listing_draft_status(conn, draft_id=draft_id, status=body.set_status)
+            conn.commit()
+            return _reservation_endpoint_payload(updated_row, released_row)
+        finally:
+            conn.close()
+
+    @app.get('/api/v1/listings/drafts/{draft_id}/reservation', response_model=ListingDraftReservationResponseV1)
+    def v12_get_listing_draft_reservation(
+        draft_id: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            draft_row = _get_listing_draft_row_or_404(conn, draft_id)
+            reservation_row = _get_active_reservation_for_draft(conn, draft_id)
+            return _reservation_endpoint_payload(draft_row, reservation_row)
+        finally:
+            conn.close()
+
+    @app.post('/api/v1/listings/drafts/{draft_id}/complete-sale', response_model=ListingDraftCompleteSaleResponseV1)
+    def v12_complete_listing_draft_sale(
+        draft_id: str,
+        body: ListingDraftCompleteSaleRequestV1,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            ensure_inventory_support(conn)
+            _ensure_listing_draft_sales_table(conn)
+            tenant_id = get_tenant_from_key(_)
+            draft_row = _get_listing_draft_row_or_404(conn, draft_id)
+            draft = dict(draft_row)
+            if not body.confirm_completion:
+                raise v1_error(
+                    409,
+                    'sale_completion_not_confirmed',
+                    'Sale completion requires explicit confirm_completion=true.',
+                    {'draft_id': draft_id},
+                )
+            if draft.get('status') == 'archived':
+                raise v1_error(409, 'listing_draft_archived', 'Archived listing drafts cannot be completed as local sales.', {'draft_id': draft_id})
+
+            existing_sale = conn.execute(
+                "SELECT * FROM listing_draft_sales WHERE draft_id = ? AND status = 'completed' LIMIT 1",
+                (draft_id,),
+            ).fetchone()
+            if existing_sale is not None:
+                raise v1_error(
+                    409,
+                    'listing_draft_sale_already_completed',
+                    'Listing draft already has a completed local sale.',
+                    {'draft_id': draft_id, 'sale_id': existing_sale['sale_id']},
+                )
+
+            link_row = _get_inventory_link_for_draft(conn, draft_id)
+            if link_row is None:
+                raise v1_error(
+                    409,
+                    'listing_draft_not_linked_to_inventory',
+                    'Listing draft is not linked to an inventory item.',
+                    {'draft_id': draft_id},
+                )
+
+            reservation_row = _get_active_reservation_for_draft(conn, draft_id)
+            if reservation_row is None:
+                raise v1_error(
+                    409,
+                    'listing_draft_not_reserved',
+                    'Listing draft must have an active inventory reservation before sale completion.',
+                    {'draft_id': draft_id},
+                )
+            reservation = dict(reservation_row)
+            inventory_item_id = reservation['inventory_item_id']
+            inventory_row = conn.execute(
+                'SELECT item_id, status, location_code, revision FROM physical_items WHERE item_id = ? AND tenant_id = ?',
+                (inventory_item_id, tenant_id),
+            ).fetchone()
+            if inventory_row is None:
+                raise v1_error(404, 'item_not_found', 'Physical item not found.', {'item_id': inventory_item_id})
+            status_before = inventory_row['status']
+            if status_before not in ('owned', 'consigned'):
+                raise v1_error(
+                    409,
+                    'inventory_item_not_available',
+                    'Inventory item is not available for local sale completion.',
+                    {'item_id': inventory_item_id, 'status': status_before},
+                )
+
+            now = now_utc()
+            sold_at = _clean_listing_text(body.sold_at) or now
+            sale_id = _listing_draft_sale_id()
+            try:
+                conn.execute(
+                    '''
+                    INSERT INTO listing_draft_sales (
+                        sale_id, draft_id, reservation_id, inventory_item_id, card_key, quantity,
+                        platform, sale_price, currency, status, sold_at,
+                        buyer_reference, external_order_reference, notes, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)
+                    ''',
+                    (
+                        sale_id,
+                        draft_id,
+                        reservation['reservation_id'],
+                        inventory_item_id,
+                        reservation['card_key'],
+                        int(reservation['quantity'] or 1),
+                        body.platform,
+                        body.sale_price,
+                        body.currency or 'GBP',
+                        sold_at,
+                        _clean_listing_text(body.buyer_reference),
+                        _clean_listing_text(body.external_order_reference),
+                        _clean_listing_text(body.notes),
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                raise v1_error(
+                    409,
+                    'listing_draft_sale_already_completed',
+                    'Listing draft, reservation, or inventory item already has a completed local sale.',
+                    {'draft_id': draft_id, 'reservation_id': reservation['reservation_id'], 'inventory_item_id': inventory_item_id},
+                )
+
+            reservation_update = conn.execute(
+                '''
+                UPDATE listing_draft_inventory_reservations
+                SET status = 'completed', updated_at = ?, released_at = ?, release_reason = ?
+                WHERE reservation_id = ? AND status = 'reserved'
+                ''',
+                (now, now, 'sale_completed', reservation['reservation_id']),
+            )
+            if reservation_update.rowcount == 0:
+                raise v1_error(409, 'listing_draft_not_reserved', 'Listing draft reservation is no longer active.', {'draft_id': draft_id})
+
+            conn.execute(
+                'UPDATE physical_items SET status = ?, updated_at = ? WHERE item_id = ? AND tenant_id = ?',
+                ('sold', now, inventory_item_id, tenant_id),
+            )
+            record_transaction(
+                conn,
+                inventory_item_id,
+                'sold',
+                tenant_id,
+                quantity=int(reservation['quantity'] or 1),
+                from_location=inventory_row['location_code'],
+                to_location=inventory_row['location_code'],
+                from_status=status_before,
+                to_status='sold',
+                price=body.sale_price,
+                currency=body.currency or 'GBP',
+                counterparty=_clean_listing_text(body.buyer_reference),
+                reference=_clean_listing_text(body.external_order_reference) or sale_id,
+                notes=_clean_listing_text(body.notes) or 'Local listing draft sale completed.',
+                created_by='api',
+            )
+
+            sale_row = conn.execute('SELECT * FROM listing_draft_sales WHERE sale_id = ?', (sale_id,)).fetchone()
+            updated_draft_row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+            updated_reservation_row = conn.execute(
+                'SELECT * FROM listing_draft_inventory_reservations WHERE reservation_id = ?',
+                (reservation['reservation_id'],),
+            ).fetchone()
+            updated_inventory_row = conn.execute(
+                'SELECT status FROM physical_items WHERE item_id = ? AND tenant_id = ?',
+                (inventory_item_id, tenant_id),
+            ).fetchone()
+            return {
+                'data': {
+                    'sale': _sale_row_to_response(sale_row),
+                    'draft': _listing_draft_row_to_response(updated_draft_row),
+                    'reservation': _reservation_row_to_response(updated_reservation_row),
+                    'inventory_item': {
+                        'item_id': inventory_item_id,
+                        'status_before': status_before,
+                        'status_after': updated_inventory_row['status'] if updated_inventory_row else 'sold',
+                    },
+                },
+                'metadata': _listing_draft_sale_completion_metadata(),
+            }
+        finally:
+            conn.close()
+
+    @app.post('/api/v1/listings/drafts/{draft_id}/archive', response_model=ListingDraftResponseV1)
+    def v12_archive_listing_draft(
+        draft_id: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            _ensure_listing_drafts_table(conn)
+            row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+            if row is None:
+                raise v1_error(404, 'listing_draft_not_found', 'Listing draft not found.', {'draft_id': draft_id})
+            archived_at = now_utc()
+            conn.execute(
+                'UPDATE listing_drafts SET status = ?, archived_at = ?, updated_at = ? WHERE draft_id = ?',
+                ('archived', archived_at, archived_at, draft_id),
+            )
+            conn.commit()
+            updated = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+            return {'data': _listing_draft_row_to_response(updated), 'metadata': _listing_draft_metadata()}
+        finally:
+            conn.close()
+
+
+    @app.get('/api/v1/sales', response_model=LocalSaleListResponseV1)
+    def v12_list_local_sales(
+        draft_id: str | None = Query(None, description='Filter by listing draft ID.'),
+        inventory_item_id: str | None = Query(None, description='Filter by physical inventory item ID.'),
+        card_key: str | None = Query(None, description='Filter by canonical card key.'),
+        platform: str | None = Query(None, description='Filter by local sale platform label.'),
+        status: str = Query('completed', description='Filter by local sale status. Defaults to completed.'),
+        date_from: str | None = Query(None, description='Inclusive sold_at lower bound.'),
+        date_to: str | None = Query(None, description='Inclusive sold_at upper bound.'),
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            _ensure_listing_draft_sales_table(conn)
+            where = ['status = ?']
+            params: list[Any] = [status]
+            if draft_id is not None:
+                where.append('draft_id = ?')
+                params.append(draft_id)
+            if inventory_item_id is not None:
+                where.append('inventory_item_id = ?')
+                params.append(inventory_item_id)
+            if card_key is not None:
+                where.append('card_key = ?')
+                params.append(card_key)
+            if platform is not None:
+                where.append('platform = ?')
+                params.append(platform)
+            if date_from is not None:
+                where.append('sold_at >= ?')
+                params.append(date_from)
+            if date_to is not None:
+                where.append('sold_at <= ?')
+                params.append(date_to)
+
+            where_sql = ' AND '.join(where)
+            total = int(conn.execute(f'SELECT COUNT(*) FROM listing_draft_sales WHERE {where_sql}', params).fetchone()[0])
+            rows = conn.execute(
+                f'SELECT * FROM listing_draft_sales WHERE {where_sql} ORDER BY sold_at DESC, created_at DESC, sale_id DESC LIMIT ? OFFSET ?',
+                [*params, limit, offset],
+            ).fetchall()
+            data = [_sale_row_to_response(row) for row in rows]
+            return {
+                'data': data,
+                'pagination': {
+                    'limit': limit,
+                    'offset': offset,
+                    'count': len(data),
+                    'total': total,
+                    'has_more': offset + len(data) < total,
+                },
+                'metadata': _local_sales_read_metadata(),
+            }
+        finally:
+            conn.close()
+
+
+    @app.get('/api/v1/sales/{sale_id}', response_model=LocalSaleResponseV1)
+    def v12_get_local_sale(
+        sale_id: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            _ensure_listing_draft_sales_table(conn)
+            row = conn.execute('SELECT * FROM listing_draft_sales WHERE sale_id = ?', (sale_id,)).fetchone()
+            if row is None:
+                raise v1_error(404, 'local_sale_not_found', 'Local sale not found.', {'sale_id': sale_id})
+            return {'data': _sale_row_to_response(row), 'metadata': _local_sales_read_metadata()}
+        finally:
+            conn.close()
+
 
     @app.get('/api/v1/prices/history/cards/{card_key:path}', response_model=PriceHistoryResponseV1)
     def v1_card_price_history(
@@ -2099,6 +3960,198 @@ LIMIT ? OFFSET ?
             'card_key': canonical_card_key(language_code, card_id),
             'language_code': language_code,
             'card_id': card_id,
+        }
+
+    # ── /api/v1/prices/chart (v12 chart-ready) ───────────────────────
+
+    @app.get('/api/v1/prices/chart/cards/{card_key:path}', response_model=ChartReadyPriceHistoryResponseV1)
+    def v12_chart_ready_price_history(
+        card_key: str,
+        bucket_size: str = Query('day', description='Time bucket: day, week, month'),
+        source: str | None = Query(None, description='Filter to one source (e.g. ebay_uk_sold)'),
+        include_non_recommended: bool = Query(False, description='Include non-recommended evidence'),
+        limit: int = Query(365, ge=1, le=365, description='Max points per series'),
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        """v12 chart-ready price history endpoint.
+
+        Returns time-bucketed price series from existing local evidence
+        only. No external API calls. Suitable for rendering price charts
+        in the web tracker, inventory views, and listing assistant.
+        """
+        if bucket_size not in ('day', 'week', 'month'):
+            raise v1_error(400, 'invalid_bucket_size', 'bucket_size must be day, week, or month.', {'allowed': ['day', 'week', 'month']})
+
+        language_code, card_id = parse_card_key(card_key)
+        conn = connect(app.state.db)
+        ensure_price_support(conn)
+        cur = conn.cursor()
+
+        cur.execute('SELECT 1 FROM v2_card_detail_api_cache WHERE language_code=? AND card_id=? LIMIT 1', (language_code, card_id))
+        if not cur.fetchone():
+            raise v1_error(404, 'card_not_found', 'Card not found.', {'card_key': canonical_card_key(language_code, card_id)})
+
+        # Build evidence filter
+        wh = 'card_id = ? AND language_code = ?'
+        pr: list[Any] = [card_id, language_code]
+        if source:
+            wh += ' AND source = ?'
+            pr.append(source)
+        if not include_non_recommended:
+            wh += ' AND COALESCE(is_recommended_input, 0) = 1'
+
+        # Fetch evidence rows
+        cur.execute(
+            f'SELECT sold_date, price_gbp, source FROM uk_price_history WHERE {wh} ORDER BY sold_date, source',
+            pr,
+        )
+        rows = cur.fetchall()
+
+        card_k = canonical_card_key(language_code, card_id)
+
+        if not rows:
+            return {
+                'data': {
+                    'card_key': card_k,
+                    'series': [],
+                    'summary': {
+                        'has_uk_sold_evidence': False,
+                        'has_fallback_evidence': False,
+                        'primary_source_live': False,
+                        'point_count': 0,
+                    },
+                },
+                'warnings': [
+                    'UK eBay sold/completed source is not yet live.',
+                    'Chart uses existing local fallback evidence only.',
+                    'No price evidence available for this card.',
+                ],
+                'metadata': {
+                    'api_version': 'v1',
+                    'contract': 'v12-chart-ready-price-history',
+                    'generated_at': now_utc(),
+                    'request': {
+                        'card_key': card_k,
+                        'bucket_size': bucket_size,
+                        'source': source,
+                        'include_non_recommended': include_non_recommended,
+                        'limit': limit,
+                    },
+                },
+            }
+
+        # Group by source
+        from collections import defaultdict
+        by_source: dict[str, list[tuple[str, float]]] = defaultdict(list)
+        all_sources: set[str] = set()
+        for sold_date, price_gbp, src in rows:
+            by_source[src].append((sold_date, price_gbp))
+            all_sources.add(src)
+
+        # Bucket function
+        def _bucket_key(date_str: str) -> str:
+            if bucket_size == 'day':
+                return date_str
+            try:
+                d = dt.date.fromisoformat(date_str)
+            except (ValueError, TypeError):
+                return date_str
+            if bucket_size == 'week':
+                # ISO week Monday
+                offset = d.weekday()
+                monday = d - dt.timedelta(days=offset)
+                return monday.isoformat()
+            else:  # month
+                return f'{d.year:04d}-{d.month:02d}-01'
+
+        # Percentile helper
+        def _percentile(sorted_vals: list[float], pct: float) -> float | None:
+            if not sorted_vals:
+                return None
+            idx = pct * (len(sorted_vals) - 1)
+            lo = int(idx)
+            hi = min(lo + 1, len(sorted_vals) - 1)
+            frac = idx - lo
+            return round(sorted_vals[lo] + frac * (sorted_vals[hi] - sorted_vals[lo]), 2)
+
+        # Confidence from evidence count
+        def _confidence(count: int) -> str:
+            if count >= 10:
+                return 'MEDIUM'
+            if count >= 3:
+                return 'LOW'
+            return 'VERY_LOW'
+
+        # Build series
+        series_list: list[dict[str, Any]] = []
+        total_points = 0
+        for src in sorted(by_source.keys()):
+            items = by_source[src]
+            # Group by bucket
+            buckets: dict[str, list[float]] = defaultdict(list)
+            for date_str, price in items:
+                bk = _bucket_key(date_str)
+                buckets[bk].append(price)
+
+            points: list[dict[str, Any]] = []
+            for bk in sorted(buckets.keys()):
+                prices = sorted(buckets[bk])
+                median = _percentile(prices, 0.5)
+                low = _percentile(prices, 0.1)
+                high = _percentile(prices, 0.9)
+                ev_count = len(prices)
+                points.append({
+                    'date': bk,
+                    'median': median,
+                    'low': low,
+                    'high': high,
+                    'evidence_count': ev_count,
+                    'confidence': _confidence(ev_count),
+                })
+
+            # Apply limit
+            if len(points) > limit:
+                points = points[-limit:]
+
+            total_points += len(points)
+            series_list.append({
+                'source': src,
+                'currency': 'GBP',
+                'price_type': 'market_existing_local',
+                'region': 'UK' if 'uk' in src.lower() else None,
+                'points': points,
+            })
+
+        has_uk_sold = 'ebay_uk_sold' in all_sources
+        has_fallback = len(all_sources) > 0
+
+        return {
+            'data': {
+                'card_key': card_k,
+                'series': series_list,
+                'summary': {
+                    'has_uk_sold_evidence': has_uk_sold,
+                    'has_fallback_evidence': has_fallback,
+                    'primary_source_live': False,
+                    'point_count': total_points,
+                },
+            },
+            'warnings': [
+                'UK eBay sold/completed source is not yet live.',
+                'Chart uses existing local fallback evidence only.',
+            ],
+            'metadata': {
+                'api_version': 'v1',
+                'contract': 'v12-chart-ready-price-history',
+                'generated_at': now_utc(),
+                'request': {
+                    'card_key': card_k,
+                    'bucket_size': bucket_size,
+                    'source': source,
+                    'include_non_recommended': include_non_recommended,
+                    'limit': limit,
+                },
+            },
         }
 
     # ── /api/v1/admin/keys ────────────────────────────────────────────
@@ -4283,6 +6336,48 @@ LIMIT ? OFFSET ?
             'name_english': row[6],
         }
 
+    def resolve_inventory_listing_source(conn: sqlite3.Connection, item_id: str, tenant_id: int) -> dict[str, Any]:
+        """Resolve a physical inventory item to local listing-draft source data."""
+        cur = conn.cursor()
+        row = cur.execute(
+            """
+            SELECT p.*, s.condition_code, s.sku_key, s.language_code AS sku_language_code,
+                   c.canonical_card_key, c.name_english,
+                   cv.finish AS variant_finish
+            FROM physical_items p
+            LEFT JOIN sellable_skus s ON s.sku_id = p.sku_id
+            LEFT JOIN canonical_printings c ON c.printing_id = s.printing_id
+            LEFT JOIN commercial_variants cv ON cv.variant_id = s.variant_id
+            WHERE p.item_id = ? AND p.tenant_id = ?
+            """,
+            (item_id, tenant_id),
+        ).fetchone()
+        if not row:
+            raise v1_error(404, 'item_not_found', 'Physical item not found.', {'item_id': item_id})
+
+        data = dict(row)
+        card_key = _clean_listing_text(data.get('canonical_card_key'))
+        if not card_key:
+            raise v1_error(
+                409,
+                'inventory_item_missing_card_key',
+                'Inventory item cannot be converted to a listing draft because its SKU has no canonical card key.',
+                {'item_id': item_id, 'sku_id': data.get('sku_id')},
+            )
+
+        status = (data.get('status') or '').strip().lower()
+        quantity_available = 1 if status in {'owned', 'consigned'} else 0
+        return {
+            'item_id': data.get('item_id'),
+            'sku_id': data.get('sku_id'),
+            'sku_key': data.get('sku_key'),
+            'card_key': card_key,
+            'quantity_available': quantity_available,
+            'condition': _clean_listing_text(data.get('item_condition')) or _clean_listing_text(data.get('condition_code')),
+            'finish': _clean_listing_text(data.get('variant_finish')),
+            'status': data.get('status'),
+        }
+
     def get_item_snapshot(conn: sqlite3.Connection, item_id: str, tenant_id: int) -> dict[str, Any] | None:
         """Get current snapshot for a physical item. Falls back to the item itself."""
         cur = conn.cursor()
@@ -4635,6 +6730,93 @@ LIMIT ? OFFSET ?
             'created_at': now,
             'updated_at': now,
         }}
+
+    @app.post('/api/v1/inventory/items/{item_id}/listing-draft', response_model=InventoryListingDraftResponseV1, status_code=201)
+    def v12_create_inventory_listing_draft(
+        item_id: str,
+        body: InventoryListingDraftCreateRequestV1,
+        _: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
+    ) -> dict[str, Any]:
+        '''Create a local listing draft from a physical inventory item.'''
+        conn = connect(app.state.db)
+        try:
+            ensure_inventory_support(conn)
+            tenant_id = get_tenant_from_key(_)
+            source = resolve_inventory_listing_source(conn, item_id, tenant_id)
+
+            quantity_available = source.get('quantity_available')
+            requested_quantity = body.quantity if body.quantity is not None else 1
+            if quantity_available is not None and requested_quantity > quantity_available:
+                raise v1_error(
+                    409,
+                    'inventory_quantity_unavailable',
+                    'Requested listing draft quantity exceeds available inventory quantity.',
+                    {
+                        'item_id': item_id,
+                        'quantity_requested': requested_quantity,
+                        'quantity_available': quantity_available,
+                    },
+                )
+
+            condition = _clean_listing_text(body.condition) or source.get('condition')
+            finish = _clean_listing_text(body.finish) or source.get('finish')
+            draft_request = ListingDraftCreateRequestV1(
+                platform=body.platform,
+                condition=condition,
+                finish=finish,
+                quantity=requested_quantity,
+                include_images=body.include_images,
+                include_pricing=body.include_pricing,
+                include_commercial=body.include_commercial,
+                pricing_strategy=body.pricing_strategy,
+                title_style=body.title_style,
+                notes=body.notes,
+            )
+            assistant_response = v12_listing_assistant(source['card_key'], draft_request, _)
+            draft = _persist_listing_draft(
+                conn,
+                assistant_data=assistant_response['data'],
+                request_body=draft_request,
+            )
+            _ensure_inventory_listing_draft_links_table(conn)
+            link_created_at = now_utc()
+            conn.execute(
+                '''
+                INSERT INTO inventory_listing_draft_links (
+                    id, inventory_item_id, draft_id, card_key, quantity, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    _inventory_listing_draft_link_id(),
+                    item_id,
+                    draft['draft_id'],
+                    source['card_key'],
+                    requested_quantity,
+                    link_created_at,
+                ),
+            )
+            conn.commit()
+            return {
+                'data': {
+                    'draft': draft,
+                    'inventory_source': {
+                        'item_id': item_id,
+                        'card_key': source['card_key'],
+                        'quantity_requested': requested_quantity,
+                        'quantity_available': quantity_available,
+                        'condition': condition,
+                        'finish': finish,
+                        'linked': True,
+                    },
+                },
+                'metadata': {
+                    'api_version': 'v1',
+                    'contract': 'v12-inventory-listing-draft-bridge',
+                    'generated_at': now_utc(),
+                },
+            }
+        finally:
+            conn.close()
 
     @app.get('/api/v1/inventory/items/{item_id}', response_model=InventoryItemResponse)
     def v1_get_inventory_item(

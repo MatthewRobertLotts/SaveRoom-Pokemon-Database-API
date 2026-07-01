@@ -48,10 +48,11 @@ tests/fixtures/pricing_sources/justtcg/
 
 ## Current Status
 
-**No fixtures stored yet.** Waiting for approved provider access and terms confirmation.
+**No fixtures stored yet.** JustTCG fixture storage is now approved (2026-06-29). Fixture collection is unblocked after API key is obtained and configured.
 
 ## Links
 
 - Related: `docs/V11_2_PROVIDER_ACCESS_READINESS.md`
 - Related: `docs/V11_2_PREFLIGHT.md`
 - Gate module: `pricing_sources/provider_access.py`
+- JustTCG fixture adapter: `docs/V12_JUSTTCG_FIXTURE_ADAPTER_SPIKE.md`

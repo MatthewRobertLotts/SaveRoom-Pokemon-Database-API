@@ -1,0 +1,663 @@
+{
+  "data": [
+    {
+      "id": "pokemon-base-set-shadowless-charizard-holo-rare",
+      "uuid": "2daec851-d5be-51a3-bcd7-889116693556",
+      "name": "Charizard",
+      "game": "Pokemon",
+      "set": "base-set-shadowless-pokemon",
+      "set_name": "Base Set (Shadowless)",
+      "number": "004/102",
+      "rarity": "Holo Rare",
+      "tcgplayerId": "106999",
+      "mtgjsonId": null,
+      "scryfallId": null,
+      "details": null,
+      "variants": [
+        {
+          "id": "pokemon-base-set-shadowless-charizard-holo-rare_moderately-played_1st-edition-holofoil",
+          "uuid": "be739e60-29a3-56ea-90da-fb3cc2d20127",
+          "condition": "Moderately Played",
+          "printing": "1st Edition Holofoil",
+          "language": "English",
+          "tcgplayerSkuId": "2998644",
+          "price": 10000,
+          "lastUpdated": 1782742613,
+          "priceChange24hr": 0,
+          "priceHistory": [
+            {
+              "p": 10000,
+              "t": 1782172800
+            },
+            {
+              "p": 10000,
+              "t": 1782259200
+            },
+            {
+              "p": 10000,
+              "t": 1782345600
+            },
+            {
+              "p": 10000,
+              "t": 1782432000
+            },
+            {
+              "p": 10000,
+              "t": 1782518400
+            },
+            {
+              "p": 10000,
+              "t": 1782604800
+            },
+            {
+              "p": 10000,
+              "t": 1782691200
+            }
+          ],
+          "priceChange7d": 0,
+          "avgPrice": 10000,
+          "minPrice7d": 10000,
+          "maxPrice7d": 10000,
+          "stddevPopPrice7d": 0,
+          "covPrice7d": 0,
+          "iqrPrice7d": 0,
+          "trendSlope7d": 0,
+          "priceChangesCount7d": 0,
+          "priceChange30d": 0,
+          "avgPrice30d": 10000,
+          "minPrice30d": 10000,
+          "maxPrice30d": 10000,
+          "stddevPopPrice30d": 0,
+          "covPrice30d": 0,
+          "iqrPrice30d": 0,
+          "trendSlope30d": 0,
+          "priceChangesCount30d": 0,
+          "priceRelativeTo30dRange": null,
+          "priceChange90d": 0,
+          "avgPrice90d": 10000,
+          "minPrice90d": 10000,
+          "maxPrice90d": 10000,
+          "stddevPopPrice90d": 0,
+          "covPrice90d": 0,
+          "iqrPrice90d": 0,
+          "trendSlope90d": 0,
+          "priceChangesCount90d": 0,
+          "priceRelativeTo90dRange": null,
+          "minPrice1y": 289.6,
+          "maxPrice1y": 10000,
+          "minPriceAllTime": 289.6,
+          "minPriceAllTimeDate": "2026-03-20T18:58:36.571Z",
+          "maxPriceAllTime": 10000,
+          "maxPriceAllTimeDate": "2026-06-29T14:16:53.868Z"
+        },
+        {
+          "id": "pokemon-base-set-shadowless-charizard-holo-rare_damaged_1st-edition-holofoil",
+          "uuid": "47147444-c167-566c-96ad-e0964eed7133",
+          "condition": "Damaged",
+          "printing": "1st Edition Holofoil",
+          "language": "English",
+          "tcgplayerSkuId": "2998646",
+          "price": 4200,
+          "lastUpdated": 1781742236,
+          "priceChange24hr": null,
+          "priceHistory": null,
+          "priceChange7d": null,
+          "avgPrice": null,
+          "minPrice7d": null,
+          "maxPrice7d": null,
+          "stddevPopPrice7d": null,
+          "covPrice7d": null,
+          "iqrPrice7d": 0,
+          "trendSlope7d": null,
+          "priceChangesCount7d": 0,
+          "priceChange30d": 0,
+          "avgPrice30d": 4200,
+          "minPrice30d": 4200,
+          "maxPrice30d": 4200,
+          "stddevPopPrice30d": 0,
+          "covPrice30d": 0,
+          "iqrPrice30d": 0,
+          "trendSlope30d": 0,
+          "priceChangesCount30d": 0,
+          "priceRelativeTo30dRange": null,
+          "priceChange90d": 0,
+          "avgPrice90d": 4200,
+          "minPrice90d": 4200,
+          "maxPrice90d": 4200,
+          "stddevPopPrice90d": 0,
+          "covPrice90d": 0,
+          "iqrPrice90d": 0,
+          "trendSlope90d": 0,
+          "priceChangesCount90d": 0,
+          "priceRelativeTo90dRange": null,
+          "minPrice1y": 339.99,
+          "maxPrice1y": 4200,
+          "minPriceAllTime": 339.99,
+          "minPriceAllTimeDate": "2025-12-13T00:50:24.880Z",
+          "maxPriceAllTime": 4200,
+          "maxPriceAllTimeDate": "2026-06-18T00:23:56.080Z"
+        },
+        {
+          "id": "pokemon-base-set-shadowless-charizard-holo-rare_lightly-played_unlimited-holofoil",
+          "uuid": "2ff35f99-b29b-5580-aa58-93c872d1bfcf",
+          "condition": "Lightly Played",
+          "printing": "Unlimited Holofoil",
+          "language": "English",
+          "tcgplayerSkuId": "2998638",
+          "price": 2251.98,
+          "lastUpdated": 1782742613,
+          "priceChange24hr": 0,
+          "priceHistory": [
+            {
+              "p": 2251.98,
+              "t": 1782172800
+            },
+            {
+              "p": 2251.98,
+              "t": 1782259200
+            },
+            {
+              "p": 2251.98,
+              "t": 1782345600
+            },
+            {
+              "p": 2251.98,
+              "t": 1782432000
+            },
+            {
+              "p": 2251.98,
+              "t": 1782518400
+            },
+            {
+              "p": 2251.98,
+              "t": 1782604800
+            },
+            {
+              "p": 2251.98,
+              "t": 1782691200
+            }
+          ],
+          "priceChange7d": 0,
+          "avgPrice": 2251.98,
+          "minPrice7d": 2251.98,
+          "maxPrice7d": 2251.98,
+          "stddevPopPrice7d": 0,
+          "covPrice7d": 0,
+          "iqrPrice7d": 0,
+          "trendSlope7d": 0,
+          "priceChangesCount7d": 0,
+          "priceChange30d": 0,
+          "avgPrice30d": 2251.98,
+          "minPrice30d": 2251.98,
+          "maxPrice30d": 2251.98,
+          "stddevPopPrice30d": 0,
+          "covPrice30d": 0,
+          "iqrPrice30d": 0,
+          "trendSlope30d": 0,
+          "priceChangesCount30d": 0,
+          "priceRelativeTo30dRange": null,
+          "priceChange90d": 0.09,
+          "avgPrice90d": 2251.35,
+          "minPrice90d": 2249.98,
+          "maxPrice90d": 2251.98,
+          "stddevPopPrice90d": 0.93,
+          "covPrice90d": 0.00041255114599367677,
+          "iqrPrice90d": 2,
+          "trendSlope90d": 0.0289806950579919,
+          "priceChangesCount90d": 1,
+          "priceRelativeTo90dRange": 1,
+          "minPrice1y": 1299,
+          "maxPrice1y": 2251.98,
+          "minPriceAllTime": 1299,
+          "minPriceAllTimeDate": "2025-12-02T05:44:16.659Z",
+          "maxPriceAllTime": 2251.98,
+          "maxPriceAllTimeDate": "2026-06-29T14:16:53.868Z"
+        },
+        {
+          "id": "pokemon-base-set-shadowless-charizard-holo-rare_near-mint_unlimited-holofoil",
+          "uuid": "364144e8-7ed0-58b4-8d65-9196732e160b",
+          "condition": "Near Mint",
+          "printing": "Unlimited Holofoil",
+          "language": "English",
+          "tcgplayerSkuId": "2998637",
+          "price": 2146.38,
+          "lastUpdated": 1782742613,
+          "priceChange24hr": 0,
+          "priceHistory": [
+            {
+              "p": 2146.38,
+              "t": 1782172800
+            },
+            {
+              "p": 2146.38,
+              "t": 1782259200
+            },
+            {
+              "p": 2146.38,
+              "t": 1782345600
+            },
+            {
+              "p": 2146.38,
+              "t": 1782432000
+            },
+            {
+              "p": 2146.38,
+              "t": 1782518400
+            },
+            {
+              "p": 2146.38,
+              "t": 1782604800
+            },
+            {
+              "p": 2146.38,
+              "t": 1782691200
+            }
+          ],
+          "priceChange7d": 0,
+          "avgPrice": 2146.38,
+          "minPrice7d": 2146.38,
+          "maxPrice7d": 2146.38,
+          "stddevPopPrice7d": 0,
+          "covPrice7d": 0,
+          "iqrPrice7d": 0,
+          "trendSlope7d": 0,
+          "priceChangesCount7d": 0,
+          "priceChange30d": 0,
+          "avgPrice30d": 2146.38,
+          "minPrice30d": 2146.38,
+          "maxPrice30d": 2146.38,
+          "stddevPopPrice30d": 0,
+          "covPrice30d": 0,
+          "iqrPrice30d": 0,
+          "trendSlope30d": 0,
+          "priceChangesCount30d": 0,
+          "priceRelativeTo30dRange": null,
+          "priceChange90d": 0,
+          "avgPrice90d": 2146.38,
+          "minPrice90d": 2146.38,
+          "maxPrice90d": 2146.38,
+          "stddevPopPrice90d": 0,
+          "covPrice90d": 0,
+          "iqrPrice90d": 0,
+          "trendSlope90d": 0,
+          "priceChangesCount90d": 0,
+          "priceRelativeTo90dRange": null,
+          "minPrice1y": 1649.5,
+          "maxPrice1y": 2146.38,
+          "minPriceAllTime": 1649.5,
+          "minPriceAllTimeDate": "2025-07-07T14:48:15.572Z",
+          "maxPriceAllTime": 2146.38,
+          "maxPriceAllTimeDate": "2026-06-29T14:16:53.868Z"
+        },
+        {
+          "id": "pokemon-base-set-shadowless-charizard-holo-rare_moderately-played_unlimited-holofoil",
+          "uuid": "a2c81b63-9e5e-5251-b254-0248b1bd60c6",
+          "condition": "Moderately Played",
+          "printing": "Unlimited Holofoil",
+          "language": "English",
+          "tcgplayerSkuId": "2998639",
+          "price": 1173.23,
+          "lastUpdated": 1782742613,
+          "priceChange24hr": 0,
+          "priceHistory": [
+            {
+              "p": 1173.23,
+              "t": 1782172800
+            },
+            {
+              "p": 1173.23,
+              "t": 1782259200
+            },
+            {
+              "p": 1173.23,
+              "t": 1782345600
+            },
+            {
+              "p": 1173.23,
+              "t": 1782432000
+            },
+            {
+              "p": 1173.23,
+              "t": 1782518400
+            },
+            {
+              "p": 1173.23,
+              "t": 1782604800
+            },
+            {
+              "p": 1173.23,
+              "t": 1782691200
+            }
+          ],
+          "priceChange7d": 0,
+          "avgPrice": 1173.23,
+          "minPrice7d": 1173.23,
+          "maxPrice7d": 1173.23,
+          "stddevPopPrice7d": 0,
+          "covPrice7d": 0,
+          "iqrPrice7d": 0,
+          "trendSlope7d": 0,
+          "priceChangesCount7d": 0,
+          "priceChange30d": -2.12,
+          "avgPrice30d": 1184.83,
+          "minPrice30d": 1173.23,
+          "maxPrice30d": 1198.58,
+          "stddevPopPrice30d": 12.63,
+          "covPrice30d": 0.01065924564150962,
+          "iqrPrice30d": 25.35,
+          "trendSlope30d": -1.2703953616236499,
+          "priceChangesCount30d": 1,
+          "priceRelativeTo30dRange": 0,
+          "priceChange90d": 22.99,
+          "avgPrice90d": 1108.92,
+          "minPrice90d": 953.96,
+          "maxPrice90d": 1198.58,
+          "stddevPopPrice90d": 90.79,
+          "covPrice90d": 0.08187523763434953,
+          "iqrPrice90d": 180.77,
+          "trendSlope90d": 3.0844264051991503,
+          "priceChangesCount90d": 11,
+          "priceRelativeTo90dRange": 0.8963698798135884,
+          "minPrice1y": 742.65,
+          "maxPrice1y": 1198.58,
+          "minPriceAllTime": 742.65,
+          "minPriceAllTimeDate": "2025-11-24T22:37:42.424Z",
+          "maxPriceAllTime": 1198.58,
+          "maxPriceAllTimeDate": "2026-06-13T11:33:00.774Z"
+        },
+        {
+          "id": "pokemon-base-set-shadowless-charizard-holo-rare_heavily-played_unlimited-holofoil",
+          "uuid": "b7fec629-ed0c-5b3c-a717-74392fccb6b0",
+          "condition": "Heavily Played",
+          "printing": "Unlimited Holofoil",
+          "language": "English",
+          "tcgplayerSkuId": "2998640",
+          "price": 899.23,
+          "lastUpdated": 1782742613,
+          "priceChange24hr": 0,
+          "priceHistory": [
+            {
+              "p": 899.23,
+              "t": 1782172800
+            },
+            {
+              "p": 899.23,
+              "t": 1782259200
+            },
+            {
+              "p": 899.23,
+              "t": 1782345600
+            },
+            {
+              "p": 899.23,
+              "t": 1782432000
+            },
+            {
+              "p": 899.23,
+              "t": 1782518400
+            },
+            {
+              "p": 899.23,
+              "t": 1782604800
+            },
+            {
+              "p": 899.23,
+              "t": 1782691200
+            }
+          ],
+          "priceChange7d": 0,
+          "avgPrice": 899.23,
+          "minPrice7d": 899.23,
+          "maxPrice7d": 899.23,
+          "stddevPopPrice7d": 0,
+          "covPrice7d": 0,
+          "iqrPrice7d": 0,
+          "trendSlope7d": 0,
+          "priceChangesCount7d": 0,
+          "priceChange30d": 3.36,
+          "avgPrice30d": 881.22,
+          "minPrice30d": 868.58,
+          "maxPrice30d": 899.23,
+          "stddevPopPrice30d": 12.52,
+          "covPrice30d": 0.014211434735006967,
+          "iqrPrice30d": 29.27,
+          "trendSlope30d": 1.32718222996511,
+          "priceChangesCount30d": 3,
+          "priceRelativeTo30dRange": 1,
+          "priceChange90d": 6.79,
+          "avgPrice90d": 862.59,
+          "minPrice90d": 842.04,
+          "maxPrice90d": 899.23,
+          "stddevPopPrice90d": 18.71,
+          "covPrice90d": 0.021692289957118607,
+          "iqrPrice90d": 27.85,
+          "trendSlope90d": 0.6542810609517881,
+          "priceChangesCount90d": 11,
+          "priceRelativeTo90dRange": 1,
+          "minPrice1y": 635.86,
+          "maxPrice1y": 899.23,
+          "minPriceAllTime": 635.86,
+          "minPriceAllTimeDate": "2025-07-02T10:32:25.328Z",
+          "maxPriceAllTime": 899.23,
+          "maxPriceAllTimeDate": "2026-06-29T14:16:53.868Z"
+        },
+        {
+          "id": "pokemon-base-set-shadowless-charizard-holo-rare_damaged_unlimited-holofoil",
+          "uuid": "6773f6bc-9013-5540-9e03-b4f23d17bc7f",
+          "condition": "Damaged",
+          "printing": "Unlimited Holofoil",
+          "language": "English",
+          "tcgplayerSkuId": "2998641",
+          "price": 770.15,
+          "lastUpdated": 1782742613,
+          "priceChange24hr": 0,
+          "priceHistory": [
+            {
+              "p": 708.68,
+              "t": 1782172800
+            },
+            {
+              "p": 733.09,
+              "t": 1782259200
+            },
+            {
+              "p": 733.09,
+              "t": 1782345600
+            },
+            {
+              "p": 770.15,
+              "t": 1782432000
+            },
+            {
+              "p": 770.15,
+              "t": 1782518400
+            },
+            {
+              "p": 770.15,
+              "t": 1782604800
+            },
+            {
+              "p": 770.15,
+              "t": 1782691200
+            }
+          ],
+          "priceChange7d": 8.67,
+          "avgPrice": 746.39,
+          "minPrice7d": 708.68,
+          "maxPrice7d": 770.15,
+          "stddevPopPrice7d": 25.25,
+          "covPrice7d": 0.03382873671152606,
+          "iqrPrice7d": 37.06,
+          "trendSlope7d": 11.398170688871,
+          "priceChangesCount7d": 2,
+          "priceChange30d": 9.01,
+          "avgPrice30d": 712.35,
+          "minPrice30d": 693.15,
+          "maxPrice30d": 770.15,
+          "stddevPopPrice30d": 23.6,
+          "covPrice30d": 0.03313306941654106,
+          "iqrPrice30d": 15.53,
+          "trendSlope30d": 2.21731773486627,
+          "priceChangesCount30d": 4,
+          "priceRelativeTo30dRange": 1,
+          "priceChange90d": 22.12,
+          "avgPrice90d": 684.24,
+          "minPrice90d": 630.67,
+          "maxPrice90d": 770.15,
+          "stddevPopPrice90d": 32.87,
+          "covPrice90d": 0.04803334887601798,
+          "iqrPrice90d": 62.51,
+          "trendSlope90d": 1.13321426925744,
+          "priceChangesCount90d": 13,
+          "priceRelativeTo90dRange": 1,
+          "minPrice1y": 511.07,
+          "maxPrice1y": 770.15,
+          "minPriceAllTime": 511.07,
+          "minPriceAllTimeDate": "2025-08-25T00:32:12.967Z",
+          "maxPriceAllTime": 770.15,
+          "maxPriceAllTimeDate": "2026-06-29T14:16:53.868Z"
+        },
+        {
+          "id": "pokemon-base-set-shadowless-charizard-holo-rare_lightly-played_1st-edition-holofoil",
+          "uuid": "3f92e7b1-e103-5dea-aed3-00fef4a0c2be",
+          "condition": "Lightly Played",
+          "printing": "1st Edition Holofoil",
+          "language": "English",
+          "tcgplayerSkuId": "2998643",
+          "price": 450,
+          "lastUpdated": 1772540193,
+          "priceChange24hr": null,
+          "priceHistory": null,
+          "priceChange7d": null,
+          "avgPrice": null,
+          "minPrice7d": null,
+          "maxPrice7d": null,
+          "stddevPopPrice7d": null,
+          "covPrice7d": null,
+          "iqrPrice7d": 0,
+          "trendSlope7d": null,
+          "priceChangesCount7d": 0,
+          "priceChange30d": null,
+          "avgPrice30d": null,
+          "minPrice30d": null,
+          "maxPrice30d": null,
+          "stddevPopPrice30d": null,
+          "covPrice30d": null,
+          "iqrPrice30d": 0,
+          "trendSlope30d": null,
+          "priceChangesCount30d": 0,
+          "priceRelativeTo30dRange": null,
+          "priceChange90d": null,
+          "avgPrice90d": null,
+          "minPrice90d": null,
+          "maxPrice90d": null,
+          "stddevPopPrice90d": null,
+          "covPrice90d": null,
+          "iqrPrice90d": 0,
+          "trendSlope90d": null,
+          "priceChangesCount90d": 0,
+          "priceRelativeTo90dRange": null,
+          "minPrice1y": 450,
+          "maxPrice1y": 450,
+          "minPriceAllTime": 450,
+          "minPriceAllTimeDate": "2026-03-03T12:16:33.542Z",
+          "maxPriceAllTime": 450,
+          "maxPriceAllTimeDate": "2026-03-03T12:16:33.542Z"
+        },
+        {
+          "id": "pokemon-base-set-shadowless-charizard-holo-rare_near-mint_1st-edition-holofoil",
+          "uuid": "a6d371ed-8935-552f-b75e-6a7e551d3242",
+          "condition": "Near Mint",
+          "printing": "1st Edition Holofoil",
+          "language": "English",
+          "tcgplayerSkuId": "2998642",
+          "price": 449.95,
+          "lastUpdated": 1782742613,
+          "priceChange24hr": 0,
+          "priceHistory": [
+            {
+              "p": 310,
+              "t": 1782172800
+            },
+            {
+              "p": 449.95,
+              "t": 1782345600
+            },
+            {
+              "p": 449.95,
+              "t": 1782432000
+            },
+            {
+              "p": 449.95,
+              "t": 1782518400
+            },
+            {
+              "p": 449.95,
+              "t": 1782604800
+            },
+            {
+              "p": 449.95,
+              "t": 1782691200
+            }
+          ],
+          "priceChange7d": 45.15,
+          "avgPrice": 421.96,
+          "minPrice7d": 310,
+          "maxPrice7d": 449.95,
+          "stddevPopPrice7d": 55.98,
+          "covPrice7d": 0.13266660346952316,
+          "iqrPrice7d": 0,
+          "trendSlope7d": 23.1609774111432,
+          "priceChangesCount7d": 1,
+          "priceChange30d": 69.79,
+          "avgPrice30d": 334.9,
+          "minPrice30d": 265,
+          "maxPrice30d": 449.95,
+          "stddevPopPrice30d": 60.41,
+          "covPrice30d": 0.18039184930173247,
+          "iqrPrice30d": 10.05,
+          "trendSlope30d": 5.49456304325925,
+          "priceChangesCount30d": 4,
+          "priceRelativeTo30dRange": 1,
+          "priceChange90d": -5.27,
+          "avgPrice90d": 377.77,
+          "minPrice90d": 245.95,
+          "maxPrice90d": 490,
+          "stddevPopPrice90d": 85.33,
+          "covPrice90d": 0.22587729820879995,
+          "iqrPrice90d": 164.98,
+          "trendSlope90d": -1.95227371759086,
+          "priceChangesCount90d": 10,
+          "priceRelativeTo90dRange": 0.8358942839582053,
+          "minPrice1y": 245.95,
+          "maxPrice1y": 5999,
+          "minPriceAllTime": 245.95,
+          "minPriceAllTimeDate": "2026-05-26T12:40:18.442Z",
+          "maxPriceAllTime": 5999,
+          "maxPriceAllTimeDate": "2025-07-31T05:06:47.000Z"
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "total": 1,
+    "limit": 10,
+    "offset": 0,
+    "hasMore": false
+  },
+  "_fixture_metadata": {
+    "source": "justtcg",
+    "sanitized_at": "2026-06-29T22:00:23.392664+00:00",
+    "sanitized_by": "justtcg_live_smoke.py",
+    "contains_real_provider_data": true,
+    "permission_basis": "JustTCG terms approved 2026-06-29; fixture storage allowed",
+    "note": "Sanitized one-card fixture captured from JustTCG live smoke test 2026-06-29. Raw provider payload remains private and git-ignored.",
+    "fixture_type": "sanitized_live_shape",
+    "contains_api_key": false,
+    "contains_account_metadata": false,
+    "contains_request_headers": false,
+    "": true,
+    "source_terms_status": "approved_with_restriction",
+    "external_api_resale_allowed": false
+  }
+}

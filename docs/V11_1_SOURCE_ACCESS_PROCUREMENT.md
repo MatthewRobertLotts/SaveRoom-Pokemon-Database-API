@@ -2,8 +2,8 @@
 
 Tags: #type/project #status/needs-review
 
-Status: PROCUREMENT_READY
-Date: 2026-06-27
+Status: TERMS_APPROVED (JustTCG, 2026-06-29) — adapter implementation now unblocked for SaveRoom ecosystem apps only
+Date: 2026-06-29
 Branch: v11.1-market-evidence-next
 Baseline commit: 44ac638
 
@@ -37,6 +37,20 @@ Before coding, SaveRoom needs source access because a second-source adapter must
 ## B. Preferred target: JustTCG
 
 JustTCG is the preferred first procurement target because public docs and marketing indicate it is a structured TCG-focused pricing API with Pokémon support, condition-specific pricing, printing/variant awareness, and REST/JSON payloads.
+
+> **Strategy note (2026-06-28):** JustTCG remains the preferred **second-source comparison target** for cross-source confidence scoring, but it is **not** the core UK pricing source. The corrected strategy is **UK-first external pricing intelligence** anchored on UK sold/completed market evidence (eBay UK as planned primary source). JustTCG's role is USD external market/current pricing, trend/sanity checks, thin-market support, and identifier mapping. USD-only JustTCG data requires explicit FX conversion before contributing to a GBP fallback estimate. See `docs/V12_PRICING_STRATEGY_CORRECTION.md` for the full correction.
+
+### JustTCG Pricing Plans (observed 2026-06-28)
+
+| Plan | Price | Monthly Requests | Daily Requests | Rate Limit | Cards/Request | Support |
+|---|---|---|---|---|---|---|
+| **Free Tier** | $0 | 1,000 | 100 | 10/min | 20 | Basic |
+| **Starter** | $19/mo | 10,000 | 1,000 | 50/min | 100 | Basic |
+| **Professional** | $49/mo | 50,000 | 5,000 | 100/min | 100 | Priority |
+| **Enterprise** | $149/mo | 500,000 | 50,000 | 500/min | 200 | Highest priority + custom integration |
+
+### Recommended plan
+**Starter ($19/mo)** for development and early production. Upgrade to Professional ($49/mo) for customer-facing launch. The Free Tier (1K/mo) is available for initial evaluation but too limited for production.
 
 Why it is preferred over the other candidates:
 

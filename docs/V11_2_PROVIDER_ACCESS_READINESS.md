@@ -74,12 +74,14 @@ response = make_justtcg_request(...)
 
 ## What Remains Blocked
 
-- No live provider adapter code
-- No external API calls
-- No real provider data stored
-- No fixtures captured
+- No live provider adapter code (JustTCG fixture-only adapter is next)
+- No external API calls (JustTCG terms approved — live calls unblocked after key + env flags set)
+- No real provider data stored (JustTCG storage permissions confirmed)
+- No fixtures captured (JustTCG fixture storage confirmed allowed)
 
-All of these require:
+**JustTCG terms update (2026-06-29):** JustTCG has approved SaveRoom's access with all requested permissions (backend use, raw cache, normalized/aggregated storage, fixture storage, internal/customer display, identifier mapping). **Critical restriction:** JustTCG-derived pricing must NOT be exposed through a standalone external developer pricing API or competing data product. SaveRoom ecosystem apps only. See `docs/V11_1_JUSTTCG_ACCESS_REQUEST_DRAFT.md` for full terms.
+
+Implementing a live adapter requires:
 1. Approved provider access (key/credentials)
 2. Confirmed terms of service (caching, commercial use, display)
 3. Explicit env-var opt-in for each permission

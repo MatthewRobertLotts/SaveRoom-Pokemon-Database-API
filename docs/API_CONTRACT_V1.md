@@ -35,8 +35,21 @@ Initial v1 resources:
 - `GET /api/v1/languages` — future language list.
 - `GET /api/v1/search/cards` — paginated card search.
 - `GET /api/v1/images/cards/{card_key}` — future card image metadata/redirect endpoint.
+- `GET /api/v1/cards/{card_key}/detail` — v12 app-ready card detail (identity + set + images + commercial + pricing summary + provider status + warnings).
+- `POST /api/v1/cards/detail/batch` — v12 batch app-ready card detail (up to 50 card keys, partial success, include_pricing/include_commercial/include_images flags).
+- `POST /api/v1/listings/assist/cards/{card_key}` — v12 deterministic listing assistant output for Whatnot, eBay, Shopify, and generic workflows.
+- `POST /api/v1/listings/drafts/cards/{card_key}` — v12 local listing draft creation from deterministic listing assistant output.
+- `POST /api/v1/inventory/items/{item_id}/listing-draft` — v12 local inventory-to-listing draft bridge for owned physical inventory items.
+- `GET /api/v1/listings/drafts/{draft_id}` — v12 local listing draft retrieval.
+- `GET /api/v1/listings/drafts` — v12 recent local listing draft list.
+- `PATCH /api/v1/listings/drafts/{draft_id}` — v12 local listing draft editable-field update.
+- `POST /api/v1/listings/drafts/{draft_id}/archive` — v12 local listing draft archive transition.
+- `POST /api/v1/listings/drafts/{draft_id}/complete-sale` — v12 explicit local sale completion from a ready/reserved inventory-linked draft; creates a local sale record and is the only listing-draft path that marks physical inventory sold.
+- `GET /api/v1/sales/{sale_id}` — v12 read-only local sale retrieval for rows created by explicit sale completion.
+- `GET /api/v1/sales` — v12 read-only local sales list with draft, inventory item, card, platform, status, sold_at date range, limit, and offset filters.
 - `GET /api/v1/prices/cards/{card_key}` — future local price summary endpoint.
 - `GET /api/v1/prices/history/cards/{card_key}` — future local price evidence history endpoint.
+- `GET /api/v1/prices/chart/cards/{card_key}` — v12 chart-ready price history (time-bucketed series, day/week/month, per-source percentiles, confidence labels).
 
 Implemented first in v5 phase 1:
 
@@ -111,6 +124,510 @@ v1 card detail may include a local `price` summary from `uk_price_history` only 
 Price summaries should prefer recommended raw inputs, excluding graded/bundles/noise. Evidence rows retain raw listing titles, bucket, match notes, query, source site, cache key, and fetch timestamp.
 
 Live RapidAPI fetches are deliberately out of scope for read-only public v1 endpoints. Fetching/updating prices remains under internal `/api/prices/*` until pricing auth, quota, billing, and abuse controls are production-grade.
+
+### v12 prices recommendation field
+
+`GET /api/v1/prices/cards/{card_key}` includes a `data.recommendation` object for app-ready pricing consumers. This field is additive and keeps existing price summary fields unchanged.
+
+Current v12 milestone behaviour:
+
+- uses existing local UK/GBP evidence only;
+- maps `raw_median` to `primary_uk_price.amount` when recommended local evidence exists;
+- maps `recommended_raw_count` to `primary_uk_price.evidence_count`;
+- sets `general_market_estimate` to the local UK primary price for now;
+- sets `recommended_listing_price` to the balanced local estimate;
+- leaves `uk_adjusted_fallback_price` and adjustment multiplier fields null;
+- does not use JustTCG / TotalTCG / TCGplayer / Cardmarket prices in the recommendation yet;
+- does not make live provider calls for recommendation calculation.
+
+Shape:
+
+```json
+{
+  "recommendation": {
+    "currency": "GBP",
+    "region_basis": "uk_primary",
+    "primary_uk_price": {
+      "amount": 18.64,
+      "currency": "GBP",
+      "evidence_count": 12,
+      "source": "ebay_uk_sold",
+      "source_type": "local_uk_evidence",
+      "price_type": "sold_completed"
+    },
+    "uk_adjusted_fallback_price": null,
+    "general_market_estimate": {
+      "amount": 18.64,
+      "currency": "GBP",
+      "source_type": "local_uk_evidence"
+    },
+    "recommended_listing_price": {
+      "amount": 18.64,
+      "currency": "GBP",
+      "strategy": "balanced"
+    },
+    "source_breakdown": [],
+    "evidence_count": 12,
+    "confidence": "high",
+    "confidence_score": 0.92,
+    "confidence_reasons": [],
+    "warnings": [],
+    "calculation_method": "local_uk_only; strong_uk_100_0_blend; listing_strategy=balanced; uk_weight=1.00; fallback_weight=0.00",
+    "adjustment_multiplier": null,
+    "adjustment_multiplier_level": null,
+    "adjustment_multiplier_sample_size": null,
+    "adjustment_basis": null,
+    "provider_status_summary": {}
+  }
+}
+```
+
+JustTCG provider status may remain visible as metadata elsewhere in the prices response, but JustTCG pricing must not influence `data.recommendation` until explicit fallback blending is implemented and covered by exposure policy tests.
+
+### JustTCG final terms and exposure policy
+
+JustTCG confirmed SaveRoom-owned apps and tools may use JustTCG-derived pricing through the SaveRoom backend, including scanner app, POS system, inventory desktop app, web tracker, listing assistant, admin panel, and customer-facing SaveRoom app. These SaveRoom apps may be paid products.
+
+External developer API and standalone pricing API/data-feed surfaces remain blocked for JustTCG-derived pricing. The API contract must therefore keep the split explicit:
+
+```text
+internal_admin: allowed
+customer_saveroom_app: allowed
+saveroom_owned_paid_apps: allowed
+external_developer_api: blocked/redacted
+standalone_pricing_api: blocked
+```
+
+Attribution wording:
+
+```text
+Pricing data provided by JustTCG
+```
+
+JustTCG price fields should be labelled as **Market Price**. JustTCG clarified this represents a volume-weighted average of completed marketplace sales. Do not label it as UK sold price, UK market price, active listing price, or live listing price.
+
+If the JustTCG subscription is cancelled, normalized and aggregate JustTCG-derived data already stored in the SaveRoom database may remain permanently. Live updates should stop after cancellation.
+
+## v12 Listing Assistant Endpoint
+
+`POST /api/v1/listings/assist/cards/{card_key}` returns deterministic listing-ready data for marketplace and generic workflows. It is an app-readiness endpoint, not a publishing endpoint.
+
+Supported platforms:
+
+- `whatnot`
+- `ebay`
+- `shopify`
+- `generic`
+
+Request fields:
+
+```json
+{
+  "platform": "generic",
+  "condition": null,
+  "finish": null,
+  "quantity": 1,
+  "include_images": true,
+  "include_pricing": true,
+  "include_commercial": true,
+  "pricing_strategy": "balanced",
+  "title_style": "marketplace",
+  "notes": null
+}
+```
+
+Validation:
+
+- `quantity >= 1`
+- `platform` must be `whatnot`, `ebay`, `shopify`, or `generic`
+- `pricing_strategy` must be `conservative`, `balanced`, or `premium`
+- `title_style` must be `compact`, `seo`, or `marketplace`
+
+Current v12 milestone behaviour:
+
+- does not call marketplace APIs;
+- does not publish listings;
+- does not call JustTCG, TotalTCG, TCGplayer, Cardmarket, eBay, Whatnot, or Shopify APIs;
+- does not use an LLM;
+- uses local card detail, image gateway metadata, commercial identity/SKU mapping, and `data.recommendation`-compatible pricing only;
+- defaults to balanced pricing;
+- accepts conservative/premium request values but returns the balanced recommendation until the recommendation layer exposes those strategies safely;
+- does not use raw provider fallback data, USD/global pricing, API keys, account metadata, raw payloads, or filesystem paths.
+
+Response shape:
+
+```json
+{
+  "data": {
+    "card": {
+      "card_key": "en:sv03-223",
+      "name": "Charizard ex",
+      "language_code": "en",
+      "set_id": "sv03",
+      "set_name": "Obsidian Flames",
+      "number": "223",
+      "rarity": "Special Illustration Rare"
+    },
+    "listing": {
+      "title": "Charizard ex 223 Obsidian Flames Special Illustration Rare",
+      "subtitle": "Obsidian Flames 223 Special Illustration Rare",
+      "description_bullets": [
+        "Card name: Charizard ex",
+        "Set: Obsidian Flames",
+        "Number: 223",
+        "Rarity: Special Illustration Rare",
+        "Language: en",
+        "Quantity: 1",
+        "Pricing confidence: medium"
+      ],
+      "condition_note": null,
+      "tags": ["pokemon-card", "generic"]
+    },
+    "pricing": {
+      "currency": "GBP",
+      "suggested_price": 18.64,
+      "floor_price": null,
+      "ceiling_price": null,
+      "confidence": "medium",
+      "source_summary": {
+        "region_basis": "uk_primary",
+        "calculation_method": "local_uk_only; ...",
+        "evidence_count": 12,
+        "source_breakdown": []
+      },
+      "warnings": [],
+      "based_on_recommendation": {
+        "recommended_listing_price": {},
+        "general_market_estimate": {},
+        "primary_uk_price": {},
+        "confidence": "medium"
+      }
+    },
+    "images": {
+      "primary_image": "/api/v1/images/card/en:sv03-223/content?size=medium",
+      "image_candidates": ["/api/v1/images/card/en:sv03-223/content?size=medium"]
+    },
+    "commercial": {
+      "canonical_printing_id": "...",
+      "commercial_variant_id": "...",
+      "sellable_sku_id": "..."
+    },
+    "platform_guidance": {
+      "platform": "generic",
+      "title_limit": 120,
+      "description_limit": 2000,
+      "required_fields": ["title", "description", "condition"],
+      "optional_fields": ["subtitle", "tags", "images", "price"],
+      "notes": "Reusable listing copy."
+    },
+    "provider_status": {},
+    "warnings": [],
+    "metadata": {
+      "api_version": "v1",
+      "contract": "v12-listing-assistant",
+      "generated_at": "..."
+    }
+  },
+  "warnings": [],
+  "metadata": {
+    "api_version": "v1",
+    "contract": "v12-listing-assistant",
+    "generated_at": "..."
+  }
+}
+```
+
+Include flags:
+
+- `include_images=false` returns `data.images = null`.
+- `include_pricing=false` returns `data.pricing = null`.
+- `include_commercial=false` returns `data.commercial = null`.
+
+Pricing contract:
+
+- `pricing.suggested_price` maps from `data.recommendation.recommended_listing_price.amount`.
+- `pricing.based_on_recommendation.general_market_estimate` carries the recommendation estimate.
+- `pricing.based_on_recommendation.primary_uk_price` carries the local UK primary evidence object.
+- `pricing.source_summary.source_breakdown` carries the recommendation source breakdown.
+- No raw JustTCG/TotalTCG/TCGplayer/Cardmarket/eBay/Whatnot/Shopify provider data is exposed.
+- No live provider calls are made by the listing assistant endpoint.
+
+## v12 Listing Draft Persistence
+
+Local listing draft persistence stores deterministic listing assistant output as local app/API draft records. It is not marketplace publishing and it does not integrate with eBay, Whatnot, Shopify, or any provider API.
+
+Endpoints:
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/v1/listings/drafts/cards/{card_key}` | Generate listing assistant output locally and save it as a draft. |
+| POST | `/api/v1/inventory/items/{item_id}/listing-draft` | Create a local listing draft from an owned physical inventory item. |
+| GET | `/api/v1/listings/drafts/{draft_id}` | Return one saved local draft. |
+| GET | `/api/v1/listings/drafts` | List recent local drafts, including archived drafts by default. |
+| PATCH | `/api/v1/listings/drafts/{draft_id}` | Update safe editable local draft fields. |
+| POST | `/api/v1/listings/drafts/{draft_id}/ready` | Mark a local draft ready and reserve linked inventory when available/requested. |
+| POST | `/api/v1/listings/drafts/{draft_id}/reserve` | Reserve the linked local inventory item without publishing or changing stock. |
+| POST | `/api/v1/listings/drafts/{draft_id}/unreserve` | Release an active local inventory reservation. |
+| GET | `/api/v1/listings/drafts/{draft_id}/reservation` | Return the active local reservation for a draft, or null when none exists. |
+| POST | `/api/v1/listings/drafts/{draft_id}/archive` | Mark a local draft archived without deleting it. |
+
+Persistence table:
+
+```text
+listing_drafts
+```
+
+Stored fields include:
+
+```text
+draft_id, card_key, language_code, card_id, platform, status,
+title, subtitle, description_json, tags_json, condition, finish, quantity,
+pricing_json, images_json, commercial_json, platform_guidance_json,
+provider_status_json, warnings_json, assistant_payload_json,
+source_assistant_contract, notes, created_at, updated_at, archived_at
+```
+
+Status lifecycle:
+
+- `draft` — newly created local draft.
+- `ready` — local draft has been reviewed/edited and is ready for future workflow use.
+- `archived` — local draft hidden from active-only views but retained.
+
+### v12 Listing Draft Inventory Reservations
+
+Local reservation workflow lets SaveRoom mark a draft ready and reserve the linked physical inventory item locally. It is not marketplace publishing, not stock decrement, and not a sale.
+
+Reservation endpoints:
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/v1/listings/drafts/{draft_id}/ready` | Set `listing_drafts.status = ready`; if the draft has an inventory link and `reserve_inventory=true`, create/reuse an active local reservation. |
+| POST | `/api/v1/listings/drafts/{draft_id}/reserve` | Create/reuse an active reservation for an inventory-linked draft without changing draft status. |
+| POST | `/api/v1/listings/drafts/{draft_id}/unreserve` | Mark the active reservation `released`; optional `set_status` can set the draft back to `draft` or leave it `ready`. |
+| GET | `/api/v1/listings/drafts/{draft_id}/reservation` | Return the active reservation for the draft, or `null`. |
+
+Reservation table:
+
+```text
+listing_draft_inventory_reservations
+```
+
+Fields:
+
+```text
+reservation_id, draft_id, inventory_item_id, card_key, quantity,
+status, created_at, updated_at, released_at, release_reason
+```
+
+Reservation statuses:
+
+```text
+reserved
+released
+```
+
+Rules:
+
+- only one active `reserved` row is allowed per `draft_id`;
+- only one active `reserved` row is allowed per `inventory_item_id`;
+- duplicate reserve calls for the same draft return the existing active reservation and do not create duplicate rows;
+- duplicate active reservation for the same inventory item by another draft returns `409 inventory_already_reserved`;
+- reservation quantity cannot exceed the linked `inventory_listing_draft_links.quantity`;
+- archived drafts cannot be reserved;
+- reservations do not update `physical_items.status`, do not mark items sold, and do not decrement inventory.
+
+Request models:
+
+```text
+ListingDraftReadyRequestV1
+ListingDraftReserveRequestV1
+ListingDraftUnreserveRequestV1
+```
+
+Response model:
+
+```text
+ListingDraftReservationResponseV1
+```
+
+Response shape:
+
+```json
+{
+  "data": {
+    "draft": {},
+    "reservation": {
+      "reservation_id": "ldr_...",
+      "draft_id": "ld_...",
+      "inventory_item_id": "...",
+      "card_key": "en:sv03-223",
+      "quantity": 1,
+      "status": "reserved",
+      "created_at": "...",
+      "updated_at": "...",
+      "released_at": null,
+      "release_reason": null
+    }
+  },
+  "metadata": {
+    "api_version": "v1",
+    "contract": "v12-listing-draft-reservation",
+    "generated_at": "..."
+  }
+}
+```
+
+Create request reuses the listing assistant request fields:
+
+```json
+{
+  "platform": "generic",
+  "condition": null,
+  "finish": null,
+  "quantity": 1,
+  "include_images": true,
+  "include_pricing": true,
+  "include_commercial": true,
+  "pricing_strategy": "balanced",
+  "title_style": "marketplace",
+  "notes": null
+}
+```
+
+Update request allows safe local editable fields only:
+
+```json
+{
+  "title": "Updated title",
+  "subtitle": "Updated subtitle",
+  "description_bullets": ["Card name: Charizard ex"],
+  "tags": ["pokemon-card"],
+  "condition": "Near Mint",
+  "finish": "Holo",
+  "quantity": 1,
+  "status": "ready",
+  "notes": "Local note"
+}
+```
+
+Response shape:
+
+```json
+{
+  "data": {
+    "draft_id": "ld_...",
+    "card_key": "en:sv03-223",
+    "platform": "ebay",
+    "status": "draft",
+    "listing": {},
+    "pricing": {},
+    "images": {},
+    "commercial": {},
+    "platform_guidance": {},
+    "provider_status": {},
+    "warnings": [],
+    "assistant_payload": {},
+    "source_assistant_contract": "v12-listing-assistant",
+    "created_at": "...",
+    "updated_at": "...",
+    "archived_at": null
+  },
+  "metadata": {
+    "api_version": "v1",
+    "contract": "v12-listing-draft",
+    "generated_at": "..."
+  }
+}
+```
+
+Safety contract:
+
+- draft creation reuses the listing assistant function internally; it does not call the listing assistant endpoint over HTTP;
+- no live provider calls are made;
+- no marketplace APIs are called;
+- no LLMs are called;
+- no listings are published;
+- no API keys, headers, account metadata, raw provider payloads, private provider paths, sanitized candidates, or raw filesystem paths are stored or returned;
+- `include_images=false`, `include_pricing=false`, and `include_commercial=false` persist null sections in the draft payload.
+
+### v12 Inventory-to-Listing Draft Bridge
+
+The inventory bridge connects an owned local physical inventory item to deterministic listing assistant output and stores the result as a local `listing_drafts` row:
+
+```text
+owned physical_items row -> sellable_skus -> canonical_printings.canonical_card_key -> listing assistant -> listing_drafts
+```
+
+Endpoint:
+
+```text
+POST /api/v1/inventory/items/{item_id}/listing-draft
+```
+
+Request model:
+
+```text
+InventoryListingDraftCreateRequestV1
+```
+
+Request shape:
+
+```json
+{
+  "platform": "generic",
+  "quantity": null,
+  "condition": null,
+  "finish": null,
+  "include_images": true,
+  "include_pricing": true,
+  "include_commercial": true,
+  "pricing_strategy": "balanced",
+  "title_style": "marketplace",
+  "notes": null
+}
+```
+
+Rules:
+
+- request `condition`, `finish`, and `quantity` override inventory defaults when supplied;
+- omitted condition defaults from `physical_items.item_condition`, falling back to SKU condition code where needed;
+- omitted finish defaults from the linked commercial variant when available;
+- omitted quantity defaults to `1` for a physical inventory item;
+- physical item available quantity is treated as `1` while status is `owned` or `consigned`, otherwise `0`;
+- quantity greater than available inventory returns `409 inventory_quantity_unavailable`;
+- items whose SKU cannot resolve a `canonical_card_key` return `409 inventory_item_missing_card_key` rather than 500.
+
+Response model:
+
+```text
+InventoryListingDraftResponseV1
+```
+
+Response shape:
+
+```json
+{
+  "data": {
+    "draft": {},
+    "inventory_source": {
+      "item_id": "...",
+      "card_key": "en:sv03-223",
+      "quantity_requested": 1,
+      "quantity_available": 1,
+      "condition": "Near Mint",
+      "finish": "Holo",
+      "linked": true
+    }
+  },
+  "metadata": {
+    "api_version": "v1",
+    "contract": "v12-inventory-listing-draft-bridge",
+    "generated_at": "..."
+  }
+}
+```
+
+The bridge writes a local link record in `inventory_listing_draft_links` with `inventory_item_id`, `draft_id`, `card_key`, `quantity`, and `created_at`. It stores no marketplace IDs, account IDs, provider payloads, headers, API keys, or raw filesystem paths.
 
 ## v11 Market Evidence Endpoints (2026-06-27)
 
@@ -1230,3 +1747,14 @@ Production validation rejects missing explicit database paths, placeholder or sh
 - Finish values: `normal`, `holo`, `reverse`, `reverse_holo`, `unknown`.
 - All identity is HIGH confidence (set + number evidence) in v10.
 - `GET /api/v1/identity/cards/{card_key}` returns `mapped: false` with warnings for unmapped cards (does not 404).
+
+## v12 Pricing Source Exposure Policy
+
+JustTCG-derived pricing is subject to a terms restriction that prevents its exposure through standalone external developer pricing APIs:
+
+- **SaveRoom ecosystem apps** (internal, admin, customer-facing): JustTCG-derived fields are **allowed** with attribution.
+- **External developer API**: JustTCG-derived fields are **blocked**. Pricing fields from restricted sources are redacted (set to null) and source_breakdown items are removed.
+
+The restriction is enforced by `pricing_sources/exposure_policy.py` and is permanent — it cannot be overridden by env flags.
+
+See `docs/V12_PRICING_SOURCE_EXPOSURE_POLICY.md` for full details.
