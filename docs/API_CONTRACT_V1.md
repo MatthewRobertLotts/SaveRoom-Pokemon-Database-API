@@ -39,6 +39,7 @@ Initial v1 resources:
 - `POST /api/v1/cards/detail/batch` — v12 batch app-ready card detail (up to 50 card keys, partial success, include_pricing/include_commercial/include_images flags).
 - `POST /api/v1/listings/assist/cards/{card_key}` — v12 deterministic listing assistant output for Whatnot, eBay, Shopify, and generic workflows.
 - `POST /api/v1/listings/drafts/cards/{card_key}` — v12 local listing draft creation from deterministic listing assistant output.
+- `POST /api/v1/inventory/items/{item_id}/listing-draft` — v12 local inventory-to-listing draft bridge for owned physical inventory items.
 - `GET /api/v1/listings/drafts/{draft_id}` — v12 local listing draft retrieval.
 - `GET /api/v1/listings/drafts` — v12 recent local listing draft list.
 - `PATCH /api/v1/listings/drafts/{draft_id}` — v12 local listing draft editable-field update.
@@ -357,6 +358,7 @@ Endpoints:
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/api/v1/listings/drafts/cards/{card_key}` | Generate listing assistant output locally and save it as a draft. |
+| POST | `/api/v1/inventory/items/{item_id}/listing-draft` | Create a local listing draft from an owned physical inventory item. |
 | GET | `/api/v1/listings/drafts/{draft_id}` | Return one saved local draft. |
 | GET | `/api/v1/listings/drafts` | List recent local drafts, including archived drafts by default. |
 | PATCH | `/api/v1/listings/drafts/{draft_id}` | Update safe editable local draft fields. |
@@ -456,6 +458,85 @@ Safety contract:
 - no listings are published;
 - no API keys, headers, account metadata, raw provider payloads, private provider paths, sanitized candidates, or raw filesystem paths are stored or returned;
 - `include_images=false`, `include_pricing=false`, and `include_commercial=false` persist null sections in the draft payload.
+
+### v12 Inventory-to-Listing Draft Bridge
+
+The inventory bridge connects an owned local physical inventory item to deterministic listing assistant output and stores the result as a local `listing_drafts` row:
+
+```text
+owned physical_items row -> sellable_skus -> canonical_printings.canonical_card_key -> listing assistant -> listing_drafts
+```
+
+Endpoint:
+
+```text
+POST /api/v1/inventory/items/{item_id}/listing-draft
+```
+
+Request model:
+
+```text
+InventoryListingDraftCreateRequestV1
+```
+
+Request shape:
+
+```json
+{
+  "platform": "generic",
+  "quantity": null,
+  "condition": null,
+  "finish": null,
+  "include_images": true,
+  "include_pricing": true,
+  "include_commercial": true,
+  "pricing_strategy": "balanced",
+  "title_style": "marketplace",
+  "notes": null
+}
+```
+
+Rules:
+
+- request `condition`, `finish`, and `quantity` override inventory defaults when supplied;
+- omitted condition defaults from `physical_items.item_condition`, falling back to SKU condition code where needed;
+- omitted finish defaults from the linked commercial variant when available;
+- omitted quantity defaults to `1` for a physical inventory item;
+- physical item available quantity is treated as `1` while status is `owned` or `consigned`, otherwise `0`;
+- quantity greater than available inventory returns `409 inventory_quantity_unavailable`;
+- items whose SKU cannot resolve a `canonical_card_key` return `409 inventory_item_missing_card_key` rather than 500.
+
+Response model:
+
+```text
+InventoryListingDraftResponseV1
+```
+
+Response shape:
+
+```json
+{
+  "data": {
+    "draft": {},
+    "inventory_source": {
+      "item_id": "...",
+      "card_key": "en:sv03-223",
+      "quantity_requested": 1,
+      "quantity_available": 1,
+      "condition": "Near Mint",
+      "finish": "Holo",
+      "linked": true
+    }
+  },
+  "metadata": {
+    "api_version": "v1",
+    "contract": "v12-inventory-listing-draft-bridge",
+    "generated_at": "..."
+  }
+}
+```
+
+The bridge writes a local link record in `inventory_listing_draft_links` with `inventory_item_id`, `draft_id`, `card_key`, `quantity`, and `created_at`. It stores no marketplace IDs, account IDs, provider payloads, headers, API keys, or raw filesystem paths.
 
 ## v11 Market Evidence Endpoints (2026-06-27)
 

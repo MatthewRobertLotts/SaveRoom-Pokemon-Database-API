@@ -1056,6 +1056,40 @@ class ListingDraftListResponseV1(BaseModel):
     pagination: PaginationMeta
     metadata: ListingDraftMetadataV1
 
+
+class InventoryListingDraftCreateRequestV1(BaseModel):
+    platform: Literal['whatnot', 'ebay', 'shopify', 'generic'] = 'generic'
+    quantity: int | None = Field(default=None, ge=1)
+    condition: str | None = None
+    finish: str | None = None
+    include_images: bool = True
+    include_pricing: bool = True
+    include_commercial: bool = True
+    pricing_strategy: Literal['conservative', 'balanced', 'premium'] = 'balanced'
+    title_style: Literal['compact', 'seo', 'marketplace'] = 'marketplace'
+    notes: str | None = None
+
+
+class InventoryListingDraftSourceV1(BaseModel):
+    item_id: str
+    card_key: str
+    quantity_requested: int
+    quantity_available: int | None = None
+    condition: str | None = None
+    finish: str | None = None
+    linked: bool = False
+
+
+class InventoryListingDraftBridgeMetadataV1(BaseModel):
+    api_version: str = 'v1'
+    contract: str = 'v12-inventory-listing-draft-bridge'
+    generated_at: str | None = None
+
+
+class InventoryListingDraftResponseV1(BaseModel):
+    data: dict[str, Any]
+    metadata: InventoryListingDraftBridgeMetadataV1
+
 # ── v12 Chart-ready price history models ─────────────────────────────
 
 class ChartReadyPointV1(BaseModel):

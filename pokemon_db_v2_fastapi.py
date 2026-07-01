@@ -79,6 +79,8 @@ from pokemon_db_v5_api_models import (
     IdentityBuildRunSummaryV1,
     IdentityHealthResponseV1,
     ImageDetailResponseV1,
+    InventoryListingDraftCreateRequestV1,
+    InventoryListingDraftResponseV1,
     InventoryItemCreate,
     InventoryItemResponse,
     InventoryItemUpdate,
@@ -844,8 +846,85 @@ def _ensure_listing_drafts_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _ensure_inventory_listing_draft_links_table(conn: sqlite3.Connection) -> None:
+    """Create the local inventory-to-listing-draft bridge table if needed."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS inventory_listing_draft_links (
+            id TEXT PRIMARY KEY,
+            inventory_item_id TEXT NOT NULL,
+            draft_id TEXT NOT NULL,
+            card_key TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_inventory_listing_draft_links_item ON inventory_listing_draft_links(inventory_item_id)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_inventory_listing_draft_links_draft ON inventory_listing_draft_links(draft_id)')
+    conn.commit()
+
+
 def _listing_draft_id() -> str:
     return f'ld_{uuid.uuid4().hex}'
+
+
+def _inventory_listing_draft_link_id() -> str:
+    return f'ildl_{uuid.uuid4().hex}'
+
+
+def _persist_listing_draft(
+    conn: sqlite3.Connection,
+    *,
+    assistant_data: dict[str, Any],
+    request_body: ListingDraftCreateRequestV1,
+    draft_id: str | None = None,
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    """Persist deterministic listing assistant output as a local draft."""
+    card = assistant_data.get('card') or {}
+    listing = assistant_data.get('listing') or {}
+    resolved_draft_id = draft_id or _listing_draft_id()
+    resolved_created_at = created_at or now_utc()
+    _ensure_listing_drafts_table(conn)
+    conn.execute(
+        '''
+        INSERT INTO listing_drafts (
+            draft_id, card_key, language_code, card_id, platform, status,
+            title, subtitle, description_json, tags_json, condition, finish, quantity,
+            pricing_json, images_json, commercial_json, platform_guidance_json,
+            provider_status_json, warnings_json, assistant_payload_json,
+            source_assistant_contract, notes, created_at, updated_at, archived_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''',
+        (
+            resolved_draft_id,
+            card.get('card_key'),
+            card.get('language_code'),
+            (card.get('card_key') or '').split(':', 1)[1] if ':' in (card.get('card_key') or '') else None,
+            request_body.platform,
+            'draft',
+            listing.get('title'),
+            listing.get('subtitle'),
+            _json_dumps_safe(listing.get('description_bullets') or []),
+            _json_dumps_safe(listing.get('tags') or []),
+            listing.get('condition_note') or _clean_listing_text(request_body.condition),
+            _clean_listing_text(request_body.finish),
+            request_body.quantity,
+            _json_dumps_safe(assistant_data.get('pricing')),
+            _json_dumps_safe(assistant_data.get('images')),
+            _json_dumps_safe(assistant_data.get('commercial')),
+            _json_dumps_safe(assistant_data.get('platform_guidance')),
+            _json_dumps_safe(assistant_data.get('provider_status') or {}),
+            _json_dumps_safe(assistant_data.get('warnings') or []),
+            _json_dumps_safe(assistant_data),
+            (assistant_data.get('metadata') or {}).get('contract') or 'v12-listing-assistant',
+            _clean_listing_text(request_body.notes),
+            resolved_created_at,
+            resolved_created_at,
+            None,
+        ),
+    )
+    row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (resolved_draft_id,)).fetchone()
+    return _listing_draft_row_to_response(row)
 
 
 def _listing_draft_row_to_response(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -3044,54 +3123,11 @@ LIMIT ? OFFSET ?
         '''Generate listing assistant output and persist it as a local draft.'''
         assistant_response = v12_listing_assistant(card_key, body, _)
         assistant_data = assistant_response['data']
-        card = assistant_data.get('card') or {}
-        listing = assistant_data.get('listing') or {}
-        draft_id = _listing_draft_id()
-        created_at = now_utc()
         conn = connect(app.state.db)
         try:
-            _ensure_listing_drafts_table(conn)
-            conn.execute(
-                '''
-                INSERT INTO listing_drafts (
-                    draft_id, card_key, language_code, card_id, platform, status,
-                    title, subtitle, description_json, tags_json, condition, finish, quantity,
-                    pricing_json, images_json, commercial_json, platform_guidance_json,
-                    provider_status_json, warnings_json, assistant_payload_json,
-                    source_assistant_contract, notes, created_at, updated_at, archived_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''',
-                (
-                    draft_id,
-                    card.get('card_key'),
-                    card.get('language_code'),
-                    (card.get('card_key') or '').split(':', 1)[1] if ':' in (card.get('card_key') or '') else None,
-                    body.platform,
-                    'draft',
-                    listing.get('title'),
-                    listing.get('subtitle'),
-                    _json_dumps_safe(listing.get('description_bullets') or []),
-                    _json_dumps_safe(listing.get('tags') or []),
-                    listing.get('condition_note') or _clean_listing_text(body.condition),
-                    _clean_listing_text(body.finish),
-                    body.quantity,
-                    _json_dumps_safe(assistant_data.get('pricing')),
-                    _json_dumps_safe(assistant_data.get('images')),
-                    _json_dumps_safe(assistant_data.get('commercial')),
-                    _json_dumps_safe(assistant_data.get('platform_guidance')),
-                    _json_dumps_safe(assistant_data.get('provider_status') or {}),
-                    _json_dumps_safe(assistant_data.get('warnings') or []),
-                    _json_dumps_safe(assistant_data),
-                    (assistant_data.get('metadata') or {}).get('contract') or 'v12-listing-assistant',
-                    _clean_listing_text(body.notes),
-                    created_at,
-                    created_at,
-                    None,
-                ),
-            )
+            draft = _persist_listing_draft(conn, assistant_data=assistant_data, request_body=body)
             conn.commit()
-            row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
-            return {'data': _listing_draft_row_to_response(row), 'metadata': _listing_draft_metadata()}
+            return {'data': draft, 'metadata': _listing_draft_metadata()}
         finally:
             conn.close()
 
@@ -5647,6 +5683,48 @@ LIMIT ? OFFSET ?
             'name_english': row[6],
         }
 
+    def resolve_inventory_listing_source(conn: sqlite3.Connection, item_id: str, tenant_id: int) -> dict[str, Any]:
+        """Resolve a physical inventory item to local listing-draft source data."""
+        cur = conn.cursor()
+        row = cur.execute(
+            """
+            SELECT p.*, s.condition_code, s.sku_key, s.language_code AS sku_language_code,
+                   c.canonical_card_key, c.name_english,
+                   cv.finish AS variant_finish
+            FROM physical_items p
+            LEFT JOIN sellable_skus s ON s.sku_id = p.sku_id
+            LEFT JOIN canonical_printings c ON c.printing_id = s.printing_id
+            LEFT JOIN commercial_variants cv ON cv.variant_id = s.variant_id
+            WHERE p.item_id = ? AND p.tenant_id = ?
+            """,
+            (item_id, tenant_id),
+        ).fetchone()
+        if not row:
+            raise v1_error(404, 'item_not_found', 'Physical item not found.', {'item_id': item_id})
+
+        data = dict(row)
+        card_key = _clean_listing_text(data.get('canonical_card_key'))
+        if not card_key:
+            raise v1_error(
+                409,
+                'inventory_item_missing_card_key',
+                'Inventory item cannot be converted to a listing draft because its SKU has no canonical card key.',
+                {'item_id': item_id, 'sku_id': data.get('sku_id')},
+            )
+
+        status = (data.get('status') or '').strip().lower()
+        quantity_available = 1 if status in {'owned', 'consigned'} else 0
+        return {
+            'item_id': data.get('item_id'),
+            'sku_id': data.get('sku_id'),
+            'sku_key': data.get('sku_key'),
+            'card_key': card_key,
+            'quantity_available': quantity_available,
+            'condition': _clean_listing_text(data.get('item_condition')) or _clean_listing_text(data.get('condition_code')),
+            'finish': _clean_listing_text(data.get('variant_finish')),
+            'status': data.get('status'),
+        }
+
     def get_item_snapshot(conn: sqlite3.Connection, item_id: str, tenant_id: int) -> dict[str, Any] | None:
         """Get current snapshot for a physical item. Falls back to the item itself."""
         cur = conn.cursor()
@@ -5999,6 +6077,93 @@ LIMIT ? OFFSET ?
             'created_at': now,
             'updated_at': now,
         }}
+
+    @app.post('/api/v1/inventory/items/{item_id}/listing-draft', response_model=InventoryListingDraftResponseV1, status_code=201)
+    def v12_create_inventory_listing_draft(
+        item_id: str,
+        body: InventoryListingDraftCreateRequestV1,
+        _: dict[str, Any] = Depends(require_scope('write:inventory', 'admin')),
+    ) -> dict[str, Any]:
+        '''Create a local listing draft from a physical inventory item.'''
+        conn = connect(app.state.db)
+        try:
+            ensure_inventory_support(conn)
+            tenant_id = get_tenant_from_key(_)
+            source = resolve_inventory_listing_source(conn, item_id, tenant_id)
+
+            quantity_available = source.get('quantity_available')
+            requested_quantity = body.quantity if body.quantity is not None else 1
+            if quantity_available is not None and requested_quantity > quantity_available:
+                raise v1_error(
+                    409,
+                    'inventory_quantity_unavailable',
+                    'Requested listing draft quantity exceeds available inventory quantity.',
+                    {
+                        'item_id': item_id,
+                        'quantity_requested': requested_quantity,
+                        'quantity_available': quantity_available,
+                    },
+                )
+
+            condition = _clean_listing_text(body.condition) or source.get('condition')
+            finish = _clean_listing_text(body.finish) or source.get('finish')
+            draft_request = ListingDraftCreateRequestV1(
+                platform=body.platform,
+                condition=condition,
+                finish=finish,
+                quantity=requested_quantity,
+                include_images=body.include_images,
+                include_pricing=body.include_pricing,
+                include_commercial=body.include_commercial,
+                pricing_strategy=body.pricing_strategy,
+                title_style=body.title_style,
+                notes=body.notes,
+            )
+            assistant_response = v12_listing_assistant(source['card_key'], draft_request, _)
+            draft = _persist_listing_draft(
+                conn,
+                assistant_data=assistant_response['data'],
+                request_body=draft_request,
+            )
+            _ensure_inventory_listing_draft_links_table(conn)
+            link_created_at = now_utc()
+            conn.execute(
+                '''
+                INSERT INTO inventory_listing_draft_links (
+                    id, inventory_item_id, draft_id, card_key, quantity, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    _inventory_listing_draft_link_id(),
+                    item_id,
+                    draft['draft_id'],
+                    source['card_key'],
+                    requested_quantity,
+                    link_created_at,
+                ),
+            )
+            conn.commit()
+            return {
+                'data': {
+                    'draft': draft,
+                    'inventory_source': {
+                        'item_id': item_id,
+                        'card_key': source['card_key'],
+                        'quantity_requested': requested_quantity,
+                        'quantity_available': quantity_available,
+                        'condition': condition,
+                        'finish': finish,
+                        'linked': True,
+                    },
+                },
+                'metadata': {
+                    'api_version': 'v1',
+                    'contract': 'v12-inventory-listing-draft-bridge',
+                    'generated_at': now_utc(),
+                },
+            }
+        finally:
+            conn.close()
 
     @app.get('/api/v1/inventory/items/{item_id}', response_model=InventoryItemResponse)
     def v1_get_inventory_item(

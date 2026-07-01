@@ -8,6 +8,7 @@ It lets SaveRoom generate listing-ready data and store it as a local draft recor
 
 ```text
 POST /api/v1/listings/drafts/cards/{card_key:path}
+POST /api/v1/inventory/items/{item_id}/listing-draft
 ```
 
 This is local app/API persistence only.
@@ -21,6 +22,7 @@ It is not eBay, Whatnot, Shopify, JustTCG, TotalTCG, TCGplayer, Cardmarket, or L
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/api/v1/listings/drafts/cards/{card_key:path}` | Generate listing assistant output locally and save a draft. |
+| `POST` | `/api/v1/inventory/items/{item_id}/listing-draft` | Create a local draft from an owned physical inventory item. |
 | `GET` | `/api/v1/listings/drafts/{draft_id}` | Return a saved local draft. |
 | `GET` | `/api/v1/listings/drafts` | List recent local drafts. |
 | `PATCH` | `/api/v1/listings/drafts/{draft_id}` | Update safe editable draft fields locally. |
@@ -86,6 +88,26 @@ idx_listing_drafts_status_updated
 
 The table is created idempotently by the API when draft endpoints are used.
 
+## Inventory draft bridge table
+
+The inventory-to-listing draft bridge records local links in:
+
+```text
+inventory_listing_draft_links
+```
+
+Fields:
+
+```text
+id TEXT PRIMARY KEY
+inventory_item_id TEXT NOT NULL
+draft_id TEXT NOT NULL
+card_key TEXT NOT NULL
+quantity INTEGER NOT NULL
+created_at TEXT NOT NULL
+```
+
+This table contains only local identifiers. It does not store marketplace IDs, external account IDs, provider payloads, API keys, headers, or raw filesystem paths.
 ## Status lifecycle
 
 Allowed statuses:
