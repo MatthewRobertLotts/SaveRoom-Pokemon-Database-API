@@ -1090,6 +1090,32 @@ class InventoryListingDraftResponseV1(BaseModel):
     data: dict[str, Any]
     metadata: InventoryListingDraftBridgeMetadataV1
 
+
+class ListingDraftReadyRequestV1(BaseModel):
+    reserve_inventory: bool = True
+    notes: str | None = None
+
+
+class ListingDraftReserveRequestV1(BaseModel):
+    quantity: int | None = Field(default=None, ge=1)
+    notes: str | None = None
+
+
+class ListingDraftUnreserveRequestV1(BaseModel):
+    release_reason: str | None = None
+    set_status: Literal['draft', 'ready'] | None = None
+
+
+class ListingDraftReservationMetadataV1(BaseModel):
+    api_version: str = 'v1'
+    contract: str = 'v12-listing-draft-reservation'
+    generated_at: str | None = None
+
+
+class ListingDraftReservationResponseV1(BaseModel):
+    data: dict[str, Any]
+    metadata: ListingDraftReservationMetadataV1
+
 # ── v12 Chart-ready price history models ─────────────────────────────
 
 class ChartReadyPointV1(BaseModel):

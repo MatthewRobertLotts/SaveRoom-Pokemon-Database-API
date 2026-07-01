@@ -97,8 +97,12 @@ from pokemon_db_v5_api_models import (
     ListingAssistantResponseV1,
     ListingDraftCreateRequestV1,
     ListingDraftListResponseV1,
+    ListingDraftReadyRequestV1,
+    ListingDraftReservationResponseV1,
+    ListingDraftReserveRequestV1,
     ListingDraftResponseV1,
     ListingDraftUpdateRequestV1,
+    ListingDraftUnreserveRequestV1,
     PhysicalItemResponse,
     PriceHistoryResponseV1,
     PriceSummaryResponseV1,
@@ -863,12 +867,77 @@ def _ensure_inventory_listing_draft_links_table(conn: sqlite3.Connection) -> Non
     conn.commit()
 
 
+def _ensure_listing_draft_inventory_reservations_table(conn: sqlite3.Connection) -> None:
+    """Create the local draft inventory reservation table if needed."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS listing_draft_inventory_reservations (
+            reservation_id TEXT PRIMARY KEY,
+            draft_id TEXT NOT NULL,
+            inventory_item_id TEXT NOT NULL,
+            card_key TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            released_at TEXT,
+            release_reason TEXT
+        )
+    """)
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_listing_draft_reservations_draft '
+        'ON listing_draft_inventory_reservations(draft_id, status)'
+    )
+    conn.execute(
+        'CREATE INDEX IF NOT EXISTS idx_listing_draft_reservations_item '
+        'ON listing_draft_inventory_reservations(inventory_item_id, status)'
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_draft_reservations_active_draft "
+        "ON listing_draft_inventory_reservations(draft_id) WHERE status = 'reserved'"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_draft_reservations_active_item "
+        "ON listing_draft_inventory_reservations(inventory_item_id) WHERE status = 'reserved'"
+    )
+    conn.commit()
+
+
 def _listing_draft_id() -> str:
     return f'ld_{uuid.uuid4().hex}'
 
 
 def _inventory_listing_draft_link_id() -> str:
     return f'ildl_{uuid.uuid4().hex}'
+
+
+def _listing_draft_reservation_id() -> str:
+    return f'ldr_{uuid.uuid4().hex}'
+
+
+def _listing_draft_reservation_metadata() -> dict[str, Any]:
+    return {
+        'api_version': 'v1',
+        'contract': 'v12-listing-draft-reservation',
+        'generated_at': now_utc(),
+    }
+
+
+def _reservation_row_to_response(row: sqlite3.Row | dict[str, Any] | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    d = dict(row)
+    return {
+        'reservation_id': d.get('reservation_id'),
+        'draft_id': d.get('draft_id'),
+        'inventory_item_id': d.get('inventory_item_id'),
+        'card_key': d.get('card_key'),
+        'quantity': d.get('quantity'),
+        'status': d.get('status'),
+        'created_at': d.get('created_at'),
+        'updated_at': d.get('updated_at'),
+        'released_at': d.get('released_at'),
+        'release_reason': d.get('release_reason'),
+    }
 
 
 def _persist_listing_draft(
@@ -3231,6 +3300,263 @@ LIMIT ? OFFSET ?
             conn.commit()
             updated = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
             return {'data': _listing_draft_row_to_response(updated), 'metadata': _listing_draft_metadata()}
+        finally:
+            conn.close()
+
+    def _get_listing_draft_row_or_404(conn: sqlite3.Connection, draft_id: str) -> sqlite3.Row:
+        _ensure_listing_drafts_table(conn)
+        row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+        if row is None:
+            raise v1_error(404, 'listing_draft_not_found', 'Listing draft not found.', {'draft_id': draft_id})
+        return row
+
+    def _get_inventory_link_for_draft(conn: sqlite3.Connection, draft_id: str) -> sqlite3.Row | None:
+        _ensure_inventory_listing_draft_links_table(conn)
+        return conn.execute(
+            '''
+            SELECT * FROM inventory_listing_draft_links
+            WHERE draft_id = ?
+            ORDER BY created_at DESC
+            LIMIT 1
+            ''',
+            (draft_id,),
+        ).fetchone()
+
+    def _get_active_reservation_for_draft(conn: sqlite3.Connection, draft_id: str) -> sqlite3.Row | None:
+        _ensure_listing_draft_inventory_reservations_table(conn)
+        return conn.execute(
+            '''
+            SELECT * FROM listing_draft_inventory_reservations
+            WHERE draft_id = ? AND status = 'reserved'
+            ORDER BY created_at DESC
+            LIMIT 1
+            ''',
+            (draft_id,),
+        ).fetchone()
+
+    def _get_active_reservation_for_inventory_item(conn: sqlite3.Connection, inventory_item_id: str) -> sqlite3.Row | None:
+        _ensure_listing_draft_inventory_reservations_table(conn)
+        return conn.execute(
+            '''
+            SELECT * FROM listing_draft_inventory_reservations
+            WHERE inventory_item_id = ? AND status = 'reserved'
+            ORDER BY created_at DESC
+            LIMIT 1
+            ''',
+            (inventory_item_id,),
+        ).fetchone()
+
+    def _reserve_listing_draft_inventory(
+        conn: sqlite3.Connection,
+        *,
+        draft_row: sqlite3.Row,
+        quantity: int | None = None,
+    ) -> sqlite3.Row:
+        draft = dict(draft_row)
+        draft_id = draft['draft_id']
+        if draft.get('status') == 'archived':
+            raise v1_error(
+                409,
+                'listing_draft_archived',
+                'Archived listing drafts cannot reserve inventory.',
+                {'draft_id': draft_id},
+            )
+
+        link = _get_inventory_link_for_draft(conn, draft_id)
+        if link is None:
+            raise v1_error(
+                409,
+                'listing_draft_not_linked_to_inventory',
+                'Listing draft is not linked to an inventory item.',
+                {'draft_id': draft_id},
+            )
+        link_d = dict(link)
+        requested_quantity = quantity if quantity is not None else int(link_d.get('quantity') or 1)
+        linked_quantity = int(link_d.get('quantity') or 1)
+        if requested_quantity > linked_quantity:
+            raise v1_error(
+                409,
+                'reservation_quantity_unavailable',
+                'Requested reservation quantity exceeds linked inventory draft quantity.',
+                {
+                    'draft_id': draft_id,
+                    'quantity_requested': requested_quantity,
+                    'quantity_available': linked_quantity,
+                },
+            )
+
+        existing_for_draft = _get_active_reservation_for_draft(conn, draft_id)
+        if existing_for_draft is not None:
+            return existing_for_draft
+
+        existing_for_item = _get_active_reservation_for_inventory_item(conn, link_d['inventory_item_id'])
+        if existing_for_item is not None and existing_for_item['draft_id'] != draft_id:
+            raise v1_error(
+                409,
+                'inventory_already_reserved',
+                'Inventory item is already reserved by another listing draft.',
+                {
+                    'draft_id': draft_id,
+                    'inventory_item_id': link_d['inventory_item_id'],
+                    'reserved_by_draft_id': existing_for_item['draft_id'],
+                },
+            )
+
+        created_at = now_utc()
+        try:
+            conn.execute(
+                '''
+                INSERT INTO listing_draft_inventory_reservations (
+                    reservation_id, draft_id, inventory_item_id, card_key, quantity, status,
+                    created_at, updated_at, released_at, release_reason
+                ) VALUES (?, ?, ?, ?, ?, 'reserved', ?, ?, NULL, NULL)
+                ''',
+                (
+                    _listing_draft_reservation_id(),
+                    draft_id,
+                    link_d['inventory_item_id'],
+                    link_d['card_key'],
+                    requested_quantity,
+                    created_at,
+                    created_at,
+                ),
+            )
+        except sqlite3.IntegrityError:
+            existing_for_draft = _get_active_reservation_for_draft(conn, draft_id)
+            if existing_for_draft is not None:
+                return existing_for_draft
+            existing_for_item = _get_active_reservation_for_inventory_item(conn, link_d['inventory_item_id'])
+            if existing_for_item is not None:
+                raise v1_error(
+                    409,
+                    'inventory_already_reserved',
+                    'Inventory item is already reserved by another listing draft.',
+                    {
+                        'draft_id': draft_id,
+                        'inventory_item_id': link_d['inventory_item_id'],
+                        'reserved_by_draft_id': existing_for_item['draft_id'],
+                    },
+                )
+            raise
+
+        return _get_active_reservation_for_draft(conn, draft_id)
+
+    def _set_listing_draft_status(
+        conn: sqlite3.Connection,
+        *,
+        draft_id: str,
+        status: str,
+        notes: str | None = None,
+    ) -> sqlite3.Row:
+        updated_at = now_utc()
+        assignments = ['status = ?', 'updated_at = ?', 'archived_at = ?']
+        values: list[Any] = [status, updated_at, None]
+        if notes is not None:
+            assignments.append('notes = ?')
+            values.append(_clean_listing_text(notes))
+        values.append(draft_id)
+        conn.execute(
+            f"UPDATE listing_drafts SET {', '.join(assignments)} WHERE draft_id = ?",
+            values,
+        )
+        return conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+
+    def _reservation_endpoint_payload(
+        draft_row: sqlite3.Row,
+        reservation_row: sqlite3.Row | None,
+    ) -> dict[str, Any]:
+        return {
+            'data': {
+                'draft': _listing_draft_row_to_response(draft_row),
+                'reservation': _reservation_row_to_response(reservation_row),
+            },
+            'metadata': _listing_draft_reservation_metadata(),
+        }
+
+    @app.post('/api/v1/listings/drafts/{draft_id}/ready', response_model=ListingDraftReservationResponseV1)
+    def v12_mark_listing_draft_ready(
+        draft_id: str,
+        body: ListingDraftReadyRequestV1,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            draft_row = _get_listing_draft_row_or_404(conn, draft_id)
+            if dict(draft_row).get('status') == 'archived':
+                raise v1_error(409, 'listing_draft_archived', 'Archived listing drafts cannot be marked ready.', {'draft_id': draft_id})
+            reservation_row = None
+            if body.reserve_inventory and _get_inventory_link_for_draft(conn, draft_id) is not None:
+                reservation_row = _reserve_listing_draft_inventory(conn, draft_row=draft_row)
+            updated_row = _set_listing_draft_status(conn, draft_id=draft_id, status='ready', notes=body.notes)
+            conn.commit()
+            return _reservation_endpoint_payload(updated_row, reservation_row)
+        finally:
+            conn.close()
+
+    @app.post('/api/v1/listings/drafts/{draft_id}/reserve', response_model=ListingDraftReservationResponseV1)
+    def v12_reserve_listing_draft_inventory(
+        draft_id: str,
+        body: ListingDraftReserveRequestV1,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            draft_row = _get_listing_draft_row_or_404(conn, draft_id)
+            reservation_row = _reserve_listing_draft_inventory(conn, draft_row=draft_row, quantity=body.quantity)
+            conn.commit()
+            updated_row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+            return _reservation_endpoint_payload(updated_row, reservation_row)
+        finally:
+            conn.close()
+
+    @app.post('/api/v1/listings/drafts/{draft_id}/unreserve', response_model=ListingDraftReservationResponseV1)
+    def v12_unreserve_listing_draft_inventory(
+        draft_id: str,
+        body: ListingDraftUnreserveRequestV1,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            draft_row = _get_listing_draft_row_or_404(conn, draft_id)
+            reservation_row = _get_active_reservation_for_draft(conn, draft_id)
+            released_row = None
+            if reservation_row is not None:
+                released_at = now_utc()
+                conn.execute(
+                    '''
+                    UPDATE listing_draft_inventory_reservations
+                    SET status = 'released', updated_at = ?, released_at = ?, release_reason = ?
+                    WHERE reservation_id = ?
+                    ''',
+                    (
+                        released_at,
+                        released_at,
+                        _clean_listing_text(body.release_reason),
+                        reservation_row['reservation_id'],
+                    ),
+                )
+                released_row = conn.execute(
+                    'SELECT * FROM listing_draft_inventory_reservations WHERE reservation_id = ?',
+                    (reservation_row['reservation_id'],),
+                ).fetchone()
+            updated_row = draft_row
+            if body.set_status is not None:
+                updated_row = _set_listing_draft_status(conn, draft_id=draft_id, status=body.set_status)
+            conn.commit()
+            return _reservation_endpoint_payload(updated_row, released_row)
+        finally:
+            conn.close()
+
+    @app.get('/api/v1/listings/drafts/{draft_id}/reservation', response_model=ListingDraftReservationResponseV1)
+    def v12_get_listing_draft_reservation(
+        draft_id: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            draft_row = _get_listing_draft_row_or_404(conn, draft_id)
+            reservation_row = _get_active_reservation_for_draft(conn, draft_id)
+            return _reservation_endpoint_payload(draft_row, reservation_row)
         finally:
             conn.close()
 

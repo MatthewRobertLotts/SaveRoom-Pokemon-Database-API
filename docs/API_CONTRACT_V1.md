@@ -362,6 +362,10 @@ Endpoints:
 | GET | `/api/v1/listings/drafts/{draft_id}` | Return one saved local draft. |
 | GET | `/api/v1/listings/drafts` | List recent local drafts, including archived drafts by default. |
 | PATCH | `/api/v1/listings/drafts/{draft_id}` | Update safe editable local draft fields. |
+| POST | `/api/v1/listings/drafts/{draft_id}/ready` | Mark a local draft ready and reserve linked inventory when available/requested. |
+| POST | `/api/v1/listings/drafts/{draft_id}/reserve` | Reserve the linked local inventory item without publishing or changing stock. |
+| POST | `/api/v1/listings/drafts/{draft_id}/unreserve` | Release an active local inventory reservation. |
+| GET | `/api/v1/listings/drafts/{draft_id}/reservation` | Return the active local reservation for a draft, or null when none exists. |
 | POST | `/api/v1/listings/drafts/{draft_id}/archive` | Mark a local draft archived without deleting it. |
 
 Persistence table:
@@ -385,6 +389,90 @@ Status lifecycle:
 - `draft` — newly created local draft.
 - `ready` — local draft has been reviewed/edited and is ready for future workflow use.
 - `archived` — local draft hidden from active-only views but retained.
+
+### v12 Listing Draft Inventory Reservations
+
+Local reservation workflow lets SaveRoom mark a draft ready and reserve the linked physical inventory item locally. It is not marketplace publishing, not stock decrement, and not a sale.
+
+Reservation endpoints:
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/api/v1/listings/drafts/{draft_id}/ready` | Set `listing_drafts.status = ready`; if the draft has an inventory link and `reserve_inventory=true`, create/reuse an active local reservation. |
+| POST | `/api/v1/listings/drafts/{draft_id}/reserve` | Create/reuse an active reservation for an inventory-linked draft without changing draft status. |
+| POST | `/api/v1/listings/drafts/{draft_id}/unreserve` | Mark the active reservation `released`; optional `set_status` can set the draft back to `draft` or leave it `ready`. |
+| GET | `/api/v1/listings/drafts/{draft_id}/reservation` | Return the active reservation for the draft, or `null`. |
+
+Reservation table:
+
+```text
+listing_draft_inventory_reservations
+```
+
+Fields:
+
+```text
+reservation_id, draft_id, inventory_item_id, card_key, quantity,
+status, created_at, updated_at, released_at, release_reason
+```
+
+Reservation statuses:
+
+```text
+reserved
+released
+```
+
+Rules:
+
+- only one active `reserved` row is allowed per `draft_id`;
+- only one active `reserved` row is allowed per `inventory_item_id`;
+- duplicate reserve calls for the same draft return the existing active reservation and do not create duplicate rows;
+- duplicate active reservation for the same inventory item by another draft returns `409 inventory_already_reserved`;
+- reservation quantity cannot exceed the linked `inventory_listing_draft_links.quantity`;
+- archived drafts cannot be reserved;
+- reservations do not update `physical_items.status`, do not mark items sold, and do not decrement inventory.
+
+Request models:
+
+```text
+ListingDraftReadyRequestV1
+ListingDraftReserveRequestV1
+ListingDraftUnreserveRequestV1
+```
+
+Response model:
+
+```text
+ListingDraftReservationResponseV1
+```
+
+Response shape:
+
+```json
+{
+  "data": {
+    "draft": {},
+    "reservation": {
+      "reservation_id": "ldr_...",
+      "draft_id": "ld_...",
+      "inventory_item_id": "...",
+      "card_key": "en:sv03-223",
+      "quantity": 1,
+      "status": "reserved",
+      "created_at": "...",
+      "updated_at": "...",
+      "released_at": null,
+      "release_reason": null
+    }
+  },
+  "metadata": {
+    "api_version": "v1",
+    "contract": "v12-listing-draft-reservation",
+    "generated_at": "..."
+  }
+}
+```
 
 Create request reuses the listing assistant request fields:
 

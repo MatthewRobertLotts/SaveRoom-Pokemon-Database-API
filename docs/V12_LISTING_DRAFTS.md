@@ -26,6 +26,10 @@ It is not eBay, Whatnot, Shopify, JustTCG, TotalTCG, TCGplayer, Cardmarket, or L
 | `GET` | `/api/v1/listings/drafts/{draft_id}` | Return a saved local draft. |
 | `GET` | `/api/v1/listings/drafts` | List recent local drafts. |
 | `PATCH` | `/api/v1/listings/drafts/{draft_id}` | Update safe editable draft fields locally. |
+| `POST` | `/api/v1/listings/drafts/{draft_id}/ready` | Mark a local draft ready and reserve linked inventory when requested/available. |
+| `POST` | `/api/v1/listings/drafts/{draft_id}/reserve` | Reserve linked local inventory without publishing or decrementing stock. |
+| `POST` | `/api/v1/listings/drafts/{draft_id}/unreserve` | Release an active local inventory reservation. |
+| `GET` | `/api/v1/listings/drafts/{draft_id}/reservation` | Return the active local reservation for a draft, or null. |
 | `POST` | `/api/v1/listings/drafts/{draft_id}/archive` | Mark a draft archived without deleting it. |
 
 ## Safety boundaries
@@ -108,6 +112,31 @@ created_at TEXT NOT NULL
 ```
 
 This table contains only local identifiers. It does not store marketplace IDs, external account IDs, provider payloads, API keys, headers, or raw filesystem paths.
+
+## Inventory reservation table
+
+The local readiness workflow can reserve an inventory-linked draft in:
+
+```text
+listing_draft_inventory_reservations
+```
+
+Fields:
+
+```text
+reservation_id TEXT PRIMARY KEY
+draft_id TEXT NOT NULL
+inventory_item_id TEXT NOT NULL
+card_key TEXT NOT NULL
+quantity INTEGER NOT NULL
+status TEXT NOT NULL
+created_at TEXT NOT NULL
+updated_at TEXT NOT NULL
+released_at TEXT
+release_reason TEXT
+```
+
+The reservation table is local-only. It does not store marketplace IDs, external account IDs, provider payloads, API keys, headers, or raw filesystem paths.
 ## Status lifecycle
 
 Allowed statuses:
@@ -121,7 +150,7 @@ archived
 Meaning:
 
 - `draft` — initial local draft state after creation.
-- `ready` — local draft has been reviewed/edited and is ready for a later workflow.
+- `ready` — local draft has been reviewed/edited and is ready for a later workflow; inventory-linked drafts may also have a local active reservation.
 - `archived` — local draft is retained but marked inactive.
 
 Archiving sets:
@@ -202,6 +231,73 @@ Validation:
 - `status` is one of `draft`, `ready`, `archived`
 
 The update endpoint does not allow provider data, account metadata, raw payloads, API keys, headers, or marketplace publishing fields.
+
+## Readiness and inventory reservation workflow
+
+This v12 milestone adds local readiness/reservation endpoints:
+
+```text
+POST /api/v1/listings/drafts/{draft_id}/ready
+POST /api/v1/listings/drafts/{draft_id}/reserve
+POST /api/v1/listings/drafts/{draft_id}/unreserve
+GET  /api/v1/listings/drafts/{draft_id}/reservation
+```
+
+Request models:
+
+```text
+ListingDraftReadyRequestV1
+ListingDraftReserveRequestV1
+ListingDraftUnreserveRequestV1
+```
+
+Response model:
+
+```text
+ListingDraftReservationResponseV1
+```
+
+Rules:
+
+- `/ready` sets `listing_drafts.status = ready`.
+- `/ready` reserves linked inventory when `reserve_inventory=true` and a local inventory link exists.
+- `/ready` on a non-inventory draft marks it ready and returns `reservation: null`.
+- `/reserve` requires an `inventory_listing_draft_links` row and returns `409 listing_draft_not_linked_to_inventory` when none exists.
+- Only one active `reserved` row is allowed per `draft_id`.
+- Only one active `reserved` row is allowed per `inventory_item_id`.
+- Duplicate reserve calls for the same draft return the existing reservation and do not create duplicate active rows.
+- Duplicate reservation attempts for the same inventory item from a different draft return `409 inventory_already_reserved`.
+- `/unreserve` marks the active reservation `released`, records `released_at`, and stores optional `release_reason`.
+- `/unreserve` can set the draft back to `draft` when `set_status="draft"` is supplied.
+- Archived drafts cannot be reserved.
+- Reservations do not mark `physical_items.status` as sold and do not decrement inventory automatically.
+
+Response shape:
+
+```json
+{
+  "data": {
+    "draft": {},
+    "reservation": {
+      "reservation_id": "ldr_...",
+      "draft_id": "ld_...",
+      "inventory_item_id": "...",
+      "card_key": "en:sv03-223",
+      "quantity": 1,
+      "status": "reserved",
+      "created_at": "...",
+      "updated_at": "...",
+      "released_at": null,
+      "release_reason": null
+    }
+  },
+  "metadata": {
+    "api_version": "v1",
+    "contract": "v12-listing-draft-reservation",
+    "generated_at": "..."
+  }
+}
+```
 
 ## Response shape
 
@@ -289,6 +385,7 @@ Coverage lives in:
 
 ```text
 tests/test_v12_listing_drafts_api.py
+tests/test_v12_listing_draft_reservation_api.py
 ```
 
-The tests cover draft create/read/list/update/archive, include flags, missing card/draft errors, invalid status validation, JustTCG fetch guard, no live provider calls, no USD/fallback leakage, no filesystem path leakage, and no raw provider/API-key/header/private-path/sanitized-candidate leakage.
+The tests cover draft create/read/list/update/archive, local readiness/reservation/unreserve workflow, duplicate active reservation prevention, no inventory sale/decrement side effects, include flags, missing card/draft errors, invalid status validation, JustTCG fetch guard, no live provider calls, no USD/fallback leakage, no filesystem path leakage, and no raw provider/API-key/header/private-path/sanitized-candidate leakage.
