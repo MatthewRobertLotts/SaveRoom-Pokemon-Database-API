@@ -95,6 +95,8 @@ from pokemon_db_v5_api_models import (
     LanguageListResponseV1,
     ListingAssistantRequestV1,
     ListingAssistantResponseV1,
+    ListingDraftCompleteSaleRequestV1,
+    ListingDraftCompleteSaleResponseV1,
     ListingDraftCreateRequestV1,
     ListingDraftListResponseV1,
     ListingDraftReadyRequestV1,
@@ -902,6 +904,46 @@ def _ensure_listing_draft_inventory_reservations_table(conn: sqlite3.Connection)
     conn.commit()
 
 
+def _ensure_listing_draft_sales_table(conn: sqlite3.Connection) -> None:
+    """Create the local listing draft sale completion table if needed."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS listing_draft_sales (
+            sale_id TEXT PRIMARY KEY,
+            draft_id TEXT NOT NULL,
+            reservation_id TEXT NOT NULL,
+            inventory_item_id TEXT NOT NULL,
+            card_key TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            platform TEXT NOT NULL,
+            sale_price REAL,
+            currency TEXT NOT NULL,
+            status TEXT NOT NULL,
+            sold_at TEXT NOT NULL,
+            buyer_reference TEXT,
+            external_order_reference TEXT,
+            notes TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_listing_draft_sales_draft ON listing_draft_sales(draft_id, status)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_listing_draft_sales_reservation ON listing_draft_sales(reservation_id, status)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_listing_draft_sales_item ON listing_draft_sales(inventory_item_id, status)')
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_draft_sales_completed_draft "
+        "ON listing_draft_sales(draft_id) WHERE status = 'completed'"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_draft_sales_completed_reservation "
+        "ON listing_draft_sales(reservation_id) WHERE status = 'completed'"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_listing_draft_sales_completed_item "
+        "ON listing_draft_sales(inventory_item_id) WHERE status = 'completed'"
+    )
+    conn.commit()
+
+
 def _listing_draft_id() -> str:
     return f'ld_{uuid.uuid4().hex}'
 
@@ -914,10 +956,22 @@ def _listing_draft_reservation_id() -> str:
     return f'ldr_{uuid.uuid4().hex}'
 
 
+def _listing_draft_sale_id() -> str:
+    return f'sale_{uuid.uuid4().hex}'
+
+
 def _listing_draft_reservation_metadata() -> dict[str, Any]:
     return {
         'api_version': 'v1',
         'contract': 'v12-listing-draft-reservation',
+        'generated_at': now_utc(),
+    }
+
+
+def _listing_draft_sale_completion_metadata() -> dict[str, Any]:
+    return {
+        'api_version': 'v1',
+        'contract': 'v12-listing-draft-sale-completion',
         'generated_at': now_utc(),
     }
 
@@ -937,6 +991,28 @@ def _reservation_row_to_response(row: sqlite3.Row | dict[str, Any] | None) -> di
         'updated_at': d.get('updated_at'),
         'released_at': d.get('released_at'),
         'release_reason': d.get('release_reason'),
+    }
+
+
+def _sale_row_to_response(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    d = dict(row)
+    return {
+        'sale_id': d.get('sale_id'),
+        'draft_id': d.get('draft_id'),
+        'reservation_id': d.get('reservation_id'),
+        'inventory_item_id': d.get('inventory_item_id'),
+        'card_key': d.get('card_key'),
+        'quantity': d.get('quantity'),
+        'platform': d.get('platform'),
+        'sale_price': d.get('sale_price'),
+        'currency': d.get('currency'),
+        'status': d.get('status'),
+        'sold_at': d.get('sold_at'),
+        'buyer_reference': d.get('buyer_reference'),
+        'external_order_reference': d.get('external_order_reference'),
+        'notes': d.get('notes'),
+        'created_at': d.get('created_at'),
+        'updated_at': d.get('updated_at'),
     }
 
 
@@ -3557,6 +3633,172 @@ LIMIT ? OFFSET ?
             draft_row = _get_listing_draft_row_or_404(conn, draft_id)
             reservation_row = _get_active_reservation_for_draft(conn, draft_id)
             return _reservation_endpoint_payload(draft_row, reservation_row)
+        finally:
+            conn.close()
+
+    @app.post('/api/v1/listings/drafts/{draft_id}/complete-sale', response_model=ListingDraftCompleteSaleResponseV1)
+    def v12_complete_listing_draft_sale(
+        draft_id: str,
+        body: ListingDraftCompleteSaleRequestV1,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            ensure_inventory_support(conn)
+            _ensure_listing_draft_sales_table(conn)
+            tenant_id = get_tenant_from_key(_)
+            draft_row = _get_listing_draft_row_or_404(conn, draft_id)
+            draft = dict(draft_row)
+            if not body.confirm_completion:
+                raise v1_error(
+                    409,
+                    'sale_completion_not_confirmed',
+                    'Sale completion requires explicit confirm_completion=true.',
+                    {'draft_id': draft_id},
+                )
+            if draft.get('status') == 'archived':
+                raise v1_error(409, 'listing_draft_archived', 'Archived listing drafts cannot be completed as local sales.', {'draft_id': draft_id})
+
+            existing_sale = conn.execute(
+                "SELECT * FROM listing_draft_sales WHERE draft_id = ? AND status = 'completed' LIMIT 1",
+                (draft_id,),
+            ).fetchone()
+            if existing_sale is not None:
+                raise v1_error(
+                    409,
+                    'listing_draft_sale_already_completed',
+                    'Listing draft already has a completed local sale.',
+                    {'draft_id': draft_id, 'sale_id': existing_sale['sale_id']},
+                )
+
+            link_row = _get_inventory_link_for_draft(conn, draft_id)
+            if link_row is None:
+                raise v1_error(
+                    409,
+                    'listing_draft_not_linked_to_inventory',
+                    'Listing draft is not linked to an inventory item.',
+                    {'draft_id': draft_id},
+                )
+
+            reservation_row = _get_active_reservation_for_draft(conn, draft_id)
+            if reservation_row is None:
+                raise v1_error(
+                    409,
+                    'listing_draft_not_reserved',
+                    'Listing draft must have an active inventory reservation before sale completion.',
+                    {'draft_id': draft_id},
+                )
+            reservation = dict(reservation_row)
+            inventory_item_id = reservation['inventory_item_id']
+            inventory_row = conn.execute(
+                'SELECT item_id, status, location_code, revision FROM physical_items WHERE item_id = ? AND tenant_id = ?',
+                (inventory_item_id, tenant_id),
+            ).fetchone()
+            if inventory_row is None:
+                raise v1_error(404, 'item_not_found', 'Physical item not found.', {'item_id': inventory_item_id})
+            status_before = inventory_row['status']
+            if status_before not in ('owned', 'consigned'):
+                raise v1_error(
+                    409,
+                    'inventory_item_not_available',
+                    'Inventory item is not available for local sale completion.',
+                    {'item_id': inventory_item_id, 'status': status_before},
+                )
+
+            now = now_utc()
+            sold_at = _clean_listing_text(body.sold_at) or now
+            sale_id = _listing_draft_sale_id()
+            try:
+                conn.execute(
+                    '''
+                    INSERT INTO listing_draft_sales (
+                        sale_id, draft_id, reservation_id, inventory_item_id, card_key, quantity,
+                        platform, sale_price, currency, status, sold_at,
+                        buyer_reference, external_order_reference, notes, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)
+                    ''',
+                    (
+                        sale_id,
+                        draft_id,
+                        reservation['reservation_id'],
+                        inventory_item_id,
+                        reservation['card_key'],
+                        int(reservation['quantity'] or 1),
+                        body.platform,
+                        body.sale_price,
+                        body.currency or 'GBP',
+                        sold_at,
+                        _clean_listing_text(body.buyer_reference),
+                        _clean_listing_text(body.external_order_reference),
+                        _clean_listing_text(body.notes),
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                raise v1_error(
+                    409,
+                    'listing_draft_sale_already_completed',
+                    'Listing draft, reservation, or inventory item already has a completed local sale.',
+                    {'draft_id': draft_id, 'reservation_id': reservation['reservation_id'], 'inventory_item_id': inventory_item_id},
+                )
+
+            reservation_update = conn.execute(
+                '''
+                UPDATE listing_draft_inventory_reservations
+                SET status = 'completed', updated_at = ?, released_at = ?, release_reason = ?
+                WHERE reservation_id = ? AND status = 'reserved'
+                ''',
+                (now, now, 'sale_completed', reservation['reservation_id']),
+            )
+            if reservation_update.rowcount == 0:
+                raise v1_error(409, 'listing_draft_not_reserved', 'Listing draft reservation is no longer active.', {'draft_id': draft_id})
+
+            conn.execute(
+                'UPDATE physical_items SET status = ?, updated_at = ? WHERE item_id = ? AND tenant_id = ?',
+                ('sold', now, inventory_item_id, tenant_id),
+            )
+            record_transaction(
+                conn,
+                inventory_item_id,
+                'sold',
+                tenant_id,
+                quantity=int(reservation['quantity'] or 1),
+                from_location=inventory_row['location_code'],
+                to_location=inventory_row['location_code'],
+                from_status=status_before,
+                to_status='sold',
+                price=body.sale_price,
+                currency=body.currency or 'GBP',
+                counterparty=_clean_listing_text(body.buyer_reference),
+                reference=_clean_listing_text(body.external_order_reference) or sale_id,
+                notes=_clean_listing_text(body.notes) or 'Local listing draft sale completed.',
+                created_by='api',
+            )
+
+            sale_row = conn.execute('SELECT * FROM listing_draft_sales WHERE sale_id = ?', (sale_id,)).fetchone()
+            updated_draft_row = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
+            updated_reservation_row = conn.execute(
+                'SELECT * FROM listing_draft_inventory_reservations WHERE reservation_id = ?',
+                (reservation['reservation_id'],),
+            ).fetchone()
+            updated_inventory_row = conn.execute(
+                'SELECT status FROM physical_items WHERE item_id = ? AND tenant_id = ?',
+                (inventory_item_id, tenant_id),
+            ).fetchone()
+            return {
+                'data': {
+                    'sale': _sale_row_to_response(sale_row),
+                    'draft': _listing_draft_row_to_response(updated_draft_row),
+                    'reservation': _reservation_row_to_response(updated_reservation_row),
+                    'inventory_item': {
+                        'item_id': inventory_item_id,
+                        'status_before': status_before,
+                        'status_after': updated_inventory_row['status'] if updated_inventory_row else 'sold',
+                    },
+                },
+                'metadata': _listing_draft_sale_completion_metadata(),
+            }
         finally:
             conn.close()
 

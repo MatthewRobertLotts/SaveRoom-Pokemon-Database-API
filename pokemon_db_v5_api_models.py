@@ -1106,6 +1106,17 @@ class ListingDraftUnreserveRequestV1(BaseModel):
     set_status: Literal['draft', 'ready'] | None = None
 
 
+class ListingDraftCompleteSaleRequestV1(BaseModel):
+    confirm_completion: bool = False
+    sale_price: float | None = Field(default=None, ge=0)
+    currency: str = 'GBP'
+    platform: Literal['whatnot', 'ebay', 'shopify', 'generic', 'offline'] = 'generic'
+    sold_at: str | None = None
+    buyer_reference: str | None = None
+    external_order_reference: str | None = None
+    notes: str | None = None
+
+
 class ListingDraftReservationMetadataV1(BaseModel):
     api_version: str = 'v1'
     contract: str = 'v12-listing-draft-reservation'
@@ -1115,6 +1126,17 @@ class ListingDraftReservationMetadataV1(BaseModel):
 class ListingDraftReservationResponseV1(BaseModel):
     data: dict[str, Any]
     metadata: ListingDraftReservationMetadataV1
+
+
+class ListingDraftSaleCompletionMetadataV1(BaseModel):
+    api_version: str = 'v1'
+    contract: str = 'v12-listing-draft-sale-completion'
+    generated_at: str | None = None
+
+
+class ListingDraftCompleteSaleResponseV1(BaseModel):
+    data: dict[str, Any]
+    metadata: ListingDraftSaleCompletionMetadataV1
 
 # ── v12 Chart-ready price history models ─────────────────────────────
 

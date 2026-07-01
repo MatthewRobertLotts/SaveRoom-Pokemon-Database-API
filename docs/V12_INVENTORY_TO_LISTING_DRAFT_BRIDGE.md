@@ -13,6 +13,7 @@ owned physical_items row
   -> deterministic listing assistant output
   -> local listing_drafts record
   -> optional local listing_draft_inventory_reservations row when marked ready/reserved
+  -> explicit complete-sale action when a local sale is confirmed
 ```
 
 This is local inventory-to-draft creation only.
@@ -173,6 +174,7 @@ POST /api/v1/listings/drafts/{draft_id}/ready
 POST /api/v1/listings/drafts/{draft_id}/reserve
 POST /api/v1/listings/drafts/{draft_id}/unreserve
 GET  /api/v1/listings/drafts/{draft_id}/reservation
+POST /api/v1/listings/drafts/{draft_id}/complete-sale
 ```
 
 Reservation table:
@@ -191,6 +193,7 @@ Local reservation rules:
 - `/unreserve` releases the active reservation and can optionally set the draft status back to `draft`.
 - Reservations are local workflow state only.
 - Reservations do not mark the physical item sold and do not decrement inventory automatically.
+- `/complete-sale` is the explicit confirmation path that consumes an active reservation, creates a local `listing_draft_sales` row, writes a `sold` inventory transaction/snapshot, and marks the physical item `sold`.
 
 ## Safety boundaries
 
@@ -200,8 +203,8 @@ The bridge does not:
 - call JustTCG, TotalTCG, TCGplayer, Cardmarket, eBay, Whatnot, Shopify, or LLM APIs;
 - call the listing assistant endpoint over HTTP;
 - publish listings;
-- mark physical inventory sold;
-- decrement stock automatically;
+- mark physical inventory sold except through explicit `POST /api/v1/listings/drafts/{draft_id}/complete-sale` confirmation;
+- decrement stock automatically outside explicit local sale completion;
 - spend API credits;
 - ask for or need API keys;
 - store API keys, request headers, account metadata, raw provider payloads, private provider paths, sanitized candidates, or raw filesystem paths.

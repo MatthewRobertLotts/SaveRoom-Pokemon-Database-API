@@ -30,6 +30,7 @@ It is not eBay, Whatnot, Shopify, JustTCG, TotalTCG, TCGplayer, Cardmarket, or L
 | `POST` | `/api/v1/listings/drafts/{draft_id}/reserve` | Reserve linked local inventory without changing draft status. |
 | `POST` | `/api/v1/listings/drafts/{draft_id}/unreserve` | Release the active local reservation. |
 | `GET` | `/api/v1/listings/drafts/{draft_id}/reservation` | Return the active reservation for a draft, or null. |
+| `POST` | `/api/v1/listings/drafts/{draft_id}/complete-sale` | Consumes an active local reservation during explicit sale completion. |
 
 ## Request models
 
@@ -150,6 +151,7 @@ Reservation statuses:
 ```text
 reserved
 released
+completed
 ```
 
 Workflow rules:
@@ -163,6 +165,7 @@ Workflow rules:
 - Duplicate reserve calls for the same draft return the existing reservation and do not create duplicate active rows.
 - `/unreserve` changes the active reservation to `released`, sets `released_at`, and stores optional `release_reason`.
 - `/unreserve` can set the draft back to `draft` when requested.
+- `/complete-sale` changes the active reservation to `completed`, sets `released_at`, and uses `release_reason = sale_completed`.
 - Archived drafts cannot be reserved.
 
 ## Safety boundaries
@@ -178,13 +181,15 @@ The reservation workflow does not:
 - decrement inventory automatically;
 - store API keys, headers, account metadata, raw provider payloads, private provider paths, sanitized candidates, or raw filesystem paths.
 
+The reservation workflow alone still never marks inventory sold. `physical_items.status = sold` is only written by the explicit sale completion endpoint after `confirm_completion=true` and an active reservation.
+
 ## Known limitations
 
 - Reservation is local workflow state only.
 - Reservation does not represent a marketplace listing, sale, order, or fulfilment event.
 - Reservation quantity is bounded by the local inventory-to-draft link quantity.
 - Physical item quantity is currently treated as one sellable item by the inventory bridge.
-- Sale completion, stock decrement, fulfilment, marketplace publication, and marketplace account integration remain later v12 work if needed.
+- Fulfilment, marketplace publication, and marketplace account integration remain later v12 work if needed. Explicit local sale completion is now represented by `listing_draft_sales`; it is still local-only and does not publish to marketplaces.
 
 ## Tests
 

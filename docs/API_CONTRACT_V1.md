@@ -44,6 +44,7 @@ Initial v1 resources:
 - `GET /api/v1/listings/drafts` — v12 recent local listing draft list.
 - `PATCH /api/v1/listings/drafts/{draft_id}` — v12 local listing draft editable-field update.
 - `POST /api/v1/listings/drafts/{draft_id}/archive` — v12 local listing draft archive transition.
+- `POST /api/v1/listings/drafts/{draft_id}/complete-sale` — v12 explicit local sale completion from a ready/reserved inventory-linked draft; creates a local sale record and is the only listing-draft path that marks physical inventory sold.
 - `GET /api/v1/prices/cards/{card_key}` — future local price summary endpoint.
 - `GET /api/v1/prices/history/cards/{card_key}` — future local price evidence history endpoint.
 - `GET /api/v1/prices/chart/cards/{card_key}` — v12 chart-ready price history (time-bucketed series, day/week/month, per-source percentiles, confidence labels).
