@@ -24,6 +24,15 @@ This is local SaveRoom workflow state only. It is not marketplace publishing, ma
 POST /api/v1/listings/drafts/{draft_id}/complete-sale
 ```
 
+Read-only local sale access added by the follow-up v12 milestone:
+
+```text
+GET /api/v1/sales/{sale_id}
+GET /api/v1/sales
+```
+
+Those read endpoints expose local `listing_draft_sales` rows only. They do not mutate sales, reservations, or inventory and do not call providers, marketplaces, or LLM APIs.
+
 The endpoint requires an existing local draft, an active local reservation, and explicit confirmation:
 
 ```json
@@ -212,6 +221,7 @@ Reservation-only workflows still do not mark inventory sold and do not decrement
 - It does not publish, revise, or end marketplace listings.
 - It treats the current physical inventory bridge as one sellable physical item.
 - It stores external references only as manually supplied local text.
+- Read/list access is local-only and documented separately in `docs/V12_LOCAL_SALES_READ_API.md`.
 
 ## Tests
 
@@ -219,6 +229,7 @@ Coverage lives in:
 
 ```text
 tests/test_v12_listing_draft_sale_completion_api.py
+tests/test_v12_local_sales_read_api.py
 ```
 
-The tests cover explicit confirmation, successful local completion, local sale record persistence, reservation quantity, inventory sold status, reservation completion, duplicate completion rejection, missing reservation/link/archived/unavailable cases, transaction/snapshot writing, no JustTCG/provider/marketplace/LLM calls, no network calls, and no sensitive/provider/filesystem leakage.
+The tests cover explicit confirmation, successful local completion, local sale record persistence, reservation quantity, inventory sold status, reservation completion, duplicate completion rejection, missing reservation/link/archived/unavailable cases, transaction/snapshot writing, read-only sale retrieval/listing, filters, pagination, no JustTCG/provider/marketplace/LLM calls, no network calls, and no sensitive/provider/filesystem leakage.

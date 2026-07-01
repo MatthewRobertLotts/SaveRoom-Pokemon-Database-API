@@ -1138,6 +1138,23 @@ class ListingDraftCompleteSaleResponseV1(BaseModel):
     data: dict[str, Any]
     metadata: ListingDraftSaleCompletionMetadataV1
 
+
+class LocalSaleMetadataV1(BaseModel):
+    api_version: str = 'v1'
+    contract: str = 'v12-local-sales-read'
+    generated_at: str | None = None
+
+
+class LocalSaleResponseV1(BaseModel):
+    data: dict[str, Any]
+    metadata: LocalSaleMetadataV1
+
+
+class LocalSaleListResponseV1(BaseModel):
+    data: list[dict[str, Any]]
+    pagination: PaginationMeta
+    metadata: LocalSaleMetadataV1
+
 # ── v12 Chart-ready price history models ─────────────────────────────
 
 class ChartReadyPointV1(BaseModel):

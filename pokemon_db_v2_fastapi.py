@@ -105,6 +105,8 @@ from pokemon_db_v5_api_models import (
     ListingDraftResponseV1,
     ListingDraftUpdateRequestV1,
     ListingDraftUnreserveRequestV1,
+    LocalSaleListResponseV1,
+    LocalSaleResponseV1,
     PhysicalItemResponse,
     PriceHistoryResponseV1,
     PriceSummaryResponseV1,
@@ -972,6 +974,14 @@ def _listing_draft_sale_completion_metadata() -> dict[str, Any]:
     return {
         'api_version': 'v1',
         'contract': 'v12-listing-draft-sale-completion',
+        'generated_at': now_utc(),
+    }
+
+
+def _local_sales_read_metadata() -> dict[str, Any]:
+    return {
+        'api_version': 'v1',
+        'contract': 'v12-local-sales-read',
         'generated_at': now_utc(),
     }
 
@@ -3821,6 +3831,81 @@ LIMIT ? OFFSET ?
             conn.commit()
             updated = conn.execute('SELECT * FROM listing_drafts WHERE draft_id = ?', (draft_id,)).fetchone()
             return {'data': _listing_draft_row_to_response(updated), 'metadata': _listing_draft_metadata()}
+        finally:
+            conn.close()
+
+
+    @app.get('/api/v1/sales', response_model=LocalSaleListResponseV1)
+    def v12_list_local_sales(
+        draft_id: str | None = Query(None, description='Filter by listing draft ID.'),
+        inventory_item_id: str | None = Query(None, description='Filter by physical inventory item ID.'),
+        card_key: str | None = Query(None, description='Filter by canonical card key.'),
+        platform: str | None = Query(None, description='Filter by local sale platform label.'),
+        status: str = Query('completed', description='Filter by local sale status. Defaults to completed.'),
+        date_from: str | None = Query(None, description='Inclusive sold_at lower bound.'),
+        date_to: str | None = Query(None, description='Inclusive sold_at upper bound.'),
+        limit: int = Query(50, ge=1, le=200),
+        offset: int = Query(0, ge=0),
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            _ensure_listing_draft_sales_table(conn)
+            where = ['status = ?']
+            params: list[Any] = [status]
+            if draft_id is not None:
+                where.append('draft_id = ?')
+                params.append(draft_id)
+            if inventory_item_id is not None:
+                where.append('inventory_item_id = ?')
+                params.append(inventory_item_id)
+            if card_key is not None:
+                where.append('card_key = ?')
+                params.append(card_key)
+            if platform is not None:
+                where.append('platform = ?')
+                params.append(platform)
+            if date_from is not None:
+                where.append('sold_at >= ?')
+                params.append(date_from)
+            if date_to is not None:
+                where.append('sold_at <= ?')
+                params.append(date_to)
+
+            where_sql = ' AND '.join(where)
+            total = int(conn.execute(f'SELECT COUNT(*) FROM listing_draft_sales WHERE {where_sql}', params).fetchone()[0])
+            rows = conn.execute(
+                f'SELECT * FROM listing_draft_sales WHERE {where_sql} ORDER BY sold_at DESC, created_at DESC, sale_id DESC LIMIT ? OFFSET ?',
+                [*params, limit, offset],
+            ).fetchall()
+            data = [_sale_row_to_response(row) for row in rows]
+            return {
+                'data': data,
+                'pagination': {
+                    'limit': limit,
+                    'offset': offset,
+                    'count': len(data),
+                    'total': total,
+                    'has_more': offset + len(data) < total,
+                },
+                'metadata': _local_sales_read_metadata(),
+            }
+        finally:
+            conn.close()
+
+
+    @app.get('/api/v1/sales/{sale_id}', response_model=LocalSaleResponseV1)
+    def v12_get_local_sale(
+        sale_id: str,
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            _ensure_listing_draft_sales_table(conn)
+            row = conn.execute('SELECT * FROM listing_draft_sales WHERE sale_id = ?', (sale_id,)).fetchone()
+            if row is None:
+                raise v1_error(404, 'local_sale_not_found', 'Local sale not found.', {'sale_id': sale_id})
+            return {'data': _sale_row_to_response(row), 'metadata': _local_sales_read_metadata()}
         finally:
             conn.close()
 
