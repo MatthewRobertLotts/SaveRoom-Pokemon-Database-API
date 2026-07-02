@@ -35,7 +35,7 @@ v12.0.0 includes canonical/app-ready card detail, batch app-ready detail, chart-
 | `POST /api/v1/listings/assist/cards/{card_key}` | Local deterministic generation | Stable for draft prefill | Generates local listing copy/data. Does not publish or call marketplaces/LLMs. |
 | `POST /api/v1/listings/drafts/cards/{card_key}` | Mutating local draft create | Stable for card-to-draft creation | Creates local draft from card key, but not tied to inventory workflow unless created via inventory bridge. |
 | `GET /api/v1/listings/drafts/{draft_id}` | Read-only | Stable for one draft | Returns saved draft shape. |
-| `GET /api/v1/listings/drafts` | Read-only | Partly stable | Has pagination and `include_archived`; missing important POS filters. |
+| `GET /api/v1/listings/drafts` | Read-only | Implemented in v12.1 milestone 4 | Preserves pagination and `include_archived`; adds `status`, `platform`, `card_key`, `inventory_item_id`, `has_reservation`, and `has_sale` filters. |
 | `PATCH /api/v1/listings/drafts/{draft_id}` | Mutating local draft edit | Stable for safe local edits | Allows safe editable fields only. It can set status directly, which frontend should use carefully. |
 | `POST /api/v1/listings/drafts/{draft_id}/archive` | Mutating local draft state | Stable | Local archive only, no deletion or marketplace action. |
 | `POST /api/v1/inventory/items/{item_id}/listing-draft` | Mutating local draft/link create | Stable and high-value | Main inventory-to-listing bridge. Creates local draft and local link row. |
@@ -113,7 +113,7 @@ Stable enough now:
 
 Awkward/inconsistent for app clients:
 
-- `GET /api/v1/listings/drafts` currently supports `include_archived`, `limit`, and `offset` only. It lacks filters a POS/frontend would expect: `status`, `platform`, `card_key`, `inventory_item_id`, `has_reservation`, and `has_sale`.
+- Implemented in v12.1 milestone 4: `GET /api/v1/listings/drafts` now supports `status`, `platform`, `card_key`, `inventory_item_id`, `has_reservation`, and `has_sale` filters while preserving `include_archived`, `limit`, `offset`, and the existing list response shape.
 - The individual draft read does not include its inventory link or sale state unless the client also calls `/reservation` and `/sales?draft_id=...`.
 - Sale completion leaves `listing_drafts.status` as `ready`; sale state lives in `listing_draft_sales.status=completed`. This is correct for backwards compatibility but awkward for UI badges unless a workflow summary endpoint composes it.
 - Response models for drafts are currently `dict[str, Any]` in Pydantic (`ListingDraftResponseV1.data`). That is flexible but less self-documenting for generated clients than named nested models.
@@ -204,7 +204,7 @@ Highest-value missing reads/filters:
 
 1. Implemented in v12.1 milestone 2: `GET /api/v1/inventory/items/{item_id}/workflow` — read-only composed workflow state for one physical item.
 2. Implemented in v12.1 milestone 3: `GET /api/v1/listings/drafts/{draft_id}/workflow` — read-only composed workflow state for one draft.
-3. `GET /api/v1/listings/drafts` filters: `status`, `platform`, `card_key`, `inventory_item_id`, `has_reservation`, `has_sale`.
+3. Implemented in v12.1 milestone 4: `GET /api/v1/listings/drafts` filters: `status`, `platform`, `card_key`, `inventory_item_id`, `has_reservation`, `has_sale`.
 4. `GET /api/v1/sales/summary` — read-only summary totals by date/platform/status/card/inventory item.
 5. Dedicated inventory history alias only if the existing `GET /api/v1/inventory/items/{item_id}/transactions` is not app-friendly enough.
 
@@ -277,13 +277,13 @@ GET /api/v1/listings/drafts/{draft_id}/workflow
 
 Implemented in v12.1 milestone 3 for draft-detail pages. It composes draft, inventory link, linked physical inventory item, active/latest reservation, completed local sale state, and frontend-friendly local action hints (`can_reserve`, `can_complete_sale`). It stays read-only and local-only.
 
-### 3. Improved listing draft list filters
+### 3. Implemented: improved listing draft list filters
 
 ```text
 GET /api/v1/listings/drafts?status=ready&platform=whatnot&card_key=en:sv03-223&inventory_item_id=...&has_reservation=true&has_sale=false
 ```
 
-Useful once workflow summaries exist. It should be implemented with bound SQL parameters and contract tests. This is low-risk but less immediately clarifying than a one-item workflow endpoint.
+Implemented in v12.1 milestone 4 for workflow-oriented list pages. Filters use bound SQL parameters and `EXISTS` / `NOT EXISTS` clauses over local link/reservation/sale tables. They do not expand list rows into workflow summaries and do not mutate local state.
 
 ### 4. Local sales summary endpoint
 
@@ -333,15 +333,15 @@ Do not include in this milestone:
 | Can it read completed sales? | Yes. `GET /api/v1/sales/{sale_id}` and `GET /api/v1/sales` with filters. |
 | Can it reconstruct workflow state for one inventory item? | Yes. `GET /api/v1/inventory/items/{item_id}/workflow` composes item, draft link, draft, reservation, sale, and summary state. |
 | Can it reconstruct workflow state for one listing draft? | Yes. `GET /api/v1/listings/drafts/{draft_id}/workflow` composes draft, inventory link, inventory item, reservation, sale, and summary state. |
-| What is still awkward for a frontend? | Weak draft list filters, mixed `item_id`/`inventory_item_id` naming, separate card-image vs physical-photo concepts, and list-level workflow filtering. |
-| What should be added next without marketplace integration? | Improved `GET /api/v1/listings/drafts` filters for workflow-oriented list pages. |
+| What is still awkward for a frontend? | Mixed `item_id`/`inventory_item_id` naming, separate card-image vs physical-photo concepts, and lack of aggregate sales/reporting summaries. |
+| What should be added next without marketplace integration? | Read-only `GET /api/v1/sales/summary` for local totals/counts by date/platform/status/card/inventory item. |
 
 ## Recommended next action
 
-After v12.1 milestone 3, the recommended next task is improved read-only listing draft list filters:
+After v12.1 milestone 4, the recommended next task is a read-only local sales summary endpoint:
 
 ```text
-GET /api/v1/listings/drafts?status=ready&platform=generic&card_key=en:sv03-223&inventory_item_id=...&has_reservation=true&has_sale=false
+GET /api/v1/sales/summary?date_from=...&date_to=...&platform=generic&status=completed
 ```
 
-Scope should remain read-only SQL filtering over existing local data, with bound parameters, fixture-backed tests, and explicit no-provider/no-marketplace/no-LLM guards.
+Scope should remain read-only aggregation over existing local `listing_draft_sales` rows, with bound parameters, fixture-backed tests, and explicit no-provider/no-marketplace/no-LLM guards. Do not add profit/margin, marketplace reconciliation, payment, refund, or fulfilment state without an approved milestone.

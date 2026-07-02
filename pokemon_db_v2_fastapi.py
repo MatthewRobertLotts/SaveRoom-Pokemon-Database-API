@@ -3376,6 +3376,12 @@ LIMIT ? OFFSET ?
     @app.get('/api/v1/listings/drafts', response_model=ListingDraftListResponseV1)
     def v12_list_listing_drafts(
         include_archived: bool = Query(True, description='Include archived local drafts.'),
+        status: str | None = Query(None, description='Filter by exact local draft status.'),
+        platform: str | None = Query(None, description='Filter by exact local draft platform label.'),
+        card_key: str | None = Query(None, description='Filter by exact listing draft card key.'),
+        inventory_item_id: str | None = Query(None, description='Filter drafts linked to a physical inventory item.'),
+        has_reservation: bool | None = Query(None, description='Filter by active local inventory reservation presence.'),
+        has_sale: bool | None = Query(None, description='Filter by completed local sale presence.'),
         limit: int = Query(50, ge=1, le=100),
         offset: int = Query(0, ge=0),
         _: dict[str, Any] = Depends(require_v1_api_key),
@@ -3383,11 +3389,65 @@ LIMIT ? OFFSET ?
         conn = connect(app.state.db)
         try:
             _ensure_listing_drafts_table(conn)
-            where = '' if include_archived else "WHERE status != 'archived'"
-            total = int(conn.execute(f'SELECT COUNT(*) FROM listing_drafts {where}').fetchone()[0])
+            cur = conn.cursor()
+            has_links_table = object_exists(cur, 'inventory_listing_draft_links')
+            has_reservations_table = object_exists(cur, 'listing_draft_inventory_reservations')
+            has_sales_table = object_exists(cur, 'listing_draft_sales')
+            clauses: list[str] = []
+            params: list[Any] = []
+
+            if not include_archived:
+                clauses.append("d.status != 'archived'")
+            if status is not None:
+                clauses.append('d.status = ?')
+                params.append(status)
+            if platform is not None:
+                clauses.append('d.platform = ?')
+                params.append(platform)
+            if card_key is not None:
+                clauses.append('d.card_key = ?')
+                params.append(card_key)
+            if inventory_item_id is not None:
+                if has_links_table:
+                    clauses.append(
+                        '''
+                        EXISTS (
+                            SELECT 1 FROM inventory_listing_draft_links l
+                            WHERE l.draft_id = d.draft_id AND l.inventory_item_id = ?
+                        )
+                        '''
+                    )
+                    params.append(inventory_item_id)
+                else:
+                    clauses.append('0 = 1')
+            if has_reservation is not None:
+                if has_reservations_table:
+                    reservation_clause = '''
+                        EXISTS (
+                            SELECT 1 FROM listing_draft_inventory_reservations r
+                            WHERE r.draft_id = d.draft_id AND r.status = 'reserved'
+                        )
+                    '''
+                    clauses.append(reservation_clause if has_reservation else f'NOT {reservation_clause}')
+                elif has_reservation:
+                    clauses.append('0 = 1')
+            if has_sale is not None:
+                if has_sales_table:
+                    sale_clause = '''
+                        EXISTS (
+                            SELECT 1 FROM listing_draft_sales s
+                            WHERE s.draft_id = d.draft_id AND s.status = 'completed'
+                        )
+                    '''
+                    clauses.append(sale_clause if has_sale else f'NOT {sale_clause}')
+                elif has_sale:
+                    clauses.append('0 = 1')
+
+            where = f"WHERE {' AND '.join(clauses)}" if clauses else ''
+            total = int(conn.execute(f'SELECT COUNT(*) FROM listing_drafts d {where}', params).fetchone()[0])
             rows = conn.execute(
-                f'SELECT * FROM listing_drafts {where} ORDER BY updated_at DESC, created_at DESC LIMIT ? OFFSET ?',
-                (limit, offset),
+                f'SELECT d.* FROM listing_drafts d {where} ORDER BY d.updated_at DESC, d.created_at DESC LIMIT ? OFFSET ?',
+                [*params, limit, offset],
             ).fetchall()
             data = [_listing_draft_row_to_response(row) for row in rows]
             return {

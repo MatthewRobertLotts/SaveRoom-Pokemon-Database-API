@@ -175,7 +175,7 @@ Marketplace platform strings in draft/sale rows remain local labels only. They a
 - It returns active reservation first; if no active reservation exists, it returns the latest reservation for context.
 - Sale summaries are local `listing_draft_sales` rows only. There is no marketplace reconciliation, fulfilment, refund, payment, or shipment state.
 - `can_reserve` and `can_complete_sale` are local UI hints, not substitute validation for mutating endpoints.
-- Listing draft list pages still need read-only filters such as `status`, `platform`, `card_key`, `inventory_item_id`, `has_reservation`, and `has_sale`.
+- Listing draft list filters were added in v12.1 milestone 4 for `status`, `platform`, `card_key`, `inventory_item_id`, `has_reservation`, and `has_sale`; this workflow endpoint remains the per-draft detail companion rather than changing list item shape.
 
 ## Tests
 
@@ -185,4 +185,4 @@ Coverage lives in:
 tests/test_v12_1_listing_draft_workflow_api.py
 ```
 
-The tests cover endpoint existence, missing draft 404, card-only draft state, inventory-linked draft state, ready/reserved/sold/archived/unavailable states, linked sold inventory without sale context, composed response sections, summary booleans, `can_reserve`, `can_complete_sale`, no inventory/draft/reservation/sale mutation, no provider/network/marketplace/LLM calls, and no sensitive/provider/filesystem leakage.
+The tests cover endpoint existence, missing draft 404, card-only draft state, inventory-linked draft state, ready/reserved/sold/archived/unavailable states, linked sold inventory without sale context, composed response sections, summary booleans, `can_reserve`, `can_complete_sale`, no inventory/draft/reservation/sale mutation, no provider/network/marketplace/LLM calls, and no sensitive/provider/filesystem leakage. Listing-level filters are covered separately in `tests/test_v12_1_listing_draft_list_filters_api.py`.

@@ -10,6 +10,7 @@ import json
 import os
 import sqlite3
 import uuid
+import datetime as dt
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -76,11 +77,13 @@ def _create_completed_sale(
     *,
     platform: str = "generic",
     sale_price: float = 12.5,
-    sold_at: str = "2026-07-02T10:00:00Z",
+    sold_at: str | None = None,
     external_order_reference: str = "plain-local-order-ref",
     buyer_reference: str = "plain-local-buyer-ref",
     notes: str = "confirmed local sale for read test",
 ) -> dict:
+    if sold_at is None:
+        sold_at = dt.datetime.now(dt.UTC).isoformat()
     item_id = _create_inventory_item(source_suffix=platform)
     draft_response = _post(
         f"/api/v1/inventory/items/{item_id}/listing-draft",

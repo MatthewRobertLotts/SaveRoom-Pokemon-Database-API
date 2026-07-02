@@ -43,7 +43,7 @@ Initial v1 resources:
 - `GET /api/v1/inventory/items/{item_id}/workflow` — v12.1 read-only POS/inventory workflow summary for one physical item.
 - `GET /api/v1/listings/drafts/{draft_id}/workflow` — v12.1 read-only listing draft workflow summary for one local draft.
 - `GET /api/v1/listings/drafts/{draft_id}` — v12 local listing draft retrieval.
-- `GET /api/v1/listings/drafts` — v12 recent local listing draft list.
+- `GET /api/v1/listings/drafts` — v12 recent local listing draft list; v12.1 adds read-only filters for status, platform, card_key, linked inventory item, active reservation presence, and completed sale presence.
 - `PATCH /api/v1/listings/drafts/{draft_id}` — v12 local listing draft editable-field update.
 - `POST /api/v1/listings/drafts/{draft_id}/archive` — v12 local listing draft archive transition.
 - `POST /api/v1/listings/drafts/{draft_id}/complete-sale` — v12 explicit local sale completion from a ready/reserved inventory-linked draft; creates a local sale record and is the only listing-draft path that marks physical inventory sold.
@@ -367,7 +367,7 @@ Endpoints:
 | GET | `/api/v1/inventory/items/{item_id}/workflow` | Return read-only local workflow state for a physical inventory item. |
 | GET | `/api/v1/listings/drafts/{draft_id}/workflow` | Return read-only local workflow state for one listing draft. |
 | GET | `/api/v1/listings/drafts/{draft_id}` | Return one saved local draft. |
-| GET | `/api/v1/listings/drafts` | List recent local drafts, including archived drafts by default. |
+| GET | `/api/v1/listings/drafts` | List recent local drafts, including archived drafts by default; optional v12.1 filters can narrow by status, platform, card, linked inventory item, active reservation, and completed sale state. |
 | PATCH | `/api/v1/listings/drafts/{draft_id}` | Update safe editable local draft fields. |
 | POST | `/api/v1/listings/drafts/{draft_id}/ready` | Mark a local draft ready and reserve linked inventory when available/requested. |
 | POST | `/api/v1/listings/drafts/{draft_id}/reserve` | Reserve the linked local inventory item without publishing or changing stock. |
@@ -396,6 +396,34 @@ Status lifecycle:
 - `draft` — newly created local draft.
 - `ready` — local draft has been reviewed/edited and is ready for future workflow use.
 - `archived` — local draft hidden from active-only views but retained.
+
+### v12.1 Listing Draft List Filters
+
+`GET /api/v1/listings/drafts` preserves the existing list response shape, pagination, and `include_archived` default, and adds optional read-only filters for POS/frontend list pages.
+
+Supported query parameters:
+
+| Parameter | Semantics |
+|---|---|
+| `status` | Exact match against `listing_drafts.status`. |
+| `platform` | Exact match against `listing_drafts.platform`; platform remains a local label, not marketplace integration proof. |
+| `card_key` | Exact match against `listing_drafts.card_key`. |
+| `inventory_item_id` | Includes drafts with an `inventory_listing_draft_links` row for the given physical item. |
+| `has_reservation=true` | Includes drafts with an active `listing_draft_inventory_reservations.status = reserved` row. |
+| `has_reservation=false` | Includes drafts without an active reserved reservation. |
+| `has_sale=true` | Includes drafts with a completed local `listing_draft_sales.status = completed` row. |
+| `has_sale=false` | Includes drafts without a completed local sale. |
+
+The boolean workflow filters use `EXISTS` / `NOT EXISTS` over local tables. Filters compose with each other and with `include_archived`, `limit`, and `offset`; pagination totals use the same filtered query. The endpoint does not expand list rows into workflow summaries — clients can call `GET /api/v1/listings/drafts/{draft_id}/workflow` for per-draft composed workflow detail.
+
+Safety contract:
+
+- read-only;
+- no inventory state changes;
+- no draft/reservation/sale creation or mutation;
+- no provider, marketplace, network, or LLM calls;
+- no marketplace publishing, order import, or payment capture;
+- no API keys, headers, account metadata, raw provider payloads, sanitized candidates, private provider paths, or raw filesystem paths in the response.
 
 ### v12 Listing Draft Inventory Reservations
 
