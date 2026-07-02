@@ -96,9 +96,9 @@ GET /api/v1/inventory/items/{item_id}/history
 
 This should be read-only and should not duplicate or mutate inventory transaction state.
 
-#### 3. POS-ready fixture pack
+#### 3. Implemented: POS-ready fixture pack
 
-Create stable sample API responses for frontend development and regression checks:
+Implemented in v12.2 milestone 2. Creates stable sample API responses for frontend development and regression checks:
 
 ```text
 card detail
@@ -106,9 +106,12 @@ inventory workflow
 draft workflow
 sales summary
 listing draft filters
+inventory item list filters
 ```
 
-Fixtures must be synthetic/local and must not include private provider payloads, account metadata, headers, API keys, raw provider JSON, or sanitized candidates unless already approved and documented as public test fixtures.
+Fixture files live under `docs/fixtures/v12_2_pos/` with a focused doc at `docs/V12_2_POS_READY_FIXTURE_PACK.md`.
+
+Fixtures are synthetic/local and must not include private provider payloads, account metadata, headers, API keys, raw provider JSON, or sanitized candidates unless already approved and documented as public test fixtures.
 
 #### 4. OpenAPI/client contract hardening
 
@@ -243,3 +246,4 @@ v13 work
 - Related: [API Contract v1](API_CONTRACT_V1.md)
 - Related: [V12.1 POS Inventory API Polish Plan](V12_1_POS_INVENTORY_API_POLISH_PLAN.md)
 - Related: [V12.2 Inventory Item List Filters](V12_2_INVENTORY_ITEM_LIST_FILTERS.md)
+- Related: [V12.2 POS-Ready Fixture Pack](V12_2_POS_READY_FIXTURE_PACK.md)

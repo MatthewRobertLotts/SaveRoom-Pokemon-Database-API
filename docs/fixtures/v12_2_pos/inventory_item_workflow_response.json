@@ -1,0 +1,120 @@
+{
+  "data": {
+    "active_reservation": {
+      "card_key": "en:sv03-223",
+      "created_at": "2026-07-02T00:00:00Z",
+      "draft_id": "ld_fixture_001",
+      "inventory_item_id": "item_fixture_001",
+      "quantity": 1,
+      "release_reason": null,
+      "released_at": null,
+      "reservation_id": "res_fixture_001",
+      "status": "reserved",
+      "updated_at": "2026-07-02T00:00:00Z"
+    },
+    "completed_sale": null,
+    "item": {
+      "acquired_currency": "GBP",
+      "acquired_date": "2026-07-02",
+      "acquired_price": 12.34,
+      "acquired_source": "fixture-local-intake",
+      "acquired_source_reference": "fixture-acquisition-001",
+      "certification_company": null,
+      "certification_grade": null,
+      "certification_number": null,
+      "certification_qualifier": null,
+      "created_at": "2026-07-02T00:00:00Z",
+      "created_by": "fixture-user",
+      "current_value": null,
+      "current_value_currency": "GBP",
+      "images": [],
+      "item_condition": "Near Mint",
+      "item_id": "item_fixture_001",
+      "last_transaction": {
+        "created_at": "2026-07-02T00:00:00Z",
+        "created_by": "fixture-user",
+        "currency": "GBP",
+        "from_location": null,
+        "from_status": null,
+        "notes": "Fixture acquisition transaction.",
+        "price": 12.34,
+        "quantity": 1,
+        "reference": "fixture-acquisition-001",
+        "to_location": "fixture-pos-case-a",
+        "to_status": "owned",
+        "transaction_id": 10001,
+        "transaction_type": "acquired"
+      },
+      "location_code": "fixture-pos-case-a",
+      "location_detail": "Fixture POS display case A",
+      "notes": "Fixture item for POS mockups.",
+      "revision": 1,
+      "sku_id": 1001,
+      "sku_identity": {
+        "collector_number": "223",
+        "condition_code": "NM",
+        "language_code": "en",
+        "name_english": "Charizard ex",
+        "set_code": "sv03",
+        "sku_id": 1001,
+        "sku_key": "fixture-en-sv03-223-nm"
+      },
+      "status": "owned",
+      "tenant_id": 1,
+      "updated_at": "2026-07-02T00:00:00Z"
+    },
+    "listing_draft": {
+      "archived_at": null,
+      "card_id": "sv03-223",
+      "card_key": "en:sv03-223",
+      "condition": "Near Mint",
+      "created_at": "2026-07-02T00:00:00Z",
+      "currency": "GBP",
+      "description_bullets": [
+        "Fixture-only local draft.",
+        "No marketplace publication.",
+        "No payment or fulfilment state."
+      ],
+      "draft_id": "ld_fixture_001",
+      "finish": "standard",
+      "images": [],
+      "language_code": "en",
+      "notes": "Fixture listing draft for frontend mockups.",
+      "platform": "generic",
+      "price": null,
+      "pricing_snapshot": null,
+      "quantity": 1,
+      "status": "ready",
+      "subtitle": "Fixture local POS listing draft",
+      "tags": [
+        "fixture",
+        "pos",
+        "pokemon"
+      ],
+      "title": "Charizard ex sv03 223 Near Mint",
+      "updated_at": "2026-07-02T00:00:00Z"
+    },
+    "listing_draft_link": {
+      "card_key": "en:sv03-223",
+      "created_at": "2026-07-02T00:00:00Z",
+      "draft_id": "ld_fixture_001",
+      "id": "link_fixture_001",
+      "inventory_item_id": "item_fixture_001",
+      "quantity": 1
+    },
+    "summary": {
+      "has_active_reservation": true,
+      "has_completed_sale": false,
+      "has_listing_draft": true,
+      "is_inventory_sold": false,
+      "workflow_state": "reserved"
+    }
+  },
+  "metadata": {
+    "api_version": "v1",
+    "contract": "v12.1-inventory-item-workflow",
+    "fixture": true,
+    "generated_at": "2026-07-02T00:00:00Z",
+    "sanitized": true
+  }
+}

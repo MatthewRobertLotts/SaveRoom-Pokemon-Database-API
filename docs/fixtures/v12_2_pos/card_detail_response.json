@@ -1,0 +1,76 @@
+{
+  "data": {
+    "card": {
+      "card_id": "sv03-223",
+      "card_key": "en:sv03-223",
+      "collector_number": "223",
+      "language_code": "en",
+      "name": "Charizard ex",
+      "name_english": "Charizard ex",
+      "rarity": "Special Illustration Rare"
+    },
+    "commercial": {
+      "default_sku_id": 1001,
+      "sellable_skus": [
+        {
+          "condition_code": "NM",
+          "language_code": "en",
+          "sku_id": 1001,
+          "sku_key": "fixture-en-sv03-223-nm",
+          "status": "active"
+        }
+      ]
+    },
+    "images": {
+      "display_image_url": "https://example.invalid/fixtures/cards/en-sv03-223.png",
+      "has_display_image": true,
+      "has_exact_image": true,
+      "signed_image_url": null,
+      "source_type": "fixture"
+    },
+    "pricing": {
+      "evidence_summary": {
+        "evidence_count": 0,
+        "recommended_raw_count": 0,
+        "source": "fixture-static"
+      },
+      "fallback_price": null,
+      "primary_price": null,
+      "source_breakdown": []
+    },
+    "provider_status": {
+      "cardmarket": {
+        "available": false,
+        "reason": "fixture-disabled"
+      },
+      "justtcg": {
+        "available": false,
+        "reason": "fixture-disabled"
+      },
+      "tcgplayer": {
+        "available": false,
+        "reason": "fixture-disabled"
+      },
+      "uk_ebay_sold": {
+        "available": false,
+        "reason": "fixture-disabled"
+      }
+    },
+    "set": {
+      "name": "Obsidian Flames",
+      "series": "Scarlet & Violet",
+      "set_code": "sv03",
+      "set_id": "sv03"
+    }
+  },
+  "metadata": {
+    "api_version": "v1",
+    "contract": "v12-app-ready-card-detail",
+    "fixture": true,
+    "generated_at": "2026-07-02T00:00:00Z",
+    "sanitized": true
+  },
+  "warnings": [
+    "fixture_static_no_live_pricing"
+  ]
+}
