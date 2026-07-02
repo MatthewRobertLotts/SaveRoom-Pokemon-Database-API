@@ -136,13 +136,13 @@ listing draft payload internals
 card detail commercial/pricing/provider internals
 ```
 
-Recommended next implementation milestone:
+Previous hardening follow-up candidate:
 
 ```text
 App-ready batch response typing + workflow summary booleans
 ```
 
-Avoid broad refactors unless tests prove generated-client value.
+Hold this unless a real release-candidate blocker appears. The current recommendation is to move v12.2 toward release-candidate audit rather than adding more backend hardening.
 
 #### 5. App-facing image/status polish
 
@@ -237,6 +237,39 @@ Recommended implementation constraints:
 - No provider, marketplace, network API, or LLM calls.
 - No inventory, draft, reservation, sale, or transaction row mutation.
 
+### App transition decision after v12.2
+
+`v12.2.0` should now be treated as the API/client readiness release. After it is tagged, the next major work can move to a separate app repository rather than continuing to harden backend surfaces just because more hardening is possible.
+
+Recorded direction:
+
+```text
+API repo: SaveRoom-Pokemon-Database-API = backend brain/platform
+Future app repo: SaveRoom-Scanner-App = Flutter/mobile/frontend product
+```
+
+The app should consume the API; it should not embed the API/database brain. Start the app with fixture mode and real API mode using the v12.2 fixtures/OpenAPI contract.
+
+Future version plan:
+
+```text
+v12.2.0 = API/client/app-readiness release
+v12.3.0 = app user/auth/entitlement foundation
+v12.4.0 = scanner/collector backend foundation
+v12.5.0 = paid beta readiness
+v13.0 = major commercial platform / external product ecosystem shift only with explicit Matthew approval
+```
+
+Normal mobile users should not receive raw API keys. Future app access should use app-user auth/session tokens, while developer API keys/scopes/quotas remain for external developers and business integrations.
+
+Billing provider integration should wait until the app has enough value to charge for. Do not start user accounts, subscription records, payment integration, app login, collection tables, the app repo, or v13 during v12.2.
+
+Recommended next step:
+
+```text
+v12.2 release-candidate audit, then tag v12.2.0 if clean
+```
+
 ### Not approved yet
 
 The following are not approved by this planning document:
@@ -265,3 +298,4 @@ v13 work
 - Related: [V12.2 POS-Ready Fixture Pack](V12_2_POS_READY_FIXTURE_PACK.md)
 - Related: [V12.2 OpenAPI Client Contract Hardening Audit](V12_2_OPENAPI_CLIENT_CONTRACT_HARDENING_AUDIT.md)
 - Related: [V12.2 OpenAPI Schema Hygiene and Sales Summary Typing](V12_2_OPENAPI_SCHEMA_HYGIENE_AND_SALES_SUMMARY_TYPING.md)
+- Related: [V12.2 App Transition Plan](V12_2_APP_TRANSITION_PLAN.md)

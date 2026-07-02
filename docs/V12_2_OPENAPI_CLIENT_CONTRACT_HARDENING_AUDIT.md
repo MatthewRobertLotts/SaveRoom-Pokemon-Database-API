@@ -230,6 +230,12 @@ OPERATION_ID_COUNT 102
 DUPLICATE_OPERATION_IDS []
 ```
 
+### App transition note after milestone 4
+
+After milestone 4, OpenAPI now builds cleanly, operation IDs are unique, and local sales summary aggregation is typed. This is enough for `v12.2.0` to move toward a release-candidate audit unless a real blocker is found.
+
+Do not keep adding backend hardening only because more typing is possible. The next strategic move after a clean `v12.2.0` is a separate scanner/collector app repository that starts with fixture mode and real API mode. Future backend work should be driven by app-discovered gaps.
+
 ### 15. Recommended first implementation milestone
 
 Recommended first implementation milestone:
@@ -254,5 +260,6 @@ Why this beats “type workflow summary booleans only” as first implementation
 - Related: [V12.2 Inventory Item List Filters](V12_2_INVENTORY_ITEM_LIST_FILTERS.md)
 - Related: [API Contract v1](API_CONTRACT_V1.md)
 - Related: [V12.2 OpenAPI Schema Hygiene and Sales Summary Typing](V12_2_OPENAPI_SCHEMA_HYGIENE_AND_SALES_SUMMARY_TYPING.md)
+- Related: [V12.2 App Transition Plan](V12_2_APP_TRANSITION_PLAN.md)
 - Related: [V12.1 Inventory Item Workflow Endpoint](V12_1_INVENTORY_ITEM_WORKFLOW_ENDPOINT.md)
 - Related: [V12.1 Listing Draft Workflow Endpoint](V12_1_LISTING_DRAFT_WORKFLOW_ENDPOINT.md)
