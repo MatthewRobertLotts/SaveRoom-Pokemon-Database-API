@@ -181,6 +181,35 @@ def _assert_no_forbidden_payload_markers(body: dict) -> None:
         assert marker not in text, marker
 
 
+def _assert_sales_summary_shape(body: dict) -> None:
+    assert set(body) == {"data", "metadata"}
+    assert body["metadata"]["contract"] == "v12.1-local-sales-summary"
+    data = body["data"]
+    assert set(data) == {"filters", "summary", "by_platform", "by_status", "by_currency"}
+    assert set(data["filters"]) == {
+        "date_from",
+        "date_to",
+        "platform",
+        "status",
+        "card_key",
+        "inventory_item_id",
+        "draft_id",
+    }
+    assert set(data["summary"]) == {
+        "sale_count",
+        "quantity_total",
+        "gross_sales_total",
+        "average_sale_price",
+        "min_sale_price",
+        "max_sale_price",
+        "currency",
+        "currency_mixed",
+    }
+    assert isinstance(data["by_platform"], list)
+    assert isinstance(data["by_status"], list)
+    assert isinstance(data["by_currency"], list)
+
+
 def test_sales_summary_endpoint_exists_and_empty_summary_is_safe():
     marker = f"summary_empty_{uuid.uuid4().hex}"
 
@@ -188,6 +217,7 @@ def test_sales_summary_endpoint_exists_and_empty_summary_is_safe():
 
     assert response.status_code == 200, response.text
     body = response.json()
+    _assert_sales_summary_shape(body)
     assert body["metadata"]["contract"] == "v12.1-local-sales-summary"
     data = body["data"]
     assert data["filters"] == {

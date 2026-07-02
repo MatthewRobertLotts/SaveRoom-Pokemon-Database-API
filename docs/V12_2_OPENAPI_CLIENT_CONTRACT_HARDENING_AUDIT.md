@@ -207,6 +207,29 @@ Do not call providers, marketplaces, network APIs, or LLM APIs.
 Do not create v13 work.
 ```
 
+
+### Milestone 4 implementation update
+
+The first implementation milestone from this audit has been completed in v12.2 milestone 4.
+
+Implemented:
+
+```text
+DeliveryPolicyUpdate is imported into pokemon_db_v2_fastapi.py so app.openapi() builds directly.
+The duplicate admin key deactivate operationId warning is resolved with explicit unique operation IDs.
+LocalSalesSummaryResponseV1.data is typed with compact aggregation models while preserving JSON keys.
+```
+
+Direct OpenAPI generation result after the implementation:
+
+```text
+OPENAPI_VERSION 3.1.0
+PATH_COUNT 89
+SCHEMA_COUNT 122
+OPERATION_ID_COUNT 102
+DUPLICATE_OPERATION_IDS []
+```
+
 ### 15. Recommended first implementation milestone
 
 Recommended first implementation milestone:
@@ -230,5 +253,6 @@ Why this beats “type workflow summary booleans only” as first implementation
 - Related: [V12.2 POS-Ready Fixture Pack](V12_2_POS_READY_FIXTURE_PACK.md)
 - Related: [V12.2 Inventory Item List Filters](V12_2_INVENTORY_ITEM_LIST_FILTERS.md)
 - Related: [API Contract v1](API_CONTRACT_V1.md)
+- Related: [V12.2 OpenAPI Schema Hygiene and Sales Summary Typing](V12_2_OPENAPI_SCHEMA_HYGIENE_AND_SALES_SUMMARY_TYPING.md)
 - Related: [V12.1 Inventory Item Workflow Endpoint](V12_1_INVENTORY_ITEM_WORKFLOW_ENDPOINT.md)
 - Related: [V12.1 Listing Draft Workflow Endpoint](V12_1_LISTING_DRAFT_WORKFLOW_ENDPOINT.md)

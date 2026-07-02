@@ -449,6 +449,8 @@ Response model:
 LocalSalesSummaryResponseV1
 ```
 
+As of v12.2 milestone 4, the local sales summary `data` object is typed in OpenAPI as `LocalSalesSummaryDataV1`, with typed `filters`, `summary`, `by_platform`, `by_status`, and `by_currency` sections. The JSON keys and aggregation semantics are unchanged.
+
 Response shape:
 
 ```json

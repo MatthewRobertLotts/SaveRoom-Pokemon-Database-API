@@ -17,9 +17,17 @@ GET /api/v1/sales/summary
 ## Response models
 
 ```text
+LocalSalesSummaryFiltersV1
+LocalSalesSummaryTotalsV1
+LocalSalesSummaryPlatformRowV1
+LocalSalesSummaryStatusRowV1
+LocalSalesSummaryCurrencyRowV1
+LocalSalesSummaryDataV1
 LocalSalesSummaryMetadataV1
 LocalSalesSummaryResponseV1
 ```
+
+As of v12.2 milestone 4, `LocalSalesSummaryResponseV1.data` is a typed `LocalSalesSummaryDataV1` model. The runtime JSON keys are unchanged.
 
 ## Filters
 
@@ -175,3 +183,9 @@ tests/test_v12_1_local_sales_summary_api.py
 ```
 
 The tests cover endpoint existence, empty summaries, aggregate counts/quantities/gross/average/min/max, currency behavior, platform/status/card/item/draft/date filters, grouped summaries, composed filters, bound-parameter safety, read-only/no domain mutation checks, no provider/network/marketplace/LLM calls, and no sensitive/provider/filesystem leakage.
+
+
+## Links
+
+- Related: [V12.2 OpenAPI Schema Hygiene and Sales Summary Typing](V12_2_OPENAPI_SCHEMA_HYGIENE_AND_SALES_SUMMARY_TYPING.md)
+- Related: [API Contract v1](API_CONTRACT_V1.md)

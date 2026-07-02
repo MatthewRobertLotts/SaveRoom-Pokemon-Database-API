@@ -113,23 +113,33 @@ Fixture files live under `docs/fixtures/v12_2_pos/` with a focused doc at `docs/
 
 Fixtures are synthetic/local and must not include private provider payloads, account metadata, headers, API keys, raw provider JSON, or sanitized candidates unless already approved and documented as public test fixtures.
 
-#### 4. Audited: OpenAPI/client contract hardening
+#### 4. Implemented: OpenAPI/client contract hardening
 
-Audit/planning milestone completed in v12.2 milestone 3. The audit found that generated-client hardening should start with OpenAPI schema hygiene before broad response-model refactors.
+Audit/planning milestone completed in v12.2 milestone 3. First implementation milestone completed in v12.2 milestone 4.
 
-Key findings:
+Implemented hygiene and typing:
 
 ```text
-app.openapi() currently fails without resolving DeliveryPolicyUpdate in the FastAPI module namespace
-one duplicate operationId warning appears for admin key deactivation
-AppReadyBatchResponseV1.data is Any even though AppReadyBatchDataV1 exists
-workflow data sections and local sales summary data are still dict[str, Any]
+app.openapi() now builds without the DeliveryPolicyUpdate monkeypatch
+admin key deactivate route registrations now have unique operation IDs
+LocalSalesSummaryResponseV1.data is typed with compact aggregation models
+local sales summary JSON keys and behaviour are preserved
 ```
 
-Recommended first implementation milestone:
+Still deferred:
 
 ```text
-OpenAPI schema generation hygiene + local sales summary typed aggregation blocks
+AppReadyBatchResponseV1.data typing
+workflow summary booleans
+workflow nested object typing
+listing draft payload internals
+card detail commercial/pricing/provider internals
+```
+
+Recommended next implementation milestone:
+
+```text
+App-ready batch response typing + workflow summary booleans
 ```
 
 Avoid broad refactors unless tests prove generated-client value.
@@ -254,3 +264,4 @@ v13 work
 - Related: [V12.2 Inventory Item List Filters](V12_2_INVENTORY_ITEM_LIST_FILTERS.md)
 - Related: [V12.2 POS-Ready Fixture Pack](V12_2_POS_READY_FIXTURE_PACK.md)
 - Related: [V12.2 OpenAPI Client Contract Hardening Audit](V12_2_OPENAPI_CLIENT_CONTRACT_HARDENING_AUDIT.md)
+- Related: [V12.2 OpenAPI Schema Hygiene and Sales Summary Typing](V12_2_OPENAPI_SCHEMA_HYGIENE_AND_SALES_SUMMARY_TYPING.md)

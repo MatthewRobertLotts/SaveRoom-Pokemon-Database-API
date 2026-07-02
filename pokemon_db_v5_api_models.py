@@ -1184,8 +1184,58 @@ class LocalSalesSummaryMetadataV1(BaseModel):
     generated_at: str | None = None
 
 
+class LocalSalesSummaryFiltersV1(BaseModel):
+    date_from: str | None = None
+    date_to: str | None = None
+    platform: str | None = None
+    status: str = 'completed'
+    card_key: str | None = None
+    inventory_item_id: str | None = None
+    draft_id: str | None = None
+
+
+class LocalSalesSummaryTotalsV1(BaseModel):
+    sale_count: int
+    quantity_total: int
+    gross_sales_total: float
+    average_sale_price: float | None = None
+    min_sale_price: float | None = None
+    max_sale_price: float | None = None
+    currency: str | None = None
+    currency_mixed: bool
+
+
+class LocalSalesSummaryPlatformRowV1(BaseModel):
+    platform: str | None = None
+    sale_count: int
+    quantity_total: int
+    gross_sales_total: float
+
+
+class LocalSalesSummaryStatusRowV1(BaseModel):
+    status: str | None = None
+    sale_count: int
+    quantity_total: int
+    gross_sales_total: float
+
+
+class LocalSalesSummaryCurrencyRowV1(BaseModel):
+    currency: str | None = None
+    sale_count: int
+    quantity_total: int
+    gross_sales_total: float
+
+
+class LocalSalesSummaryDataV1(BaseModel):
+    filters: LocalSalesSummaryFiltersV1
+    summary: LocalSalesSummaryTotalsV1
+    by_platform: list[LocalSalesSummaryPlatformRowV1]
+    by_status: list[LocalSalesSummaryStatusRowV1]
+    by_currency: list[LocalSalesSummaryCurrencyRowV1]
+
+
 class LocalSalesSummaryResponseV1(BaseModel):
-    data: dict[str, Any]
+    data: LocalSalesSummaryDataV1
     metadata: LocalSalesSummaryMetadataV1
 
 # ── v12 Chart-ready price history models ─────────────────────────────

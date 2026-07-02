@@ -130,6 +130,7 @@ from pokemon_db_v5_api_models import (
     UserResponse,
     DeliveryPolicyArticle,
     DeliveryPolicyCreate,
+    DeliveryPolicyUpdate,
     DeliveryPolicyListResponse,
     DeliveryPolicyArticleResponse,
     TakedownCaseCreate,
@@ -4576,7 +4577,7 @@ LIMIT ? OFFSET ?
                              'created_at': r['created_at'], 'last_used_at': r['last_used_at']})
         return {'data': keys_out}
 
-    @app.post('/api/v1/admin/keys/{key_id}/deactivate')
+    @app.post('/api/v1/admin/keys/{key_id}/deactivate', operation_id='v1_admin_deactivate_key_legacy')
     def v1_admin_deactivate_key(
         key_id: int,
         _: dict[str, Any] = Depends(require_admin_scope),
@@ -7957,7 +7958,7 @@ LIMIT ? OFFSET ?
         return {'data': {'id': cur.lastrowid, 'key': raw_key, 'label': body.label,
                          'scopes': body.scopes, 'is_active': True}}
     
-    @app.post('/api/v1/admin/keys/{key_id}/deactivate')
+    @app.post('/api/v1/admin/keys/{key_id}/deactivate', operation_id='v1_admin_deactivate_key_tenant')
     def v1_admin_deactivate_key(
         key_id: int,
         request: Request,
