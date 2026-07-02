@@ -46,7 +46,8 @@ v12.0.0 includes canonical/app-ready card detail, batch app-ready detail, chart-
 | `GET /api/v1/listings/drafts/{draft_id}/workflow` | Read-only | Implemented in v12.1 milestone 3 | Composes draft, inventory link, inventory item, reservation, sale, and summary booleans for draft-detail pages. |
 | `POST /api/v1/listings/drafts/{draft_id}/complete-sale` | Mutating sale/inventory state | Stable but high-risk action | Requires `confirm_completion=true` and active reservation. This is the only listing-draft path that marks inventory sold. |
 | `GET /api/v1/sales/{sale_id}` | Read-only | Stable | Reads local sale row only. |
-| `GET /api/v1/sales` | Read-only | Stable for sales list | Has useful filters; missing summary/aggregate endpoint. |
+| `GET /api/v1/sales` | Read-only | Stable for sales list | Has useful filters. |
+| `GET /api/v1/sales/summary` | Read-only | Implemented in v12.1 milestone 5 | Aggregates local `listing_draft_sales` counts, quantities, gross sale totals, price bounds, and platform/status/currency groups. |
 
 Related existing inventory routes are also app-relevant:
 
@@ -157,12 +158,11 @@ Stable enough now:
 
 - `GET /api/v1/sales/{sale_id}` reads one local sale.
 - `GET /api/v1/sales` lists local sales with filters: `draft_id`, `inventory_item_id`, `card_key`, `platform`, `status`, `date_from`, `date_to`, `limit`, and `offset`.
-- Sales reads are read-only and do not mutate inventory, reservations, or sale rows.
-- The default list status is `completed`, which is sensible for POS history.
+- Implemented in v12.1 milestone 5: `GET /api/v1/sales/summary` returns local aggregate counts, quantities, gross sales totals, average/min/max sale price, currency metadata, and by-platform/by-status/by-currency groups.
+- Sales reads and summaries are read-only and do not mutate inventory, reservations, or sale rows.
+- The default list/summary status is `completed`, which is sensible for POS history.
 
 Awkward/inconsistent for app clients:
-
-- There is no sales summary/aggregate endpoint yet for totals, counts, date buckets, or platform breakdown.
 - The list endpoint is useful for one draft/item lookup, but clients must know to call `GET /api/v1/sales?draft_id=...` or `?inventory_item_id=...` to reconstruct workflow state.
 - There is no explicit profit/margin layer; acquired price exists on inventory item and sale price exists on sale, but calculations are not exposed.
 
@@ -205,7 +205,7 @@ Highest-value missing reads/filters:
 1. Implemented in v12.1 milestone 2: `GET /api/v1/inventory/items/{item_id}/workflow` — read-only composed workflow state for one physical item.
 2. Implemented in v12.1 milestone 3: `GET /api/v1/listings/drafts/{draft_id}/workflow` — read-only composed workflow state for one draft.
 3. Implemented in v12.1 milestone 4: `GET /api/v1/listings/drafts` filters: `status`, `platform`, `card_key`, `inventory_item_id`, `has_reservation`, `has_sale`.
-4. `GET /api/v1/sales/summary` — read-only summary totals by date/platform/status/card/inventory item.
+4. Implemented in v12.1 milestone 5: `GET /api/v1/sales/summary` — read-only summary totals by date/platform/status/card/inventory item.
 5. Dedicated inventory history alias only if the existing `GET /api/v1/inventory/items/{item_id}/transactions` is not app-friendly enough.
 
 Current assessment: the inventory history candidate is less urgent because transaction history already exists. The workflow-summary gap is more urgent because no single endpoint currently answers "what is happening with this item/draft in the listing workflow?".
@@ -285,13 +285,13 @@ GET /api/v1/listings/drafts?status=ready&platform=whatnot&card_key=en:sv03-223&i
 
 Implemented in v12.1 milestone 4 for workflow-oriented list pages. Filters use bound SQL parameters and `EXISTS` / `NOT EXISTS` clauses over local link/reservation/sale tables. They do not expand list rows into workflow summaries and do not mutate local state.
 
-### 4. Local sales summary endpoint
+### 4. Implemented: local sales summary endpoint
 
 ```text
 GET /api/v1/sales/summary
 ```
 
-Useful for reporting, but less foundational for POS workflow navigation. It should stay read-only and avoid profit/marketplace reconciliation until explicitly approved.
+Implemented in v12.1 milestone 5 for local SaveRoom workflow reporting. It summarizes explicit local sale-completion rows only, grouped by platform/status/currency, and stays read-only. It does not add profit, tax, marketplace reconciliation, payment, refund, fulfilment, shipping, or market-pricing evidence.
 
 ### 5. Inventory item history endpoint
 
@@ -330,18 +330,18 @@ Do not include in this milestone:
 | Can it mark a draft ready? | Yes. `POST /api/v1/listings/drafts/{draft_id}/ready`. |
 | Can it reserve inventory? | Yes for inventory-linked drafts through `/ready` or `/reserve`. |
 | Can it complete a local sale? | Yes, through explicit `POST /api/v1/listings/drafts/{draft_id}/complete-sale` with confirmation and active reservation. |
-| Can it read completed sales? | Yes. `GET /api/v1/sales/{sale_id}` and `GET /api/v1/sales` with filters. |
+| Can it read completed sales? | Yes. `GET /api/v1/sales/{sale_id}`, `GET /api/v1/sales` with filters, and `GET /api/v1/sales/summary` for local aggregate summaries. |
 | Can it reconstruct workflow state for one inventory item? | Yes. `GET /api/v1/inventory/items/{item_id}/workflow` composes item, draft link, draft, reservation, sale, and summary state. |
 | Can it reconstruct workflow state for one listing draft? | Yes. `GET /api/v1/listings/drafts/{draft_id}/workflow` composes draft, inventory link, inventory item, reservation, sale, and summary state. |
-| What is still awkward for a frontend? | Mixed `item_id`/`inventory_item_id` naming, separate card-image vs physical-photo concepts, and lack of aggregate sales/reporting summaries. |
-| What should be added next without marketplace integration? | Read-only `GET /api/v1/sales/summary` for local totals/counts by date/platform/status/card/inventory item. |
+| What is still awkward for a frontend? | Mixed `item_id`/`inventory_item_id` naming, separate card-image vs physical-photo concepts, and no dedicated inventory history alias beyond the existing transactions endpoint. |
+| What should be added next without marketplace integration? | Consider a read-only inventory history alias only if `GET /api/v1/inventory/items/{item_id}/transactions` is not app-friendly enough. |
 
 ## Recommended next action
 
-After v12.1 milestone 4, the recommended next task is a read-only local sales summary endpoint:
+After v12.1 milestone 5, the recommended next task is either release-candidate hardening for v12.1 or a read-only inventory history alias only if the existing transaction endpoint is not app-friendly enough:
 
 ```text
-GET /api/v1/sales/summary?date_from=...&date_to=...&platform=generic&status=completed
+GET /api/v1/inventory/items/{item_id}/history
 ```
 
-Scope should remain read-only aggregation over existing local `listing_draft_sales` rows, with bound parameters, fixture-backed tests, and explicit no-provider/no-marketplace/no-LLM guards. Do not add profit/margin, marketplace reconciliation, payment, refund, or fulfilment state without an approved milestone.
+Scope should remain read-only over existing inventory transaction/detail data, with bound parameters, fixture-backed tests, and explicit no-provider/no-marketplace/no-LLM guards. Do not add marketplace reconciliation, payment, refund, fulfilment, shipping, tax/accounting, or v13 work without approval.

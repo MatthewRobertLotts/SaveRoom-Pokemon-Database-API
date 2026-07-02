@@ -49,6 +49,7 @@ Initial v1 resources:
 - `POST /api/v1/listings/drafts/{draft_id}/complete-sale` — v12 explicit local sale completion from a ready/reserved inventory-linked draft; creates a local sale record and is the only listing-draft path that marks physical inventory sold.
 - `GET /api/v1/sales/{sale_id}` — v12 read-only local sale retrieval for rows created by explicit sale completion.
 - `GET /api/v1/sales` — v12 read-only local sales list with draft, inventory item, card, platform, status, sold_at date range, limit, and offset filters.
+- `GET /api/v1/sales/summary` — v12.1 read-only local sales aggregate summary for rows created by explicit local sale completion.
 - `GET /api/v1/prices/cards/{card_key}` — future local price summary endpoint.
 - `GET /api/v1/prices/history/cards/{card_key}` — future local price evidence history endpoint.
 - `GET /api/v1/prices/chart/cards/{card_key}` — v12 chart-ready price history (time-bucketed series, day/week/month, per-source percentiles, confidence labels).
@@ -423,6 +424,85 @@ Safety contract:
 - no draft/reservation/sale creation or mutation;
 - no provider, marketplace, network, or LLM calls;
 - no marketplace publishing, order import, or payment capture;
+- no API keys, headers, account metadata, raw provider payloads, sanitized candidates, private provider paths, or raw filesystem paths in the response.
+
+### v12.1 Local Sales Summary
+
+`GET /api/v1/sales/summary` summarizes local `listing_draft_sales` rows created by explicit local sale completion. It is local SaveRoom workflow reporting only; it is not marketplace reconciliation, payment reporting, fulfilment/shipping, tax/accounting advice, live pricing evidence, or market sales evidence.
+
+Supported filters:
+
+| Parameter | Semantics |
+|---|---|
+| `date_from` | Inclusive `sold_at >= ?` lower bound. |
+| `date_to` | Inclusive `sold_at <= ?` upper bound. |
+| `platform` | Exact match against local sale `platform`. |
+| `status` | Exact match against local sale `status`; defaults to `completed`. |
+| `card_key` | Exact match against local sale `card_key`. |
+| `inventory_item_id` | Exact match against local sale `inventory_item_id`. |
+| `draft_id` | Exact match against local sale `draft_id`. |
+
+Response model:
+
+```text
+LocalSalesSummaryResponseV1
+```
+
+Response shape:
+
+```json
+{
+  "data": {
+    "filters": {
+      "date_from": null,
+      "date_to": null,
+      "platform": null,
+      "status": "completed",
+      "card_key": null,
+      "inventory_item_id": null,
+      "draft_id": null
+    },
+    "summary": {
+      "sale_count": 0,
+      "quantity_total": 0,
+      "gross_sales_total": 0.0,
+      "average_sale_price": null,
+      "min_sale_price": null,
+      "max_sale_price": null,
+      "currency": "GBP",
+      "currency_mixed": false
+    },
+    "by_platform": [],
+    "by_status": [],
+    "by_currency": []
+  },
+  "metadata": {
+    "api_version": "v1",
+    "contract": "v12.1-local-sales-summary",
+    "generated_at": "..."
+  }
+}
+```
+
+Aggregation definitions:
+
+- `sale_count`: count of matching local sale rows.
+- `quantity_total`: sum of `quantity`.
+- `gross_sales_total`: sum of `COALESCE(sale_price, 0) * quantity`; null `sale_price` contributes `0` to gross.
+- `average_sale_price`: average of non-null `sale_price` values.
+- `min_sale_price` / `max_sale_price`: bounds over non-null `sale_price` values.
+- `currency`: `GBP` for no rows, the single matching currency when all non-null matching rows share one currency, otherwise `null`.
+- `currency_mixed`: true when more than one non-null currency appears.
+
+Grouped summaries are returned for `by_platform`, `by_status`, and `by_currency`; each row includes the group value, `sale_count`, `quantity_total`, and `gross_sales_total`.
+
+Safety contract:
+
+- read-only;
+- no inventory state changes;
+- no draft/reservation/sale creation or mutation;
+- no provider, marketplace, network, or LLM calls;
+- no marketplace publishing, order import, payment capture, refund processing, fulfilment, or shipping state;
 - no API keys, headers, account metadata, raw provider payloads, sanitized candidates, private provider paths, or raw filesystem paths in the response.
 
 ### v12 Listing Draft Inventory Reservations

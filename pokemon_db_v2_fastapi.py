@@ -109,6 +109,7 @@ from pokemon_db_v5_api_models import (
     ListingDraftUnreserveRequestV1,
     LocalSaleListResponseV1,
     LocalSaleResponseV1,
+    LocalSalesSummaryResponseV1,
     PhysicalItemResponse,
     PriceHistoryResponseV1,
     PriceSummaryResponseV1,
@@ -984,6 +985,14 @@ def _local_sales_read_metadata() -> dict[str, Any]:
     return {
         'api_version': 'v1',
         'contract': 'v12-local-sales-read',
+        'generated_at': now_utc(),
+    }
+
+
+def _local_sales_summary_metadata() -> dict[str, Any]:
+    return {
+        'api_version': 'v1',
+        'contract': 'v12.1-local-sales-summary',
         'generated_at': now_utc(),
     }
 
@@ -4128,6 +4137,131 @@ LIMIT ? OFFSET ?
                     'has_more': offset + len(data) < total,
                 },
                 'metadata': _local_sales_read_metadata(),
+            }
+        finally:
+            conn.close()
+
+
+    @app.get('/api/v1/sales/summary', response_model=LocalSalesSummaryResponseV1)
+    def v12_1_local_sales_summary(
+        date_from: str | None = Query(None, description='Inclusive sold_at lower bound.'),
+        date_to: str | None = Query(None, description='Inclusive sold_at upper bound.'),
+        platform: str | None = Query(None, description='Filter by local sale platform label.'),
+        status: str = Query('completed', description='Filter by local sale status. Defaults to completed.'),
+        card_key: str | None = Query(None, description='Filter by canonical card key.'),
+        inventory_item_id: str | None = Query(None, description='Filter by physical inventory item ID.'),
+        draft_id: str | None = Query(None, description='Filter by listing draft ID.'),
+        _: dict[str, Any] = Depends(require_v1_api_key),
+    ) -> dict[str, Any]:
+        conn = connect(app.state.db)
+        try:
+            _ensure_listing_draft_sales_table(conn)
+            where = ['status = ?']
+            params: list[Any] = [status]
+            if date_from is not None:
+                where.append('sold_at >= ?')
+                params.append(date_from)
+            if date_to is not None:
+                where.append('sold_at <= ?')
+                params.append(date_to)
+            if platform is not None:
+                where.append('platform = ?')
+                params.append(platform)
+            if card_key is not None:
+                where.append('card_key = ?')
+                params.append(card_key)
+            if inventory_item_id is not None:
+                where.append('inventory_item_id = ?')
+                params.append(inventory_item_id)
+            if draft_id is not None:
+                where.append('draft_id = ?')
+                params.append(draft_id)
+
+            where_sql = ' AND '.join(where)
+            summary_row = conn.execute(
+                f'''
+                SELECT
+                    COUNT(*) AS sale_count,
+                    COALESCE(SUM(quantity), 0) AS quantity_total,
+                    COALESCE(SUM(COALESCE(sale_price, 0) * quantity), 0) AS gross_sales_total,
+                    AVG(sale_price) AS average_sale_price,
+                    MIN(sale_price) AS min_sale_price,
+                    MAX(sale_price) AS max_sale_price
+                FROM listing_draft_sales
+                WHERE {where_sql}
+                ''',
+                params,
+            ).fetchone()
+            currency_rows = conn.execute(
+                f'''
+                SELECT DISTINCT currency
+                FROM listing_draft_sales
+                WHERE {where_sql} AND currency IS NOT NULL
+                ORDER BY currency
+                ''',
+                params,
+            ).fetchall()
+            currencies = [row['currency'] for row in currency_rows]
+            sale_count = int(summary_row['sale_count'] or 0)
+            currency_mixed = len(currencies) > 1
+            if sale_count == 0:
+                summary_currency = 'GBP'
+            elif len(currencies) == 1:
+                summary_currency = currencies[0]
+            else:
+                summary_currency = None
+
+            def grouped_summary(group_col: str, output_key: str) -> list[dict[str, Any]]:
+                rows = conn.execute(
+                    f'''
+                    SELECT
+                        {group_col} AS group_value,
+                        COUNT(*) AS sale_count,
+                        COALESCE(SUM(quantity), 0) AS quantity_total,
+                        COALESCE(SUM(COALESCE(sale_price, 0) * quantity), 0) AS gross_sales_total
+                    FROM listing_draft_sales
+                    WHERE {where_sql}
+                    GROUP BY {group_col}
+                    ORDER BY group_value
+                    ''',
+                    params,
+                ).fetchall()
+                return [
+                    {
+                        output_key: row['group_value'],
+                        'sale_count': int(row['sale_count'] or 0),
+                        'quantity_total': int(row['quantity_total'] or 0),
+                        'gross_sales_total': float(row['gross_sales_total'] or 0),
+                    }
+                    for row in rows
+                ]
+
+            return {
+                'data': {
+                    'filters': {
+                        'date_from': date_from,
+                        'date_to': date_to,
+                        'platform': platform,
+                        'status': status,
+                        'card_key': card_key,
+                        'inventory_item_id': inventory_item_id,
+                        'draft_id': draft_id,
+                    },
+                    'summary': {
+                        'sale_count': sale_count,
+                        'quantity_total': int(summary_row['quantity_total'] or 0),
+                        'gross_sales_total': float(summary_row['gross_sales_total'] or 0),
+                        'average_sale_price': float(summary_row['average_sale_price']) if summary_row['average_sale_price'] is not None else None,
+                        'min_sale_price': float(summary_row['min_sale_price']) if summary_row['min_sale_price'] is not None else None,
+                        'max_sale_price': float(summary_row['max_sale_price']) if summary_row['max_sale_price'] is not None else None,
+                        'currency': summary_currency,
+                        'currency_mixed': currency_mixed,
+                    },
+                    'by_platform': grouped_summary('platform', 'platform'),
+                    'by_status': grouped_summary('status', 'status'),
+                    'by_currency': grouped_summary('currency', 'currency'),
+                },
+                'metadata': _local_sales_summary_metadata(),
             }
         finally:
             conn.close()
