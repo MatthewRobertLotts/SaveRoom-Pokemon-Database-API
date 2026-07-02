@@ -54,9 +54,9 @@ No v13 work.
 
 ### v12.2 candidate menu
 
-#### 1. Inventory item list filters and POS search polish
+#### 1. Implemented: inventory item list filters and POS search polish
 
-Candidate filters:
+Implemented in v12.2 milestone 1. Candidate filters:
 
 ```text
 sku_id
@@ -71,7 +71,9 @@ has_completed_sale
 
 Goal: make it easier for POS/frontends to find the right physical inventory item before opening item workflow detail pages.
 
-This should remain read-only and should build on existing local tables:
+Implementation status: `GET /api/v1/inventory/items` now preserves existing `limit`, `offset`, `q`, `status`, `location_code`, response shape, and pagination while adding optional filters for `sku_id`, `card_key`, `condition`, `has_listing_draft`, `has_active_reservation`, and `has_completed_sale`.
+
+This remains read-only and builds on existing local tables:
 
 ```text
 physical_items
@@ -175,7 +177,7 @@ no normal feature batch
 
 ### Recommended first v12.2 implementation milestone
 
-Recommended first milestone:
+Implemented first milestone:
 
 ```text
 Inventory item list filters and POS search polish
@@ -184,16 +186,16 @@ Inventory item list filters and POS search polish
 Reason:
 
 ```text
-v12.1 added workflow detail endpoints. The next frontend/POS gap is finding the right inventory items efficiently before opening their workflow pages.
+v12.1 added workflow detail endpoints. The next frontend/POS gap was finding the right inventory items efficiently before opening their workflow pages.
 ```
 
-Candidate endpoint to inspect first:
+Endpoint updated:
 
 ```text
 GET /api/v1/inventory/items
 ```
 
-Potential filter set:
+Implemented filter set:
 
 ```text
 sku_id
@@ -208,13 +210,13 @@ has_completed_sale
 
 Recommended implementation constraints:
 
-- Preserve existing pagination and response shape.
-- Add only optional filters.
-- Use bound SQL parameters.
-- Prefer `EXISTS` / `NOT EXISTS` for workflow-state filters.
-- Keep the endpoint read-only.
-- Do not call providers, marketplaces, network APIs, or LLMs.
-- Do not mutate inventory, drafts, reservations, sales, or transaction rows.
+- Existing pagination and response shape preserved.
+- Only optional filters added.
+- User-supplied values use bound SQL parameters.
+- Workflow-state filters use `EXISTS` / `NOT EXISTS`.
+- Endpoint remains read-only.
+- No provider, marketplace, network API, or LLM calls.
+- No inventory, draft, reservation, sale, or transaction row mutation.
 
 ### Not approved yet
 
@@ -240,3 +242,4 @@ v13 work
 - Related: [V12.1 Release Candidate Audit](V12_1_RELEASE_CANDIDATE_AUDIT.md)
 - Related: [API Contract v1](API_CONTRACT_V1.md)
 - Related: [V12.1 POS Inventory API Polish Plan](V12_1_POS_INVENTORY_API_POLISH_PLAN.md)
+- Related: [V12.2 Inventory Item List Filters](V12_2_INVENTORY_ITEM_LIST_FILTERS.md)

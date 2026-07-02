@@ -41,6 +41,7 @@ Initial v1 resources:
 - `POST /api/v1/listings/drafts/cards/{card_key}` — v12 local listing draft creation from deterministic listing assistant output.
 - `POST /api/v1/inventory/items/{item_id}/listing-draft` — v12 local inventory-to-listing draft bridge for owned physical inventory items.
 - `GET /api/v1/inventory/items/{item_id}/workflow` — v12.1 read-only POS/inventory workflow summary for one physical item.
+- `GET /api/v1/inventory/items` — v12.2 keeps the existing read-only inventory list shape and adds POS/search filters for SKU, card key, condition, status, location, draft link presence, active reservation presence, and completed sale presence.
 - `GET /api/v1/listings/drafts/{draft_id}/workflow` — v12.1 read-only listing draft workflow summary for one local draft.
 - `GET /api/v1/listings/drafts/{draft_id}` — v12 local listing draft retrieval.
 - `GET /api/v1/listings/drafts` — v12 recent local listing draft list; v12.1 adds read-only filters for status, platform, card_key, linked inventory item, active reservation presence, and completed sale presence.
@@ -1629,7 +1630,27 @@ By default, auth is optional. When `POKEMON_DB_REQUIRE_API_KEY=true`, keys must 
 #### `GET /api/v1/inventory/items`
 List physical items with pagination and filtering.
 
-**Query parameters:** `limit` (max 200), `offset`, `status`, `location_code`, `q` (search)
+**Query parameters:** `limit` (max 200), `offset`, `q` (search), `sku_id`, `card_key`, `condition`, `status`, `location_code`, `has_listing_draft`, `has_active_reservation`, `has_completed_sale`.
+
+Existing v9/v12 behavior is preserved: default `limit=50`, `offset=0`, project-standard pagination, and `q` search over notes/acquired source/item ID. v12.2 adds only optional filters.
+
+Filter semantics:
+
+| Parameter | Semantics |
+|---|---|
+| `sku_id` | Exact match against `physical_items.sku_id`. |
+| `card_key` | Exact match against `canonical_printings.canonical_card_key` through `physical_items.sku_id -> sellable_skus.printing_id -> canonical_printings.printing_id`. |
+| `condition` | Exact match against `physical_items.item_condition`. |
+| `status` | Exact match against `physical_items.status`. |
+| `location_code` | Exact match against `physical_items.location_code`. |
+| `has_listing_draft=true` | Includes items with at least one `inventory_listing_draft_links` row. |
+| `has_listing_draft=false` | Includes items without an `inventory_listing_draft_links` row. |
+| `has_active_reservation=true` | Includes items with an active `listing_draft_inventory_reservations.status = reserved` row. |
+| `has_active_reservation=false` | Includes items without an active reserved reservation. |
+| `has_completed_sale=true` | Includes items with a completed local `listing_draft_sales.status = completed` row. |
+| `has_completed_sale=false` | Includes items without a completed local sale. |
+
+Workflow filters use fixed `EXISTS` / `NOT EXISTS` clauses and user-supplied values use bound SQL parameters. The endpoint remains read-only: it does not mutate inventory, transactions, listing drafts, draft links, reservations, or sales; it does not call providers, marketplaces, network APIs, or LLMs. For per-item composed state, clients should call `GET /api/v1/inventory/items/{item_id}/workflow` after finding the item.
 
 **Response:**
 ```json

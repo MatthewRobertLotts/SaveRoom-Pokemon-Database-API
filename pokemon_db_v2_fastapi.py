@@ -6989,8 +6989,14 @@ LIMIT ? OFFSET ?
     def v1_list_inventory(
         limit: int = Query(50, ge=1, le=200),
         offset: int = Query(0, ge=0),
+        sku_id: int | None = Query(None, description='Filter by exact sellable SKU ID.'),
+        card_key: str | None = Query(None, description='Filter by canonical card key resolved through sellable_skus -> canonical_printings.'),
+        condition: str | None = Query(None, description='Filter by exact physical item condition.'),
         status: str | None = Query(None, description='Filter by status (owned, consigned, sold, etc.)'),
         location_code: str | None = Query(None, description='Filter by location code'),
+        has_listing_draft: bool | None = Query(None, description='Filter by local inventory-to-listing draft link presence.'),
+        has_active_reservation: bool | None = Query(None, description='Filter by active reserved local listing-draft reservation presence.'),
+        has_completed_sale: bool | None = Query(None, description='Filter by completed local sale presence.'),
         q: str | None = Query(None, description='Search in notes and acquired source'),
         _: dict[str, Any] = Depends(require_scope('read:inventory', 'cards:read')),
     ) -> dict[str, Any]:
@@ -6998,27 +7004,78 @@ LIMIT ? OFFSET ?
         ensure_inventory_support(conn)
         cur = conn.cursor()
         tenant_id = get_tenant_from_key(_)
+        has_links_table = object_exists(cur, 'inventory_listing_draft_links')
+        has_reservations_table = object_exists(cur, 'listing_draft_inventory_reservations')
+        has_sales_table = object_exists(cur, 'listing_draft_sales')
 
-        where = ['tenant_id = ?']
+        where = ['p.tenant_id = ?']
         params: list[Any] = [tenant_id]
+        if sku_id is not None:
+            where.append('p.sku_id = ?')
+            params.append(sku_id)
+        if card_key is not None:
+            where.append('''
+                EXISTS (
+                    SELECT 1 FROM sellable_skus ss
+                    JOIN canonical_printings cp ON cp.printing_id = ss.printing_id
+                    WHERE ss.sku_id = p.sku_id AND cp.canonical_card_key = ?
+                )
+            ''')
+            params.append(card_key)
+        if condition:
+            where.append('p.item_condition = ?')
+            params.append(condition)
         if status:
-            where.append('status = ?')
+            where.append('p.status = ?')
             params.append(status)
         if location_code:
-            where.append('location_code = ?')
+            where.append('p.location_code = ?')
             params.append(location_code)
+        if has_listing_draft is not None:
+            if has_links_table:
+                link_clause = '''
+                    EXISTS (
+                        SELECT 1 FROM inventory_listing_draft_links l
+                        WHERE l.inventory_item_id = p.item_id
+                    )
+                '''
+                where.append(link_clause if has_listing_draft else f'NOT {link_clause}')
+            elif has_listing_draft:
+                where.append('1 = 0')
+        if has_active_reservation is not None:
+            if has_reservations_table:
+                reservation_clause = '''
+                    EXISTS (
+                        SELECT 1 FROM listing_draft_inventory_reservations r
+                        WHERE r.inventory_item_id = p.item_id AND r.status = 'reserved'
+                    )
+                '''
+                where.append(reservation_clause if has_active_reservation else f'NOT {reservation_clause}')
+            elif has_active_reservation:
+                where.append('1 = 0')
+        if has_completed_sale is not None:
+            if has_sales_table:
+                sale_clause = '''
+                    EXISTS (
+                        SELECT 1 FROM listing_draft_sales s
+                        WHERE s.inventory_item_id = p.item_id AND s.status = 'completed'
+                    )
+                '''
+                where.append(sale_clause if has_completed_sale else f'NOT {sale_clause}')
+            elif has_completed_sale:
+                where.append('1 = 0')
         if q:
-            where.append('(notes LIKE ? OR acquired_source LIKE ? OR item_id LIKE ?)')
+            where.append('(p.notes LIKE ? OR p.acquired_source LIKE ? OR p.item_id LIKE ?)')
             q_param = f'%{q}%'
             params.extend([q_param, q_param, q_param])
 
         where_sql = ' AND '.join(where)
         total = int(cur.execute(
-            f'SELECT COUNT(*) FROM physical_items WHERE {where_sql}', params
+            f'SELECT COUNT(*) FROM physical_items p WHERE {where_sql}', params
         ).fetchone()[0])
 
         rows_result = cur.execute(
-            f'SELECT * FROM physical_items WHERE {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?',
+            f'SELECT p.* FROM physical_items p WHERE {where_sql} ORDER BY p.created_at DESC LIMIT ? OFFSET ?',
             params + [limit, offset]
         ).fetchall()
 
