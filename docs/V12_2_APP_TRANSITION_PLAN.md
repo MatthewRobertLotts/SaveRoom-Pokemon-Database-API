@@ -263,9 +263,23 @@ v12.2.0
 
 Then move serious visual/frontend work into the separate scanner app project.
 
+### 11. Release-candidate audit status
+
+The v12.2 release-candidate audit confirmed:
+
+```text
+v12.2.0 release candidate — feature complete pending merge/tag
+Full suite: 937 passed, 1 skipped, 19 warnings
+OpenAPI direct build: clean
+Operation IDs: unique
+```
+
+Feature work is frozen unless a release blocker is found. Recommended next action is Matthew approval for merge/tag as `v12.2.0`.
+
 ## Links
 
 - Related: [V12.2 Planning](V12_2_PLANNING.md)
 - Related: [V12.2 OpenAPI Schema Hygiene and Sales Summary Typing](V12_2_OPENAPI_SCHEMA_HYGIENE_AND_SALES_SUMMARY_TYPING.md)
 - Related: [V12.2 POS-Ready Fixture Pack](V12_2_POS_READY_FIXTURE_PACK.md)
 - Related: [API Contract v1](API_CONTRACT_V1.md)
+- Related: [V12.2 Release Candidate Audit](V12_2_RELEASE_CANDIDATE_AUDIT.md)

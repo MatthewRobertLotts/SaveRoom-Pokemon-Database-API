@@ -237,6 +237,28 @@ Recommended implementation constraints:
 - No provider, marketplace, network API, or LLM calls.
 - No inventory, draft, reservation, sale, or transaction row mutation.
 
+### v12.2 release-candidate audit
+
+Release-candidate audit completed for `v12.2-next` at source HEAD `69c9c61`.
+
+Status:
+
+```text
+v12.2.0 release candidate — feature complete pending merge/tag
+```
+
+Audit result:
+
+```text
+OpenAPI builds directly
+DUPLICATE_OPERATION_IDS []
+Targeted v12.2/v12.1 contract tests passed
+Full suite: 937 passed, 1 skipped, 19 warnings
+Brain/vault state updated
+```
+
+Recommended next action is Matthew approval for merge/tag as `v12.2.0`. Do not start new v12.2 feature work unless a release blocker is found.
+
 ### App transition decision after v12.2
 
 `v12.2.0` should now be treated as the API/client readiness release. After it is tagged, the next major work can move to a separate app repository rather than continuing to harden backend surfaces just because more hardening is possible.
@@ -299,3 +321,4 @@ v13 work
 - Related: [V12.2 OpenAPI Client Contract Hardening Audit](V12_2_OPENAPI_CLIENT_CONTRACT_HARDENING_AUDIT.md)
 - Related: [V12.2 OpenAPI Schema Hygiene and Sales Summary Typing](V12_2_OPENAPI_SCHEMA_HYGIENE_AND_SALES_SUMMARY_TYPING.md)
 - Related: [V12.2 App Transition Plan](V12_2_APP_TRANSITION_PLAN.md)
+- Related: [V12.2 Release Candidate Audit](V12_2_RELEASE_CANDIDATE_AUDIT.md)
