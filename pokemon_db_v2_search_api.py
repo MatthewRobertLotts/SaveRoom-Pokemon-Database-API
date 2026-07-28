@@ -392,12 +392,12 @@ def build_match_query_with_synonyms(query: str, conn: sqlite3.Connection) -> str
 
                 if etype == 'set':
                     # Set names are in resolved_set_name, core_set_name, resolved_series_name
-                    cols = '{resolved_set_name core_set_name resolved_series_name}'
+                    cols = '{resolved_set_name core_set_name resolved_series_name raw_set_id resolved_set_id core_set_id search_blob}'
                 elif etype == 'pokemon':
-                    cols = '{card_name name_english}'
+                    cols = '{card_name name_english local_id search_blob}'
                 else:
                     # ebay_term and others: search all text columns
-                    cols = '{card_name name_english resolved_set_name core_set_name}'
+                    cols = '{card_name name_english resolved_set_name core_set_name local_id raw_set_id resolved_set_id core_set_id search_blob}'
                 type_parts.append(f'{cols} : {or_group}')
 
             if len(type_parts) == 1:
@@ -406,7 +406,7 @@ def build_match_query_with_synonyms(query: str, conn: sqlite3.Connection) -> str
                 parts.append('(' + ' OR '.join(type_parts) + ')')
         else:
             # No synonyms: search all text columns
-            cols = '{card_name name_english resolved_set_name core_set_name}'
+            cols = '{card_name name_english resolved_set_name core_set_name local_id raw_set_id resolved_set_id core_set_id search_blob}'
             parts.append(f'{cols} : {escape_fts_token(token)}')
 
     return ' AND '.join(parts)
