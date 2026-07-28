@@ -574,7 +574,8 @@ def search_cards(
 
     where = []
     params: list[Any] = []
-    match = build_match_query(query)
+    # ponytail: legacy /search powers the browser UI; keep it aligned with v1 search.
+    match = build_match_query_with_synonyms(query, conn)
     rank_expr = '0.0 AS rank'
     with_sql = ''
     join = ''
