@@ -68,7 +68,13 @@ Open: `http://localhost:8765/docs`
 
 ## Repo notes
 
-Runtime/API entrypoints stay at the repository root. Historical import, scraper, recovery, and one-off data build scripts live in `scripts/legacy/` so the public root stays readable without deleting project history.
+Runtime/API entrypoints stay at the repository root. Historical import, scraper, recovery, old research notes, and one-off data build scripts live under `scripts/legacy/` and `docs/archive/` so the public root stays readable without deleting project history.
+
+## CI note
+
+Public CI runs a portable subset that does not require private SQLite/image assets. Full local verification runs with the dataset mounted.
+
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the staged refactor path for the legacy FastAPI entrypoint.
 
 ## Related
 
