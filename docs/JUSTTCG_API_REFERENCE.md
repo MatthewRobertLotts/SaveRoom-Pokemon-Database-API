@@ -8,7 +8,7 @@ https://api.justtcg.com/v1
 ```
 
 ## Authentication
-- Header: `x-api-key: tcg_your_api_key_here`
+- Header: `x-api-key: YOUR_API_KEY`
 - SDK: `JUSTTCG_API_KEY` environment variable
 
 ## Key Endpoints
