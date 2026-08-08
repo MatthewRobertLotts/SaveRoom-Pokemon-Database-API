@@ -68,7 +68,7 @@ Open: `http://localhost:8765/docs`
 
 ## Repo notes
 
-This repository includes current app/API code plus historical data-recovery and import scripts used to build the dataset. The public root is intentionally conservative until the data pipeline is split from the runtime API.
+Runtime/API entrypoints stay at the repository root. Historical import, scraper, recovery, and one-off data build scripts live in `scripts/legacy/` so the public root stays readable without deleting project history.
 
 ## Related
 
